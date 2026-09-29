@@ -1,0 +1,12 @@
+{
+  "healthchecks": {
+    "web": [
+      {
+        "type": "path",
+        "name": "web health check",
+        "description": "Checks /healthz",
+        "path": "/healthz"
+      }
+    ]
+  }
+}

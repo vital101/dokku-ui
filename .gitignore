@@ -1,0 +1,7 @@
+/target
+/static/css/app.css
+/dev-data/
+.env
+.env.local
+.bacon-locations
+.DS_Store

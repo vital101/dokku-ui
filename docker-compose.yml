@@ -1,0 +1,28 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: sh -c "tailwindcss -i assets/input.css -o static/css/app.css --minify && (test -t 0 && bacon run || cargo run)"
+    environment:
+      PORT: 8080
+      RUST_LOG: dokku_ui=debug,actix_web=info
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    init: true
+
+  css:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    command: tailwindcss -i assets/input.css -o static/css/app.css --watch
+    volumes:
+      - .:/app
+
+volumes:
+  cargo-cache:
+  target-cache:

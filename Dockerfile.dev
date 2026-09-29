@@ -1,0 +1,18 @@
+FROM rust:1-bookworm
+
+ARG TAILWIND_VERSION=v4.3.3
+
+RUN rustup component add llvm-tools-preview rustfmt clippy \
+    && cargo install cargo-llvm-cov --locked \
+    && cargo install bacon --locked
+
+RUN set -eux; \
+    case "$(uname -m)" in \
+      aarch64) TAILWIND_ARCH=linux-arm64 ;; \
+      x86_64) TAILWIND_ARCH=linux-x64 ;; \
+      *) echo "unsupported architecture"; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /usr/local/bin/tailwindcss "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-${TAILWIND_ARCH}"; \
+    chmod +x /usr/local/bin/tailwindcss
+
+WORKDIR /app
