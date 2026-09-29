@@ -1,6 +1,6 @@
 use crate::domain::AppName;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DokkuCommand {
     AppsList,
     AppsCreate { app: AppName },

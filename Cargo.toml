@@ -11,6 +11,7 @@ actix-files = "0.6"
 actix-web = "4"
 askama = "0.16"
 async-trait = "0.1"
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
 serde_json = "1"
 sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 thiserror = "2"

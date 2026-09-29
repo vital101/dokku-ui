@@ -1,5 +1,7 @@
 use std::io;
+use std::sync::Arc;
 
+pub mod dokku;
 pub mod domain;
 pub mod error;
 pub mod settings;
@@ -11,9 +13,11 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
     let pool = storage::connect(&settings.database_url)
         .await
         .map_err(io::Error::other)?;
+    let dokku: Arc<dyn dokku::DokkuClient> = Arc::new(dokku::RusshClient::new(&settings));
     let state = web::AppState {
         db: pool,
         settings: settings.clone(),
+        dokku,
     };
     actix_web::HttpServer::new(move || web::build_app(state.clone()))
         .bind(("0.0.0.0", settings.port))?

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use dokku_ui::settings::Settings;
@@ -12,7 +13,10 @@ async fn run_serves_healthz_on_configured_port() {
     let port = listener.local_addr().expect("local addr").port();
     drop(listener);
 
-    let settings = Settings { port, database_url };
+    let mut vars = HashMap::new();
+    vars.insert("PORT".to_owned(), port.to_string());
+    vars.insert("DATABASE_URL".to_owned(), database_url);
+    let settings = Settings::from_map(&vars).expect("settings");
     let server = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

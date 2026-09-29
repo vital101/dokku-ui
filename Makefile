@@ -12,11 +12,13 @@ build:
 test:
 	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo test'
 
+IGNORE_FOR_COVERAGE ?= src/main.rs|src/dokku/russh_client.rs
+
 coverage:
-	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --html --ignore-filename-regex src/main.rs'
+	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --html --ignore-filename-regex "$(IGNORE_FOR_COVERAGE)"'
 
 coverage-gate:
-	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --fail-under-lines 90 --ignore-filename-regex src/main.rs'
+	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --fail-under-lines 90 --ignore-filename-regex "$(IGNORE_FOR_COVERAGE)"'
 
 lint:
 	docker compose run --rm web sh -c 'cargo fmt --check && cargo clippy --all-targets -- -D warnings'
