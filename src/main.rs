@@ -11,10 +11,6 @@ async fn main() -> io::Result<()> {
         )
         .init();
 
-    let port = std::env::var("PORT")
-        .ok()
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(8080);
-
-    dokku_ui::run(port).await
+    let settings = dokku_ui::settings::Settings::from_env().map_err(io::Error::other)?;
+    dokku_ui::run(settings).await
 }

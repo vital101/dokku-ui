@@ -6,6 +6,7 @@ services:
     command: sh -c "tailwindcss -i assets/input.css -o static/css/app.css --minify && (test -t 0 && bacon run || cargo run)"
     environment:
       PORT: 8080
+      DATABASE_URL: sqlite://dev-data/dokku-ui.db?mode=rwc
       RUST_LOG: dokku_ui=debug,actix_web=info
     ports:
       - "8080:8080"

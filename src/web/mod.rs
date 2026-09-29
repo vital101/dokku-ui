@@ -1,6 +1,12 @@
+mod state;
+
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, Error, HttpResponse, web};
+
+use crate::error::AppError;
+
+pub use state::AppState;
 
 const HEALTHZ_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -21,7 +27,9 @@ const HEALTHZ_HTML: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
-pub fn build_app() -> App<
+pub fn build_app(
+    state: AppState,
+) -> App<
     impl ServiceFactory<
         ServiceRequest,
         Config = (),
@@ -31,12 +39,27 @@ pub fn build_app() -> App<
     >,
 > {
     App::new()
+        .app_data(web::Data::new(state))
         .service(actix_files::Files::new("/static", "./static"))
         .route("/healthz", web::get().to(healthz))
+        .default_service(web::to(not_found))
 }
 
-async fn healthz() -> HttpResponse {
-    HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(HEALTHZ_HTML)
+async fn healthz(state: web::Data<AppState>) -> HttpResponse {
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(_) => HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(HEALTHZ_HTML),
+        Err(err) => {
+            tracing::error!(error = %err, "healthz database check failed");
+            HttpResponse::ServiceUnavailable().finish()
+        }
+    }
+}
+
+async fn not_found() -> Result<HttpResponse, AppError> {
+    Err(AppError::NotFound)
 }

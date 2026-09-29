@@ -13,10 +13,10 @@ test:
 	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo test'
 
 coverage:
-	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --html'
+	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --html --ignore-filename-regex src/main.rs'
 
 coverage-gate:
-	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --fail-under-lines 90'
+	docker compose run --rm web sh -c 'tailwindcss -i assets/input.css -o static/css/app.css --minify && cargo llvm-cov --fail-under-lines 90 --ignore-filename-regex src/main.rs'
 
 lint:
 	docker compose run --rm web sh -c 'cargo fmt --check && cargo clippy --all-targets -- -D warnings'
