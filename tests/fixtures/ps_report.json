@@ -1,0 +1,11 @@
+{
+  "deployed": "true",
+  "processes": "2",
+  "ps-can-scale": "true",
+  "running": "true",
+  "restore": "true",
+  "status-web": "running (CID: abc123def4567)",
+  "status-worker": "exited (CID: fedcba7654321)",
+  "ps-computed-procfile-path": "Procfile",
+  "ps-computed-restart-policy": "on-failure:10"
+}

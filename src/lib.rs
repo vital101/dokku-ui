@@ -1,5 +1,6 @@
 use std::io;
 
+pub mod domain;
 pub mod error;
 pub mod settings;
 pub mod storage;

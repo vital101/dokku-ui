@@ -1,0 +1,280 @@
+use crate::domain::types::{EnvVar, LogLines, ProcessState, ProcessStatus, PsReport};
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseError {
+    #[error("invalid JSON: {0}")]
+    InvalidJson(String),
+    #[error("missing key `{0}`")]
+    MissingKey(&'static str),
+    #[error("invalid boolean value for `{0}`: `{1}`")]
+    InvalidBool(&'static str, String),
+}
+
+pub fn parse_apps_list(json: &str) -> Result<Vec<String>, ParseError> {
+    serde_json::from_str::<Vec<String>>(json)
+        .map_err(|err| ParseError::InvalidJson(err.to_string()))
+}
+
+pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(json).map_err(|err| ParseError::InvalidJson(err.to_string()))?;
+
+    let str_of = |key: &'static str| -> Result<String, ParseError> {
+        map.get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .ok_or(ParseError::MissingKey(key))
+    };
+    let bool_of = |key: &'static str| -> Result<bool, ParseError> {
+        let raw = str_of(key)?;
+        match raw.as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(ParseError::InvalidBool(key, other.to_owned())),
+        }
+    };
+
+    let processes = map
+        .iter()
+        .filter(|(key, _)| key.starts_with("status-"))
+        .map(|(key, value)| ProcessStatus {
+            process_type: key.trim_start_matches("status-").to_owned(),
+            state: ProcessState::parse(value.as_str().unwrap_or("missing")),
+        })
+        .collect();
+
+    Ok(PsReport {
+        deployed: bool_of("deployed")?,
+        running: bool_of("running")?,
+        process_count: str_of("processes")?.parse().unwrap_or(-1),
+        processes,
+    })
+}
+
+pub fn parse_config_show(output: &str) -> Vec<EnvVar> {
+    output
+        .lines()
+        .filter(|line| !line.is_empty() && !line.trim_start().starts_with("====="))
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some(EnvVar {
+                key: key.to_owned(),
+                value: value.trim().to_owned(),
+            })
+        })
+        .collect()
+}
+
+pub fn parse_logs(output: &str) -> LogLines {
+    LogLines::new(output.lines().map(strip_ansi).collect())
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for esc in chars.by_ref() {
+                    if ('@'..='~').contains(&esc) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const APPS_LIST: &str = include_str!("../../tests/fixtures/apps_list.json");
+    const PS_REPORT: &str = include_str!("../../tests/fixtures/ps_report.json");
+    const PS_REPORT_NOT_DEPLOYED: &str =
+        include_str!("../../tests/fixtures/ps_report_not_deployed.json");
+    const PS_REPORT_MISSING: &str = include_str!("../../tests/fixtures/ps_report_missing.json");
+    const CONFIG_SHOW: &str = include_str!("../../tests/fixtures/config_show.txt");
+    const CONFIG_SHOW_EMPTY: &str = include_str!("../../tests/fixtures/config_show_empty.txt");
+    const LOGS: &str = include_str!("../../tests/fixtures/logs.txt");
+
+    #[test]
+    fn parses_apps_list_fixture() {
+        assert_eq!(
+            parse_apps_list(APPS_LIST).expect("parse"),
+            vec!["myapp", "my-app", "api.internal", "1st-app"]
+        );
+    }
+
+    #[test]
+    fn parses_empty_apps_list() {
+        assert_eq!(parse_apps_list("[]").expect("parse"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn rejects_invalid_apps_list_json() {
+        assert!(matches!(
+            parse_apps_list("not json"),
+            Err(ParseError::InvalidJson(_))
+        ));
+    }
+
+    #[test]
+    fn parses_ps_report_fixture() {
+        let report = parse_ps_report(PS_REPORT).expect("parse");
+        assert!(report.deployed);
+        assert!(report.running);
+        assert_eq!(report.process_count, 2);
+        assert_eq!(
+            report.processes,
+            vec![
+                ProcessStatus {
+                    process_type: "web".into(),
+                    state: ProcessState::Running,
+                },
+                ProcessStatus {
+                    process_type: "worker".into(),
+                    state: ProcessState::Stopped,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_not_deployed_report() {
+        let report = parse_ps_report(PS_REPORT_NOT_DEPLOYED).expect("parse");
+        assert!(!report.deployed);
+        assert!(!report.running);
+        assert_eq!(report.process_count, 0);
+        assert!(report.processes.is_empty());
+    }
+
+    #[test]
+    fn parses_missing_process_report() {
+        let report = parse_ps_report(PS_REPORT_MISSING).expect("parse");
+        assert!(!report.deployed);
+        assert!(!report.running);
+        assert_eq!(report.process_count, -1);
+        assert_eq!(
+            report.processes,
+            vec![ProcessStatus {
+                process_type: "web".into(),
+                state: ProcessState::Missing,
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_report_without_deployed_key() {
+        assert!(matches!(
+            parse_ps_report(r#"{"running": "true", "processes": "1"}"#),
+            Err(ParseError::MissingKey("deployed"))
+        ));
+    }
+
+    #[test]
+    fn rejects_report_with_invalid_running_bool() {
+        assert!(matches!(
+            parse_ps_report(r#"{"deployed": "true", "running": "maybe", "processes": "1"}"#),
+            Err(ParseError::InvalidBool("running", _))
+        ));
+    }
+
+    #[test]
+    fn rejects_report_that_is_not_json() {
+        assert!(matches!(
+            parse_ps_report("nope"),
+            Err(ParseError::InvalidJson(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_report_with_non_string_processes() {
+        assert!(matches!(
+            parse_ps_report(r#"{"deployed": "true", "running": "false", "processes": 2}"#),
+            Err(ParseError::MissingKey("processes"))
+        ));
+    }
+
+    #[test]
+    fn parses_config_show_fixture() {
+        assert_eq!(
+            parse_config_show(CONFIG_SHOW),
+            vec![
+                EnvVar {
+                    key: "DATABASE_URL".into(),
+                    value: "postgres://user:pass@host/db".into(),
+                },
+                EnvVar {
+                    key: "DOKKU_PROXY_PORT".into(),
+                    value: "80".into(),
+                },
+                EnvVar {
+                    key: "SECRET_KEY".into(),
+                    value: "s3cr3t".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_empty_config_show() {
+        assert_eq!(parse_config_show(CONFIG_SHOW_EMPTY), Vec::<EnvVar>::new());
+    }
+
+    #[test]
+    fn config_show_skips_header_and_blank_lines() {
+        let output = "\n=====> app env vars\n\n\nKEY1:  value1\n";
+        assert_eq!(
+            parse_config_show(output),
+            vec![EnvVar {
+                key: "KEY1".into(),
+                value: "value1".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn config_show_skips_lines_without_colon() {
+        let output = "=====> app env vars\nnot a kv line\nKEY1: v1\n";
+        assert_eq!(parse_config_show(output).len(), 1);
+    }
+
+    #[test]
+    fn config_show_trims_values_with_colons() {
+        let output = "=====> app env vars\nURL: http://example.com:8080/path\n";
+        assert_eq!(
+            parse_config_show(output),
+            vec![EnvVar {
+                key: "URL".into(),
+                value: "http://example.com:8080/path".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_logs_and_strips_ansi() {
+        let lines = parse_logs(LOGS);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines.as_slice()[1],
+            "2026-09-29T10:00:01.000000000Z app[web.1]: GET /healthz 200"
+        );
+        assert_eq!(
+            lines.as_slice()[2],
+            "2026-09-29T10:00:02.000000000Z app[web.1]: ERROR something failed"
+        );
+    }
+
+    #[test]
+    fn parses_empty_logs() {
+        assert!(parse_logs("").is_empty());
+    }
+}

@@ -1,0 +1,4 @@
+=====> myapp env vars
+DATABASE_URL:    postgres://user:pass@host/db
+DOKKU_PROXY_PORT:    80
+SECRET_KEY:    s3cr3t

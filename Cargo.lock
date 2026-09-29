@@ -619,6 +619,7 @@ dependencies = [
  "actix-web",
  "askama",
  "async-trait",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror",
