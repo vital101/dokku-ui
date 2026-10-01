@@ -12,6 +12,8 @@ pub enum AppError {
     Auth(#[from] crate::auth::password::PasswordError),
     #[error("internal error: {0}")]
     Internal(String),
+    #[error("dokku error: {0}")]
+    Dokku(#[from] crate::dokku::client::DokkuError),
     #[error("the requested resource was not found")]
     NotFound,
     #[error("bad request: {0}")]
@@ -34,6 +36,10 @@ impl ResponseError for AppError {
             | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Dokku(err) => match err {
+                crate::dokku::client::DokkuError::Exit { .. } => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            },
         }
     }
 
@@ -69,6 +75,8 @@ mod tests {
 
     #[test]
     fn maps_variants_to_status_codes() {
+        use crate::dokku::client::DokkuError;
+
         assert_eq!(AppError::NotFound.status_code(), StatusCode::NOT_FOUND);
         assert_eq!(
             AppError::BadRequest("x".into()).status_code(),
@@ -82,6 +90,22 @@ mod tests {
             AppError::Database(sqlx::Error::PoolClosed).status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+        assert_eq!(
+            AppError::Dokku(DokkuError::Exit {
+                code: 1,
+                stderr: "boom".into()
+            })
+            .status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            AppError::Dokku(DokkuError::Connect("refused".into())).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            AppError::Dokku(DokkuError::Timeout { secs: 30 }).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -92,5 +116,19 @@ mod tests {
         let html = String::from_utf8(bytes.to_vec()).expect("utf-8");
         assert!(html.contains("404"));
         assert!(html.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn dokku_error_page_surfaces_stderr() {
+        let resp = AppError::Dokku(crate::dokku::client::DokkuError::Exit {
+            code: 1,
+            stderr: "app not found".into(),
+        })
+        .error_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let bytes = to_bytes(resp.into_body()).await.expect("body");
+        let html = String::from_utf8(bytes.to_vec()).expect("utf-8");
+        assert!(html.contains("502"));
+        assert!(html.contains("app not found"));
     }
 }

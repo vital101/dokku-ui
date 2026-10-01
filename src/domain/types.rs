@@ -59,6 +59,25 @@ impl AppStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppHealth {
+    Running,
+    Stopped,
+    NotDeployed,
+    Unknown,
+}
+
+impl AppHealth {
+    pub fn from_report(report: Option<&PsReport>) -> Self {
+        match report {
+            None => AppHealth::Unknown,
+            Some(report) if report.running => AppHealth::Running,
+            Some(report) if report.deployed => AppHealth::Stopped,
+            Some(_) => AppHealth::NotDeployed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLines(Vec<String>);
 
@@ -137,6 +156,35 @@ mod tests {
     #[test]
     fn app_stats_is_empty_for_no_reports() {
         assert_eq!(AppStats::from_reports(&[]), AppStats::default());
+    }
+
+    #[test]
+    fn app_health_classifies_running_reports() {
+        assert_eq!(
+            AppHealth::from_report(Some(&report(true, true))),
+            AppHealth::Running
+        );
+        assert_eq!(
+            AppHealth::from_report(Some(&report(true, false))),
+            AppHealth::Running
+        );
+    }
+
+    #[test]
+    fn app_health_classifies_stopped_and_not_deployed() {
+        assert_eq!(
+            AppHealth::from_report(Some(&report(false, true))),
+            AppHealth::Stopped
+        );
+        assert_eq!(
+            AppHealth::from_report(Some(&report(false, false))),
+            AppHealth::NotDeployed
+        );
+    }
+
+    #[test]
+    fn app_health_missing_report_is_unknown() {
+        assert_eq!(AppHealth::from_report(None), AppHealth::Unknown);
     }
 
     #[test]
