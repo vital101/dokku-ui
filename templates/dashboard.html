@@ -3,19 +3,26 @@
 {% block heading %}Dashboard{% endblock %}
 
 {% block content %}
-<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-    <p class="text-sm text-slate-400">Total apps</p>
-    <p class="mt-1 text-2xl font-semibold text-white">{{ stats.total }}</p>
+<div class="flex items-center justify-between">
+  <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-sm text-slate-400">Total apps</p>
+      <p class="mt-1 text-2xl font-semibold text-white">{{ stats.total }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-sm text-slate-400">Running</p>
+      <p class="mt-1 text-2xl font-semibold text-emerald-400">{{ stats.running }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-sm text-slate-400">Stopped</p>
+      <p class="mt-1 text-2xl font-semibold text-red-400">{{ stats.stopped }}</p>
+    </div>
   </div>
-  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-    <p class="text-sm text-slate-400">Running</p>
-    <p class="mt-1 text-2xl font-semibold text-emerald-400">{{ stats.running }}</p>
-  </div>
-  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
-    <p class="text-sm text-slate-400">Stopped</p>
-    <p class="mt-1 text-2xl font-semibold text-red-400">{{ stats.stopped }}</p>
-  </div>
+
+  <a href="/apps/new"
+     class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+    New app
+  </a>
 </div>
 
 {% if rows.is_empty() %}
@@ -35,7 +42,7 @@
     <tbody>
       {% for row in rows %}
       <tr class="border-b border-slate-800/50 last:border-0">
-        <td class="px-4 py-3 font-medium text-white">{{ row.name }}</td>
+        <td class="px-4 py-3 font-medium text-white"><a href="/apps/{{ row.name }}" class="hover:underline">{{ row.name }}</a></td>
         <td class="px-4 py-3">
           <span class="inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 text-xs font-medium {{ row.health.badge_css() }}">
             <span class="size-1.5 rounded-full bg-current"></span>

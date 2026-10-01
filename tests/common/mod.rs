@@ -117,7 +117,7 @@ where
         .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/");
     response_cookie(&resp).unwrap_or(cookie)
 }
@@ -147,7 +147,7 @@ where
         .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/");
     session_cookie(&resp)
 }

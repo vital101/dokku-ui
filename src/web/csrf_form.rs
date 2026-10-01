@@ -12,6 +12,18 @@ use crate::error::AppError;
 
 pub const CSRF_FIELD: &str = "csrf_token";
 
+/// Ensure the session has a CSRF token, generating one if missing.
+pub async fn ensure_csrf(session: &Session) -> Result<String, AppError> {
+    if let Ok(Some(token)) = session.get::<String>(CSRF_FIELD) {
+        return Ok(token);
+    }
+    let token = generate_token();
+    session
+        .insert(CSRF_FIELD, &token)
+        .map_err(|err| AppError::Internal(err.to_string()))?;
+    Ok(token)
+}
+
 pub struct CsrfForm<T>(pub T);
 
 impl<T: DeserializeOwned> FromRequest for CsrfForm<T> {

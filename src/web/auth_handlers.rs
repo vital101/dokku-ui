@@ -1,20 +1,16 @@
 use actix_session::Session;
-use actix_web::http::header::LOCATION;
 use actix_web::{HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
 
-use crate::auth::csrf::generate_token;
 use crate::auth::password::{hash_password, verify_password};
 use crate::domain::{Email, Password};
 use crate::error::AppError;
-use crate::storage::users::{SqliteUsersRepo, UsersRepo};
+use crate::storage::users::SqliteUsersRepo;
 use crate::web::auth_middleware::SESSION_USER_ID;
-use crate::web::csrf_form::CsrfForm;
+use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, set_flash};
-use crate::web::state::AppState;
-
-const SESSION_CSRF: &str = "csrf_token";
+use crate::web::render::{redirect, render, see_other};
 
 #[derive(Template)]
 #[template(path = "auth/login.html")]
@@ -52,29 +48,12 @@ pub struct SetupForm {
     confirm: String,
 }
 
-fn redirect(to: &str) -> HttpResponse {
-    HttpResponse::TemporaryRedirect()
-        .insert_header((LOCATION, to))
-        .finish()
-}
-
 fn safe_next(next: &str) -> String {
     if next.starts_with('/') && !next.starts_with("//") {
         next.to_owned()
     } else {
         "/".to_owned()
     }
-}
-
-async fn ensure_csrf(session: &Session) -> Result<String, AppError> {
-    if let Ok(Some(token)) = session.get::<String>(SESSION_CSRF) {
-        return Ok(token);
-    }
-    let token = generate_token();
-    session
-        .insert(SESSION_CSRF, &token)
-        .map_err(|err| AppError::Internal(err.to_string()))?;
-    Ok(token)
 }
 
 async fn users_count(state: &AppState) -> Result<i64, AppError> {
@@ -104,9 +83,7 @@ pub async fn login_form(
         error: None,
         csrf_token: &csrf_token,
     };
-    Ok(HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(page.render()?))
+    Ok(render(&page)?)
 }
 
 pub async fn login_submit(
@@ -132,9 +109,7 @@ pub async fn login_submit(
             error: Some("Invalid email or password"),
             csrf_token: &csrf_token,
         };
-        return Ok(HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(page.render()?));
+        return Ok(render(&page)?);
     }
 
     let user = user.expect("user present when valid");
@@ -148,12 +123,12 @@ pub async fn login_submit(
         FlashLevel::Success,
         format!("Welcome back, {}", user.email),
     );
-    Ok(redirect(&safe_next(&form.next)))
+    Ok(see_other(&safe_next(&form.next)))
 }
 
 pub async fn logout(session: Session) -> Result<HttpResponse, AppError> {
     session.purge();
-    Ok(redirect("/login"))
+    Ok(see_other("/login"))
 }
 
 pub async fn setup_form(
@@ -168,9 +143,7 @@ pub async fn setup_form(
         error: None,
         csrf_token: &csrf_token,
     };
-    Ok(HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(page.render()?))
+    Ok(render(&page)?)
 }
 
 pub async fn setup_submit(
@@ -203,9 +176,7 @@ pub async fn setup_submit(
             error: Some(&message),
             csrf_token: &csrf_token,
         };
-        return Ok(HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .body(page.render()?));
+        return Ok(render(&page)?);
     }
 
     let email = email_result.expect("validated above");
@@ -224,7 +195,7 @@ pub async fn setup_submit(
         FlashLevel::Success,
         "Setup complete. Welcome to Dokku UI!",
     );
-    Ok(redirect("/"))
+    Ok(see_other("/"))
 }
 
 #[cfg(test)]

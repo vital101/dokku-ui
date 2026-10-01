@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}New app — Dokku UI{% endblock %}
+{% block heading %}New app{% endblock %}
+
+{% block content %}
+<div class="max-w-xl">
+  <form method="post" action="/apps/new" class="space-y-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div>
+      <label for="name" class="block text-sm font-medium text-slate-300">App name</label>
+      <input id="name" name="name" type="text" required maxlength="64"
+             class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+             placeholder="my-app">
+      <p class="mt-2 text-xs text-slate-400">Lowercase letters, numbers, and hyphens only.</p>
+    </div>
+
+    <button type="submit"
+            class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+      Create app
+    </button>
+  </form>
+</div>
+{% endblock %}

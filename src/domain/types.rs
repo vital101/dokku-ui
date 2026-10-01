@@ -76,6 +76,84 @@ impl AppHealth {
             Some(_) => AppHealth::NotDeployed,
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AppHealth::Running => "Running",
+            AppHealth::Stopped => "Stopped",
+            AppHealth::NotDeployed => "Not deployed",
+            AppHealth::Unknown => "Unknown",
+        }
+    }
+
+    pub fn badge_css(self) -> &'static str {
+        match self {
+            AppHealth::Running => "bg-emerald-500/10 text-emerald-400",
+            AppHealth::Stopped => "bg-red-500/10 text-red-400",
+            AppHealth::NotDeployed => "bg-slate-500/10 text-slate-400",
+            AppHealth::Unknown => "bg-slate-500/10 text-slate-400",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppInfo {
+    pub name: String,
+    pub created_at: String,
+    pub locked: bool,
+    pub image_status: Option<ImageStatus>,
+    pub link_exists: Option<bool>,
+    pub dns_record_exists: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageStatus {
+    None,
+    Built,
+    Error(String),
+}
+
+impl AppInfo {
+    pub fn image_status_label(&self) -> &'static str {
+        match &self.image_status {
+            None => "unknown",
+            Some(ImageStatus::None) => "none",
+            Some(ImageStatus::Built) => "built",
+            Some(ImageStatus::Error(_)) => "error",
+        }
+    }
+
+    pub fn link_exists_label(&self) -> &'static str {
+        match self.link_exists {
+            None => "unknown",
+            Some(true) => "yes",
+            Some(false) => "no",
+        }
+    }
+
+    pub fn dns_record_exists_label(&self) -> &'static str {
+        match self.dns_record_exists {
+            None => "unknown",
+            Some(true) => "yes",
+            Some(false) => "no",
+        }
+    }
+
+    pub fn locked_label(&self) -> &'static str {
+        match self.locked {
+            true => "yes",
+            false => "no",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppOverview {
+    pub name: String,
+    pub app_info: Option<AppInfo>,
+    pub ps_report: Option<PsReport>,
+    pub health: AppHealth,
+    pub process_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

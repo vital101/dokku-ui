@@ -1,0 +1,8 @@
+{
+  "app created at": "2026-09-15T10:30:00+00:00",
+  "app deploy source": "",
+  "app deploy source metadata": "",
+  "app dir": "/home/dokku/myapp",
+  "app disable automatic creation": "false",
+  "app locked": "false"
+}

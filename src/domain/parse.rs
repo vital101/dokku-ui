@@ -1,4 +1,4 @@
-use crate::domain::types::{EnvVar, LogLines, ProcessState, ProcessStatus, PsReport};
+use crate::domain::types::{AppInfo, EnvVar, LogLines, ProcessState, ProcessStatus, PsReport};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
@@ -13,6 +13,24 @@ pub enum ParseError {
 pub fn parse_apps_list(json: &str) -> Result<Vec<String>, ParseError> {
     serde_json::from_str::<Vec<String>>(json)
         .map_err(|err| ParseError::InvalidJson(err.to_string()))
+}
+
+pub fn parse_apps_report(json: &str, name: &str) -> Option<AppInfo> {
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(json).ok()?;
+
+    let str_of = |key: &str| -> Option<String> {
+        map.get(key).and_then(|value| value.as_str()).map(str::to_owned)
+    };
+
+    Some(AppInfo {
+        name: name.to_owned(),
+        created_at: str_of("app created at").unwrap_or_default(),
+        locked: str_of("app locked").as_deref() == Some("true"),
+        image_status: None,
+        link_exists: None,
+        dns_record_exists: None,
+    })
 }
 
 pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
@@ -97,6 +115,7 @@ mod tests {
     use super::*;
 
     const APPS_LIST: &str = include_str!("../../tests/fixtures/apps_list.json");
+    const APPS_REPORT: &str = include_str!("../../tests/fixtures/apps_report.json");
     const PS_REPORT: &str = include_str!("../../tests/fixtures/ps_report.json");
     const PS_REPORT_NOT_DEPLOYED: &str =
         include_str!("../../tests/fixtures/ps_report_not_deployed.json");
@@ -124,6 +143,48 @@ mod tests {
             parse_apps_list("not json"),
             Err(ParseError::InvalidJson(_))
         ));
+    }
+
+    #[test]
+    fn parses_apps_report_fixture() {
+        let info = parse_apps_report(APPS_REPORT, "myapp").expect("parse");
+        assert_eq!(info.name, "myapp");
+        assert_eq!(info.created_at, "2026-09-15T10:30:00+00:00");
+        assert!(!info.locked);
+        assert_eq!(info.image_status, None);
+        assert_eq!(info.link_exists, None);
+        assert_eq!(info.dns_record_exists, None);
+    }
+
+    #[test]
+    fn apps_report_locked_flag_parses() {
+        let info = parse_apps_report(
+            r#"{"app locked": "true", "app created at": "2026-01-01T00:00:00Z"}"#,
+            "myapp",
+        )
+        .expect("parse");
+        assert!(info.locked);
+    }
+
+    #[test]
+    fn apps_report_missing_locked_defaults_to_false() {
+        let info = parse_apps_report(r#"{"app created at": "2026-01-01T00:00:00Z"}"#, "myapp")
+            .expect("parse");
+        assert!(!info.locked);
+    }
+
+    #[test]
+    fn rejects_invalid_apps_report_json() {
+        assert_eq!(parse_apps_report("not json", "myapp"), None);
+    }
+
+    #[test]
+    fn labels_render_unknown_when_fields_absent() {
+        let info = parse_apps_report(APPS_REPORT, "myapp").expect("parse");
+        assert_eq!(info.image_status_label(), "unknown");
+        assert_eq!(info.link_exists_label(), "unknown");
+        assert_eq!(info.dns_record_exists_label(), "unknown");
+        assert_eq!(info.locked_label(), "no");
     }
 
     #[test]

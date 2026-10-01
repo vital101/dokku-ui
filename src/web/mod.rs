@@ -1,8 +1,10 @@
 mod auth_handlers;
+mod apps;
 mod auth_middleware;
 mod csrf_form;
 mod flash;
 mod pages;
+mod render;
 mod state;
 
 use actix_session::SessionMiddleware;
@@ -87,6 +89,17 @@ pub fn build_app(
         )
         .route("/logout", web::post().to(auth_handlers::logout))
         .route("/", web::get().to(pages::dashboard))
+        .service(
+            web::resource("/apps/new")
+                .route(web::get().to(apps::new_form))
+                .route(web::post().to(apps::create)),
+        )
+        .service(
+            web::scope("/apps")
+                .route("/{name}", web::get().to(apps::show))
+                .route("/{name}/delete", web::get().to(apps::delete_confirm))
+                .route("/{name}/destroy", web::post().to(apps::destroy)),
+        )
         .default_service(web::to(not_found))
 }
 

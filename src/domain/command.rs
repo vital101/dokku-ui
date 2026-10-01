@@ -9,6 +9,7 @@ pub enum DokkuCommand {
     PsStart { app: AppName },
     PsStop { app: AppName },
     PsRestart { app: AppName },
+    AppsReport { app: AppName },
     ConfigShow { app: AppName },
     Logs { app: AppName, num_lines: u32 },
 }
@@ -40,6 +41,9 @@ impl DokkuCommand {
             DokkuCommand::PsStart { app } => vec!["ps:start".into(), app.as_str().into()],
             DokkuCommand::PsStop { app } => vec!["ps:stop".into(), app.as_str().into()],
             DokkuCommand::PsRestart { app } => vec!["ps:restart".into(), app.as_str().into()],
+            DokkuCommand::AppsReport { app } => {
+                vec!["apps:report".into(), app.as_str().into(), "--format".into(), "json".into()]
+            }
             DokkuCommand::ConfigShow { app } => {
                 vec!["config:show".into(), app.as_str().into()]
             }
@@ -106,6 +110,14 @@ mod tests {
         assert_eq!(
             DokkuCommand::PsReport { app: app("myapp") }.argv(),
             vec!["ps:report", "myapp", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn apps_report_argv() {
+        assert_eq!(
+            DokkuCommand::AppsReport { app: app("myapp") }.argv(),
+            vec!["apps:report", "myapp", "--format", "json"]
         );
     }
 

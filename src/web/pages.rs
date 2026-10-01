@@ -5,8 +5,9 @@ use askama::Template;
 use crate::dokku::{AppRow, DashboardError, dashboard_data};
 use crate::domain::types::{AppHealth, AppStats};
 use crate::error::AppError;
-use crate::storage::users::{SqliteUsersRepo, UsersRepo};
+use crate::storage::users::SqliteUsersRepo;
 use crate::web::auth_middleware::SESSION_USER_ID;
+use crate::web::csrf_form::ensure_csrf;
 use crate::web::flash::{FlashMessage, take_flash};
 use crate::web::state::AppState;
 
@@ -18,35 +19,6 @@ struct DashboardPage {
     flash: Option<FlashMessage>,
     stats: AppStats,
     rows: Vec<AppRow>,
-}
-
-impl AppHealth {
-    pub fn label(self) -> &'static str {
-        match self {
-            AppHealth::Running => "Running",
-            AppHealth::Stopped => "Stopped",
-            AppHealth::NotDeployed => "Not deployed",
-            AppHealth::Unknown => "Unknown",
-        }
-    }
-
-    pub fn badge_css(self) -> &'static str {
-        match self {
-            AppHealth::Running => "bg-emerald-500/10 text-emerald-400",
-            AppHealth::Stopped => "bg-red-500/10 text-red-400",
-            AppHealth::NotDeployed => "bg-slate-500/10 text-slate-400",
-            AppHealth::Unknown => "bg-slate-500/10 text-slate-400",
-        }
-    }
-}
-
-impl AppRow {
-    pub fn process_label(&self) -> String {
-        match self.process_count {
-            -1 => "—".to_owned(),
-            count => count.to_string(),
-        }
-    }
 }
 
 pub async fn dashboard(
@@ -72,10 +44,7 @@ pub async fn dashboard(
 
     let page = DashboardPage {
         email: user.email,
-        csrf_token: session
-            .get::<String>("csrf_token")
-            .map_err(|err| AppError::Internal(err.to_string()))?
-            .unwrap_or_default(),
+        csrf_token: ensure_csrf(&session).await?,
         flash: take_flash(&session),
         stats: data.stats,
         rows: data.rows,

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Delete {{ name }} — Dokku UI{% endblock %}
+{% block heading %}Delete {{ name }}{% endblock %}
+
+{% block content %}
+<div class="max-w-lg">
+  <div class="rounded-lg border border-red-800 bg-slate-900/50 p-6">
+    <h3 class="text-base font-medium text-white">Delete application</h3>
+    <p class="mt-2 text-sm text-slate-400">
+      Are you sure you want to delete <span class="font-mono text-white">{{ name }}</span>? This action cannot be undone.
+    </p>
+
+    <form method="post" action="/apps/{{ name }}/destroy" class="mt-6 flex gap-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+        Yes, delete app
+      </button>
+      <a href="/apps/{{ name }}"
+         class="rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">
+        Cancel
+      </a>
+    </form>
+  </div>
+</div>
+{% endblock %}

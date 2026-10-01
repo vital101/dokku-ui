@@ -19,6 +19,15 @@ pub struct AppRow {
     pub process_count: i64,
 }
 
+impl AppRow {
+    pub fn process_label(&self) -> String {
+        match self.process_count {
+            -1 => "—".to_owned(),
+            count => count.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DashboardData {
     pub rows: Vec<AppRow>,

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}{{ name }} — Dokku UI{% endblock %}
+{% block heading %}{{ name }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <div class="flex items-center gap-4">
+    <span class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium {{ health_css }}">
+      <span class="size-2 rounded-full bg-current"></span>
+      {{ health_label }}
+    </span>
+  </div>
+
+  <div class="grid grid-cols-2 gap-4 sm:grid-cols-3">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-sm text-slate-400">Processes</p>
+      <p class="mt-1 text-2xl font-semibold text-white">{{ process_label }}</p>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+      <p class="text-sm text-slate-400">Deployed</p>
+      <p class="mt-1 text-2xl font-semibold {% if deployed %}text-emerald-400{% else %}text-red-400{% endif %}">
+        {% if deployed %}Yes{% else %}No{% endif %}
+      </p>
+    </div>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">App details</h3>
+    <dl class="mt-4 space-y-3 text-sm">
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Created at</dt>
+        <dd class="font-medium text-white">{{ created_at }}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Locked</dt>
+        <dd class="font-medium text-white">{{ locked_label }}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Image status</dt>
+        <dd class="font-medium text-white">{{ image_status_label }}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Link exists</dt>
+        <dd class="font-medium text-white">{{ link_exists_label }}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">DNS record</dt>
+        <dd class="font-medium text-white">{{ dns_record_exists_label }}</dd>
+      </div>
+    </dl>
+  </div>
+
+  <div class="flex gap-3">
+    <a href="/apps/{{ name }}/delete"
+       class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+      Delete app
+    </a>
+  </div>
+</div>
+{% endblock %}
