@@ -1,6 +1,7 @@
 mod common;
 
 use actix_web::http::StatusCode;
+use actix_web::http::header::{HeaderValue, LOCATION};
 use actix_web::test;
 
 use dokku_ui::web::build_app;
@@ -48,14 +49,15 @@ async fn static_css_is_served() {
 }
 
 #[tokio::test]
-async fn unknown_route_renders_error_page() {
+async fn unknown_route_redirects_unauthenticated_requests_to_setup() {
     let (state, _dir) = common::test_state().await;
     let app = test::init_service(build_app(state)).await;
 
     let resp = test::call_service(&app, test::TestRequest::get().uri("/nope").to_request()).await;
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = String::from_utf8(test::read_body(resp).await.to_vec()).expect("utf-8 body");
-    assert!(body.contains("404"));
-    assert!(body.contains("not found"));
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        resp.response().headers().get(LOCATION),
+        Some(&HeaderValue::from_static("/setup"))
+    );
 }

@@ -11,6 +11,9 @@ pub struct Settings {
     pub dokku_ssh_key_path: PathBuf,
     pub dokku_ssh_known_hosts_path: Option<PathBuf>,
     pub command_timeout_secs: u64,
+    pub secret_key: String,
+    pub session_ttl_secs: u64,
+    pub cookie_secure: bool,
 }
 
 impl Settings {
@@ -55,6 +58,22 @@ impl Settings {
                 .map_err(|_| SettingsError::InvalidTimeout(raw.clone()))?,
             None => 30,
         };
+        let secret_key = vars
+            .get("SECRET_KEY")
+            .cloned()
+            .unwrap_or_else(|| "dev-secret-key-change-me-0123456789abcdef".to_owned());
+        let session_ttl_secs = match vars.get("SESSION_TTL_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidSessionTtl(raw.clone()))?,
+            None => 604_800,
+        };
+        let cookie_secure = match vars.get("COOKIE_SECURE") {
+            Some(raw) => raw
+                .parse::<bool>()
+                .map_err(|_| SettingsError::InvalidCookieSecure(raw.clone()))?,
+            None => false,
+        };
         Ok(Self {
             port,
             database_url,
@@ -64,6 +83,9 @@ impl Settings {
             dokku_ssh_key_path,
             dokku_ssh_known_hosts_path,
             command_timeout_secs,
+            secret_key,
+            session_ttl_secs,
+            cookie_secure,
         })
     }
 }
@@ -76,6 +98,10 @@ pub enum SettingsError {
     InvalidSshPort(String),
     #[error("COMMAND_TIMEOUT_SECS must be a valid u64, got `{0}`")]
     InvalidTimeout(String),
+    #[error("SESSION_TTL_SECS must be a valid u64, got `{0}`")]
+    InvalidSessionTtl(String),
+    #[error("COOKIE_SECURE must be a valid bool, got `{0}`")]
+    InvalidCookieSecure(String),
 }
 
 #[cfg(test)]
@@ -108,6 +134,12 @@ mod tests {
         );
         assert_eq!(settings.dokku_ssh_known_hosts_path, None);
         assert_eq!(settings.command_timeout_secs, 30);
+        assert_eq!(
+            settings.secret_key,
+            "dev-secret-key-change-me-0123456789abcdef"
+        );
+        assert_eq!(settings.session_ttl_secs, 604_800);
+        assert!(!settings.cookie_secure);
     }
 
     #[test]
@@ -130,6 +162,9 @@ mod tests {
             ("DOKKU_SSH_KEY_PATH", "/run/secrets/dokku_key"),
             ("DOKKU_SSH_HOST_KEYS_PATH", "/app/data/ssh/known_hosts"),
             ("COMMAND_TIMEOUT_SECS", "60"),
+            ("SECRET_KEY", "a-very-long-prod-secret-key-0123456789"),
+            ("SESSION_TTL_SECS", "86400"),
+            ("COOKIE_SECURE", "true"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -144,6 +179,12 @@ mod tests {
             Some(PathBuf::from("/app/data/ssh/known_hosts"))
         );
         assert_eq!(settings.command_timeout_secs, 60);
+        assert_eq!(
+            settings.secret_key,
+            "a-very-long-prod-secret-key-0123456789"
+        );
+        assert_eq!(settings.session_ttl_secs, 86_400);
+        assert!(settings.cookie_secure);
     }
 
     #[test]
@@ -169,5 +210,19 @@ mod tests {
         let err = Settings::from_map(&map(&[("COMMAND_TIMEOUT_SECS", "soon")]))
             .expect_err("invalid timeout");
         assert!(matches!(err, SettingsError::InvalidTimeout(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_session_ttl() {
+        let err =
+            Settings::from_map(&map(&[("SESSION_TTL_SECS", "never")])).expect_err("invalid ttl");
+        assert!(matches!(err, SettingsError::InvalidSessionTtl(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_cookie_secure() {
+        let err =
+            Settings::from_map(&map(&[("COOKIE_SECURE", "maybe")])).expect_err("invalid bool");
+        assert!(matches!(err, SettingsError::InvalidCookieSecure(_)));
     }
 }

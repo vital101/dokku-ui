@@ -1,6 +1,7 @@
 use std::io;
 use std::sync::Arc;
 
+pub mod auth;
 pub mod dokku;
 pub mod domain;
 pub mod error;

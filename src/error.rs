@@ -6,6 +6,10 @@ use askama::Template;
 pub enum AppError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("template render error: {0}")]
+    Render(#[from] askama::Error),
+    #[error("password error: {0}")]
+    Auth(#[from] crate::auth::password::PasswordError),
     #[error("internal error: {0}")]
     Internal(String),
     #[error("the requested resource was not found")]
@@ -24,7 +28,10 @@ struct ErrorPage<'a> {
 impl ResponseError for AppError {
     fn status_code(&self) -> StatusCode {
         match self {
-            AppError::Database(_) | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Database(_)
+            | AppError::Auth(_)
+            | AppError::Render(_)
+            | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
         }

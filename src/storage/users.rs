@@ -12,6 +12,7 @@ pub struct User {
 pub trait UsersRepo: Send + Sync {
     async fn count(&self) -> Result<i64, sqlx::Error>;
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, sqlx::Error>;
+    async fn find_by_id(&self, id: i64) -> Result<Option<User>, sqlx::Error>;
     async fn insert(&self, email: &str, password_hash: &str) -> Result<User, sqlx::Error>;
 }
 
@@ -39,6 +40,23 @@ impl UsersRepo for SqliteUsersRepo {
             "SELECT id, email, password_hash, created_at FROM users WHERE email = ?",
         )
         .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| {
+            row.map(|(id, email, password_hash, created_at)| User {
+                id,
+                email,
+                password_hash,
+                created_at,
+            })
+        })
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<User>, sqlx::Error> {
+        sqlx::query_as::<_, (i64, String, String, i64)>(
+            "SELECT id, email, password_hash, created_at FROM users WHERE id = ?",
+        )
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map(|row| {
@@ -129,6 +147,23 @@ mod tests {
                 .expect("find")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn find_by_id_returns_user() {
+        let (repo, _dir) = repo().await;
+        let user = repo
+            .insert("admin@example.com", "hash")
+            .await
+            .expect("insert");
+        let found = repo.find_by_id(user.id).await.expect("find").expect("some");
+        assert_eq!(found, user);
+    }
+
+    #[tokio::test]
+    async fn find_by_unknown_id_returns_none() {
+        let (repo, _dir) = repo().await;
+        assert!(repo.find_by_id(999).await.expect("find").is_none());
     }
 
     #[tokio::test]

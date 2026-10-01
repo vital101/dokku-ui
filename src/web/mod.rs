@@ -1,12 +1,23 @@
+mod auth_handlers;
+mod auth_middleware;
+mod csrf_form;
+mod flash;
+mod pages;
 mod state;
 
+use actix_session::SessionMiddleware;
+use actix_session::config::{PersistentSession, TtlExtensionPolicy};
 use actix_web::body::MessageBody;
+use actix_web::cookie::{Key, SameSite};
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, Error, HttpResponse, web};
 
 use crate::error::AppError;
+use crate::storage::sessions::SqliteSessionStore;
 
 pub use state::AppState;
+
+const SESSION_COOKIE_NAME: &str = "dokku-ui-session";
 
 const HEALTHZ_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -38,10 +49,44 @@ pub fn build_app(
         InitError = (),
     >,
 > {
+    let key = Key::derive_from(state.settings.secret_key.as_bytes());
+    let session_store = SqliteSessionStore::new(state.db.clone());
+    let session_ttl =
+        time::Duration::seconds(i64::try_from(state.settings.session_ttl_secs).unwrap_or(i64::MAX));
+    let cookie_secure = state.settings.cookie_secure;
+
     App::new()
         .app_data(web::Data::new(state))
+        .wrap(actix_web::middleware::from_fn(
+            auth_middleware::auth_middleware,
+        ))
+        .wrap(
+            SessionMiddleware::builder(session_store, key)
+                .cookie_name(SESSION_COOKIE_NAME.to_owned())
+                .cookie_http_only(true)
+                .cookie_same_site(SameSite::Lax)
+                .cookie_secure(cookie_secure)
+                .session_lifecycle(
+                    PersistentSession::default()
+                        .session_ttl(session_ttl)
+                        .session_ttl_extension_policy(TtlExtensionPolicy::OnEveryRequest),
+                )
+                .build(),
+        )
         .service(actix_files::Files::new("/static", "./static"))
         .route("/healthz", web::get().to(healthz))
+        .service(
+            web::resource("/setup")
+                .route(web::get().to(auth_handlers::setup_form))
+                .route(web::post().to(auth_handlers::setup_submit)),
+        )
+        .service(
+            web::resource("/login")
+                .route(web::get().to(auth_handlers::login_form))
+                .route(web::post().to(auth_handlers::login_submit)),
+        )
+        .route("/logout", web::post().to(auth_handlers::logout))
+        .route("/", web::get().to(pages::dashboard))
         .default_service(web::to(not_found))
 }
 

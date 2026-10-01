@@ -5,6 +5,7 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
+pub mod sessions;
 pub mod users;
 
 pub fn ensure_db_parent_dir(database_url: &str) -> io::Result<()> {
