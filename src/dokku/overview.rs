@@ -1,7 +1,7 @@
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{ParseError, parse_apps_list, parse_apps_report, parse_ps_report};
-use crate::domain::types::{AppHealth, AppInfo, AppOverview};
+use crate::domain::types::{AppHealth, AppOverview};
 
 use super::client::{DokkuClient, DokkuError};
 
@@ -14,7 +14,7 @@ pub enum OverviewError {
     #[error("app `{0}` was not found")]
     AppNotFound(String),
     #[error("failed to fetch app report: {0}")]
-    Report(#[from] DokkuError),
+    Report(DokkuError),
 }
 
 pub async fn app_overview(
@@ -29,7 +29,10 @@ pub async fn app_overview(
     let app = AppName::try_from(name.to_owned())
         .map_err(|_| OverviewError::AppNotFound(name.to_owned()))?;
 
-    let app_info = match client.exec(&DokkuCommand::AppsReport { app: app.clone() }).await {
+    let app_info = match client
+        .exec(&DokkuCommand::AppsReport { app: app.clone() })
+        .await
+    {
         Ok(output) => parse_apps_report(&output.stdout, name),
         Err(_) => None,
     };
@@ -39,12 +42,15 @@ pub async fn app_overview(
         Err(err) => return Err(OverviewError::Report(err)),
     };
 
+    let health = AppHealth::from_report(ps_report.as_ref());
+    let process_count = ps_report.as_ref().map(|r| r.process_count).unwrap_or(-1);
+
     Ok(AppOverview {
         name: name.to_owned(),
         app_info,
         ps_report,
-        health: AppHealth::from_report(ps_report.as_ref()),
-        process_count: ps_report.as_ref().map(|r| r.process_count).unwrap_or(-1),
+        health,
+        process_count,
     })
 }
 
@@ -72,7 +78,10 @@ mod tests {
     #[tokio::test]
     async fn happy_path_assembles_overview() {
         let client = MockClient::new()
-            .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha","beta"]"#)))
+            .stub(
+                DokkuCommand::AppsList,
+                Ok(DokkuOutput::ok(r#"["alpha","beta"]"#)),
+            )
             .stub(
                 DokkuCommand::AppsReport { app: app("alpha") },
                 Ok(apps_report()),
@@ -94,20 +103,18 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_app_yields_not_found_without_extra_calls() {
-        let client = MockClient::new().stub(
-            DokkuCommand::AppsList,
-            Ok(DokkuOutput::ok(r#"["alpha"]"#)),
-        );
+        let client =
+            MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)));
 
         assert!(matches!(
             app_overview(&client, "nope").await,
             Err(OverviewError::AppNotFound(_))
         ));
         assert!(
-            client
-                .calls()
-                .iter()
-                .all(|c| !matches!(c, DokkuCommand::PsReport { .. } | DokkuCommand::AppsReport { .. })),
+            client.calls().iter().all(|c| !matches!(
+                c,
+                DokkuCommand::PsReport { .. } | DokkuCommand::AppsReport { .. }
+            )),
             "no report calls for unknown app"
         );
     }
@@ -136,9 +143,8 @@ mod tests {
 
     #[tokio::test]
     async fn apps_list_error_propagates() {
-        let client = MockClient::with_default(Err(crate::dokku::DokkuError::Connect(
-            "refused".into(),
-        )));
+        let client =
+            MockClient::with_default(Err(crate::dokku::DokkuError::Connect("refused".into())));
 
         assert!(matches!(
             app_overview(&client, "alpha").await,

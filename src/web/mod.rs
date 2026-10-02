@@ -1,5 +1,5 @@
-mod auth_handlers;
 mod apps;
+mod auth_handlers;
 mod auth_middleware;
 mod csrf_form;
 mod flash;
@@ -89,16 +89,13 @@ pub fn build_app(
         )
         .route("/logout", web::post().to(auth_handlers::logout))
         .route("/", web::get().to(pages::dashboard))
+        .route("/apps/new", web::get().to(apps::new_form))
+        .route("/apps", web::post().to(apps::create))
+        .route("/apps/{name}", web::get().to(apps::show))
         .service(
-            web::resource("/apps/new")
-                .route(web::get().to(apps::new_form))
-                .route(web::post().to(apps::create)),
-        )
-        .service(
-            web::scope("/apps")
-                .route("/{name}", web::get().to(apps::show))
-                .route("/{name}/delete", web::get().to(apps::delete_confirm))
-                .route("/{name}/destroy", web::post().to(apps::destroy)),
+            web::resource("/apps/{name}/delete")
+                .route(web::get().to(apps::delete_confirm))
+                .route(web::post().to(apps::destroy)),
         )
         .default_service(web::to(not_found))
 }

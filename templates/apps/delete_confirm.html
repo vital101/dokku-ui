@@ -11,16 +11,26 @@
       Are you sure you want to delete <span class="font-mono text-white">{{ name }}</span>? This action cannot be undone.
     </p>
 
-    <form method="post" action="/apps/{{ name }}/destroy" class="mt-6 flex gap-3">
+    <form method="post" action="/apps/{{ name }}/delete" class="mt-6 space-y-4">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit"
-              class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
-        Yes, delete app
-      </button>
-      <a href="/apps/{{ name }}"
-         class="rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">
-        Cancel
-      </a>
+      <div>
+        <label for="confirm-name" class="block text-sm font-medium text-slate-300">
+          Type <span class="font-mono text-white">{{ name }}</span> to confirm
+        </label>
+        <input id="confirm-name" name="name" type="text" required autocomplete="off"
+               class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+               placeholder="{{ name }}">
+      </div>
+      <div class="flex gap-3">
+        <button type="submit"
+                class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+          Yes, delete app
+        </button>
+        <a href="/apps/{{ name }}"
+           class="rounded-md border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800">
+          Cancel
+        </a>
+      </div>
     </form>
   </div>
 </div>

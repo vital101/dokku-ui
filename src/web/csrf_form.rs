@@ -7,7 +7,7 @@ use actix_web::dev::Payload;
 use actix_web::{FromRequest, HttpRequest, web};
 use serde::de::DeserializeOwned;
 
-use crate::auth::csrf::tokens_match;
+use crate::auth::csrf::{generate_token, tokens_match};
 use crate::error::AppError;
 
 pub const CSRF_FIELD: &str = "csrf_token";

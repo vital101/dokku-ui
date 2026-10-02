@@ -7,5 +7,5 @@ pub mod russh_client;
 pub use client::{DokkuClient, DokkuError, DokkuOutput};
 pub use dashboard::{AppRow, DashboardData, DashboardError, dashboard_data};
 pub use mock::MockClient;
-pub use overview::{app_overview, AppOverview, OverviewError};
+pub use overview::{OverviewError, app_overview};
 pub use russh_client::RusshClient;

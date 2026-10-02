@@ -16,11 +16,12 @@ pub fn parse_apps_list(json: &str) -> Result<Vec<String>, ParseError> {
 }
 
 pub fn parse_apps_report(json: &str, name: &str) -> Option<AppInfo> {
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(json).ok()?;
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).ok()?;
 
     let str_of = |key: &str| -> Option<String> {
-        map.get(key).and_then(|value| value.as_str()).map(str::to_owned)
+        map.get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
     };
 
     Some(AppInfo {

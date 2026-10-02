@@ -6,11 +6,12 @@ use serde::Deserialize;
 use crate::auth::password::{hash_password, verify_password};
 use crate::domain::{Email, Password};
 use crate::error::AppError;
-use crate::storage::users::SqliteUsersRepo;
+use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, set_flash};
 use crate::web::render::{redirect, render, see_other};
+use crate::web::state::AppState;
 
 #[derive(Template)]
 #[template(path = "auth/login.html")]
@@ -83,7 +84,7 @@ pub async fn login_form(
         error: None,
         csrf_token: &csrf_token,
     };
-    Ok(render(&page)?)
+    render(&page)
 }
 
 pub async fn login_submit(
@@ -109,7 +110,7 @@ pub async fn login_submit(
             error: Some("Invalid email or password"),
             csrf_token: &csrf_token,
         };
-        return Ok(render(&page)?);
+        return render(&page);
     }
 
     let user = user.expect("user present when valid");
@@ -143,7 +144,7 @@ pub async fn setup_form(
         error: None,
         csrf_token: &csrf_token,
     };
-    Ok(render(&page)?)
+    render(&page)
 }
 
 pub async fn setup_submit(
@@ -176,7 +177,7 @@ pub async fn setup_submit(
             error: Some(&message),
             csrf_token: &csrf_token,
         };
-        return Ok(render(&page)?);
+        return render(&page);
     }
 
     let email = email_result.expect("validated above");

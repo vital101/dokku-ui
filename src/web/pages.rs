@@ -3,9 +3,9 @@ use actix_web::{HttpResponse, web};
 use askama::Template;
 
 use crate::dokku::{AppRow, DashboardError, dashboard_data};
-use crate::domain::types::{AppHealth, AppStats};
+use crate::domain::types::AppStats;
 use crate::error::AppError;
-use crate::storage::users::SqliteUsersRepo;
+use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::csrf_form::ensure_csrf;
 use crate::web::flash::{FlashMessage, take_flash};
@@ -56,9 +56,8 @@ pub async fn dashboard(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::dokku::AppRow;
-    use crate::domain::types::PsReport;
+    use crate::domain::types::{AppHealth, PsReport};
 
     fn report(running: bool, deployed: bool) -> PsReport {
         PsReport {

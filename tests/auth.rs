@@ -103,7 +103,8 @@ async fn setup_redirects_to_login_when_users_exist() {
     seed_user(&state, "admin@example.com", "correct-horse-battery").await;
     let app = test::init_service(build_app(state.clone())).await;
 
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let resp = test::call_service(&app, test::TestRequest::get().uri("/setup").to_request()).await;
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(location(&resp), "/login");
 
     let resp = test::call_service(&app, test::TestRequest::get().uri("/login").to_request()).await;
@@ -123,7 +124,7 @@ async fn setup_redirects_to_login_when_users_exist() {
         .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(location(&resp), "/login");
     assert_eq!(
         SqliteUsersRepo::new(state.db.clone())

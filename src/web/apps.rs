@@ -55,7 +55,10 @@ struct DeleteConfirmPage<'a> {
     name: &'a str,
 }
 
-async fn current_user(state: &AppState, session: &Session) -> Result<crate::storage::users::User, AppError> {
+async fn current_user(
+    state: &AppState,
+    session: &Session,
+) -> Result<crate::storage::users::User, AppError> {
     let user_id = session
         .get::<i64>(SESSION_USER_ID)
         .map_err(|err| AppError::Internal(err.to_string()))?
@@ -72,13 +75,14 @@ pub async fn new_form(
 ) -> Result<HttpResponse, AppError> {
     let user = current_user(&state, &session).await?;
     let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
 
     let page = NewFormPage {
         email: &user.email,
         csrf_token: &csrf_token,
-        flash: take_flash(&session).as_ref(),
+        flash: flash.as_ref(),
     };
-    Ok(render(&page)?)
+    render(&page)
 }
 
 pub async fn create(
@@ -128,14 +132,17 @@ pub async fn show(
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
 
-    let overview = app_overview(&*state.dokku, &name).await.map_err(|err| match err {
-        OverviewError::List(dokku_err) => AppError::Dokku(dokku_err),
-        OverviewError::ParseList(parse_err) => AppError::Internal(parse_err.to_string()),
-        OverviewError::AppNotFound(_) => AppError::NotFound,
-        OverviewError::Report(dokku_err) => AppError::Dokku(dokku_err),
-    })?;
+    let overview = app_overview(&*state.dokku, &name)
+        .await
+        .map_err(|err| match err {
+            OverviewError::List(dokku_err) => AppError::Dokku(dokku_err),
+            OverviewError::ParseList(parse_err) => AppError::Internal(parse_err.to_string()),
+            OverviewError::AppNotFound(_) => AppError::NotFound,
+            OverviewError::Report(dokku_err) => AppError::Dokku(dokku_err),
+        })?;
 
     let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
     let process_label = match overview.process_count {
         -1 => "—".to_owned(),
         count => count.to_string(),
@@ -144,20 +151,30 @@ pub async fn show(
     let page = ShowPage {
         email: &user.email,
         csrf_token: &csrf_token,
-        flash: take_flash(&session).as_ref(),
+        flash: flash.as_ref(),
         name: &name,
         health_label: overview.health.label(),
         health_css: overview.health.badge_css(),
         process_label,
-        deployed: overview.ps_report.as_ref().map(|r| r.deployed).unwrap_or(false),
+        deployed: overview
+            .ps_report
+            .as_ref()
+            .map(|r| r.deployed)
+            .unwrap_or(false),
         created_at: app_info.map(|a| a.created_at.as_str()).unwrap_or("unknown"),
         locked_label: app_info.map(AppInfo::locked_label).unwrap_or("unknown"),
-        image_status_label: app_info.map(AppInfo::image_status_label).unwrap_or("unknown"),
-        link_exists_label: app_info.map(AppInfo::link_exists_label).unwrap_or("unknown"),
-        dns_record_exists_label: app_info.map(AppInfo::dns_record_exists_label).unwrap_or("unknown"),
+        image_status_label: app_info
+            .map(AppInfo::image_status_label)
+            .unwrap_or("unknown"),
+        link_exists_label: app_info
+            .map(AppInfo::link_exists_label)
+            .unwrap_or("unknown"),
+        dns_record_exists_label: app_info
+            .map(AppInfo::dns_record_exists_label)
+            .unwrap_or("unknown"),
     };
 
-    Ok(render(&page)?)
+    render(&page)
 }
 
 pub async fn delete_confirm(
@@ -168,21 +185,22 @@ pub async fn delete_confirm(
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
     let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
 
     let page = DeleteConfirmPage {
         email: &user.email,
         csrf_token: &csrf_token,
-        flash: take_flash(&session).as_ref(),
+        flash: flash.as_ref(),
         name: &name,
     };
 
-    Ok(render(&page)?)
+    render(&page)
 }
 
 pub async fn destroy(
     state: web::Data<AppState>,
     session: Session,
-    _form: CsrfForm<DestroyForm>,
+    form: CsrfForm<DestroyForm>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
@@ -198,6 +216,15 @@ pub async fn destroy(
             return Ok(see_other("/"));
         }
     };
+
+    if form.0.name.trim() != name {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Type `{name}` to confirm deletion."),
+        );
+        return Ok(see_other(&format!("/apps/{}/delete", name)));
+    }
 
     match state
         .dokku
@@ -224,4 +251,6 @@ pub async fn destroy(
 }
 
 #[derive(Deserialize)]
-pub struct DestroyForm {}
+pub struct DestroyForm {
+    name: String,
+}

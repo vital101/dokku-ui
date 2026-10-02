@@ -42,7 +42,12 @@ impl DokkuCommand {
             DokkuCommand::PsStop { app } => vec!["ps:stop".into(), app.as_str().into()],
             DokkuCommand::PsRestart { app } => vec!["ps:restart".into(), app.as_str().into()],
             DokkuCommand::AppsReport { app } => {
-                vec!["apps:report".into(), app.as_str().into(), "--format".into(), "json".into()]
+                vec![
+                    "apps:report".into(),
+                    app.as_str().into(),
+                    "--format".into(),
+                    "json".into(),
+                ]
             }
             DokkuCommand::ConfigShow { app } => {
                 vec!["config:show".into(), app.as_str().into()]

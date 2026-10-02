@@ -58,20 +58,17 @@ mod tests {
     #[test]
     fn redirect_is_307() {
         let resp = redirect("/foo");
-        assert_eq!(resp.status(), actix_web::http::StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(
-            resp.headers().get(LOCATION).unwrap(),
-            "/foo"
+            resp.status(),
+            actix_web::http::StatusCode::TEMPORARY_REDIRECT
         );
+        assert_eq!(resp.headers().get(LOCATION).unwrap(), "/foo");
     }
 
     #[test]
     fn see_other_is_303() {
         let resp = see_other("/bar");
         assert_eq!(resp.status(), actix_web::http::StatusCode::SEE_OTHER);
-        assert_eq!(
-            resp.headers().get(LOCATION).unwrap(),
-            "/bar"
-        );
+        assert_eq!(resp.headers().get(LOCATION).unwrap(), "/bar");
     }
 }
