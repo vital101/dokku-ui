@@ -1,12 +1,15 @@
+use std::collections::HashMap;
+
 use actix_session::Session;
 use actix_web::{HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
 
-use crate::dokku::{OverviewError, app_overview};
+use crate::dokku::{app_config, app_logs, app_overview};
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
-use crate::domain::types::AppInfo;
+use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
+use crate::domain::types::{AppInfo, EnvVar};
 use crate::error::AppError;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
@@ -35,6 +38,7 @@ struct ShowPage<'a> {
     csrf_token: &'a str,
     flash: Option<&'a FlashMessage>,
     name: &'a str,
+    active_tab: &'static str,
     health_label: &'static str,
     health_css: &'static str,
     process_label: String,
@@ -44,6 +48,17 @@ struct ShowPage<'a> {
     image_status_label: &'static str,
     link_exists_label: &'static str,
     dns_record_exists_label: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/config.html")]
+struct ConfigPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+    vars: Vec<EnvVar>,
 }
 
 #[derive(Template)]
@@ -132,14 +147,7 @@ pub async fn show(
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
 
-    let overview = app_overview(&*state.dokku, &name)
-        .await
-        .map_err(|err| match err {
-            OverviewError::List(dokku_err) => AppError::Dokku(dokku_err),
-            OverviewError::ParseList(parse_err) => AppError::Internal(parse_err.to_string()),
-            OverviewError::AppNotFound(_) => AppError::NotFound,
-            OverviewError::Report(dokku_err) => AppError::Dokku(dokku_err),
-        })?;
+    let overview = app_overview(&*state.dokku, &name).await?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
@@ -153,6 +161,7 @@ pub async fn show(
         csrf_token: &csrf_token,
         flash: flash.as_ref(),
         name: &name,
+        active_tab: "overview",
         health_label: overview.health.label(),
         health_css: overview.health.badge_css(),
         process_label,
@@ -172,6 +181,73 @@ pub async fn show(
         dns_record_exists_label: app_info
             .map(AppInfo::dns_record_exists_label)
             .unwrap_or("unknown"),
+    };
+
+    render(&page)
+}
+
+pub async fn config(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let user = current_user(&state, &session).await?;
+
+    let vars = app_config(&*state.dokku, &name).await?;
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = ConfigPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "config",
+        vars,
+    };
+
+    render(&page)
+}
+
+#[derive(Template)]
+#[template(path = "apps/logs.html")]
+struct LogsPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+    lines: Vec<String>,
+    line_count: u32,
+    min_lines: u32,
+    max_lines: u32,
+}
+
+pub async fn logs(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let user = current_user(&state, &session).await?;
+
+    let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
+    let log_lines = app_logs(&*state.dokku, &name, num_lines).await?;
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = LogsPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "logs",
+        lines: log_lines.as_slice().to_vec(),
+        line_count: num_lines,
+        min_lines: LOG_LINES_MIN,
+        max_lines: LOG_LINES_MAX,
     };
 
     render(&page)
@@ -253,4 +329,105 @@ pub async fn destroy(
 #[derive(Deserialize)]
 pub struct DestroyForm {
     name: String,
+}
+
+#[derive(Deserialize)]
+pub struct ActionForm {}
+
+#[derive(Clone, Copy)]
+enum AppAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl AppAction {
+    fn verb(self) -> &'static str {
+        match self {
+            AppAction::Start => "start",
+            AppAction::Stop => "stop",
+            AppAction::Restart => "restart",
+        }
+    }
+
+    fn past_tense(self) -> &'static str {
+        match self {
+            AppAction::Start => "started",
+            AppAction::Stop => "stopped",
+            AppAction::Restart => "restarted",
+        }
+    }
+
+    fn command(self, app: AppName) -> DokkuCommand {
+        match self {
+            AppAction::Start => DokkuCommand::PsStart { app },
+            AppAction::Stop => DokkuCommand::PsStop { app },
+            AppAction::Restart => DokkuCommand::PsRestart { app },
+        }
+    }
+}
+
+pub async fn start(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    process_action(&state, &session, path.into_inner(), AppAction::Start).await
+}
+
+pub async fn stop(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    process_action(&state, &session, path.into_inner(), AppAction::Stop).await
+}
+
+pub async fn restart(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    process_action(&state, &session, path.into_inner(), AppAction::Restart).await
+}
+
+async fn process_action(
+    state: &AppState,
+    session: &Session,
+    name: String,
+    action: AppAction,
+) -> Result<HttpResponse, AppError> {
+    let app = match AppName::try_from(name.clone()) {
+        Ok(app) => app,
+        Err(err) => {
+            set_flash(
+                session,
+                FlashLevel::Error,
+                format!("Invalid app name: {err}"),
+            );
+            return Ok(see_other("/"));
+        }
+    };
+
+    match state.dokku.exec(&action.command(app)).await {
+        Ok(_) => {
+            set_flash(
+                session,
+                FlashLevel::Success,
+                format!("App '{name}' {}.", action.past_tense()),
+            );
+            Ok(see_other(&format!("/apps/{name}")))
+        }
+        Err(err) => {
+            set_flash(
+                session,
+                FlashLevel::Error,
+                format!("Failed to {} app: {err}", action.verb()),
+            );
+            Ok(see_other(&format!("/apps/{name}")))
+        }
+    }
 }

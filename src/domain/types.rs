@@ -38,6 +38,17 @@ pub struct EnvVar {
     pub value: String,
 }
 
+impl EnvVar {
+    /// Fixed-length mask for display; leaks nothing about the value or its length.
+    pub fn masked_value(&self) -> &'static str {
+        if self.value.is_empty() {
+            ""
+        } else {
+            "••••••••"
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AppStats {
     pub total: usize,
@@ -272,5 +283,37 @@ mod tests {
         assert_eq!(lines.as_slice(), &["a", "b"]);
         assert!(!lines.is_empty());
         assert!(LogLines::new(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn env_var_masked_value_is_fixed_length() {
+        assert_eq!(
+            EnvVar {
+                key: "K".into(),
+                value: "short".into()
+            }
+            .masked_value(),
+            "••••••••"
+        );
+        assert_eq!(
+            EnvVar {
+                key: "K".into(),
+                value: "a-much-longer-secret-value".into()
+            }
+            .masked_value(),
+            "••••••••"
+        );
+    }
+
+    #[test]
+    fn env_var_masked_value_empty_stays_empty() {
+        assert_eq!(
+            EnvVar {
+                key: "K".into(),
+                value: String::new()
+            }
+            .masked_value(),
+            ""
+        );
     }
 }

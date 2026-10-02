@@ -1,0 +1,27 @@
+{% extends "apps/base_app.html" %}
+
+{% block app_content %}
+<div class="space-y-6">
+  <div class="flex items-center justify-between">
+    <h3 class="text-sm font-medium text-white">Logs</h3>
+    <form method="get" action="/apps/{{ name }}/logs" class="flex items-center gap-2">
+      <label for="lines" class="text-sm text-slate-400">Lines</label>
+      <input id="lines" type="number" name="lines" min="{{ min_lines }}" max="{{ max_lines }}"
+             value="{{ line_count }}"
+             class="w-24 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
+      <button type="submit"
+              class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+        Update
+      </button>
+    </form>
+  </div>
+  {% if lines.is_empty() %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <p class="text-sm text-slate-400">No log lines yet.</p>
+  </div>
+  {% else %}
+  <pre class="max-h-[70vh] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-4 text-xs leading-relaxed text-slate-300">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+  {% endif %}
+</div>
+{% endblock %}

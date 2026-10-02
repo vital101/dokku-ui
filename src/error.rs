@@ -20,6 +20,30 @@ pub enum AppError {
     BadRequest(String),
 }
 
+impl From<crate::dokku::app_pages::AppPageError> for AppError {
+    fn from(err: crate::dokku::app_pages::AppPageError) -> Self {
+        match err {
+            crate::dokku::app_pages::AppPageError::PreCheck(pre) => pre.into(),
+            crate::dokku::app_pages::AppPageError::Fetch(dokku_err) => AppError::Dokku(dokku_err),
+        }
+    }
+}
+
+impl From<crate::dokku::overview::OverviewError> for AppError {
+    fn from(err: crate::dokku::overview::OverviewError) -> Self {
+        match err {
+            crate::dokku::overview::OverviewError::List(dokku_err)
+            | crate::dokku::overview::OverviewError::Report(dokku_err) => {
+                AppError::Dokku(dokku_err)
+            }
+            crate::dokku::overview::OverviewError::ParseList(parse_err) => {
+                AppError::Internal(parse_err.to_string())
+            }
+            crate::dokku::overview::OverviewError::AppNotFound(_) => AppError::NotFound,
+        }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "error.html")]
 struct ErrorPage<'a> {
@@ -130,5 +154,51 @@ mod tests {
         let html = String::from_utf8(bytes.to_vec()).expect("utf-8");
         assert!(html.contains("502"));
         assert!(html.contains("app not found"));
+    }
+
+    #[test]
+    fn overview_error_maps_to_app_error() {
+        use crate::dokku::client::DokkuError;
+        use crate::dokku::overview::OverviewError;
+
+        assert!(matches!(
+            AppError::from(OverviewError::AppNotFound("x".into())),
+            AppError::NotFound
+        ));
+        assert!(matches!(
+            AppError::from(OverviewError::List(DokkuError::Connect("refused".into()))),
+            AppError::Dokku(DokkuError::Connect(_))
+        ));
+        assert!(matches!(
+            AppError::from(OverviewError::Report(DokkuError::Exit {
+                code: 1,
+                stderr: "boom".into()
+            })),
+            AppError::Dokku(DokkuError::Exit { .. })
+        ));
+        assert!(matches!(
+            AppError::from(OverviewError::ParseList(
+                crate::domain::ParseError::InvalidJson("x".into())
+            )),
+            AppError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn app_page_error_maps_to_app_error() {
+        use crate::dokku::app_pages::AppPageError;
+        use crate::dokku::client::DokkuError;
+        use crate::dokku::overview::OverviewError;
+
+        assert!(matches!(
+            AppError::from(AppPageError::PreCheck(OverviewError::AppNotFound(
+                "x".into()
+            ))),
+            AppError::NotFound
+        ));
+        assert!(matches!(
+            AppError::from(AppPageError::Fetch(DokkuError::Connect("refused".into()))),
+            AppError::Dokku(DokkuError::Connect(_))
+        ));
     }
 }

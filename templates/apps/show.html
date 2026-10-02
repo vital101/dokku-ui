@@ -1,9 +1,6 @@
-{% extends "base.html" %}
+{% extends "apps/base_app.html" %}
 
-{% block title %}{{ name }} — Dokku UI{% endblock %}
-{% block heading %}{{ name }}{% endblock %}
-
-{% block content %}
+{% block app_content %}
 <div class="space-y-6">
   <div class="flex items-center gap-4">
     <span class="inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium {{ health_css }}">
@@ -52,6 +49,27 @@
   </div>
 
   <div class="flex gap-3">
+    <form method="post" action="/apps/{{ name }}/start">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+        Start
+      </button>
+    </form>
+    <form method="post" action="/apps/{{ name }}/stop">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700">
+        Stop
+      </button>
+    </form>
+    <form method="post" action="/apps/{{ name }}/restart">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600">
+        Restart
+      </button>
+    </form>
     <a href="/apps/{{ name }}/delete"
        class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
       Delete app

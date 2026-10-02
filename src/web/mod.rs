@@ -92,11 +92,16 @@ pub fn build_app(
         .route("/apps/new", web::get().to(apps::new_form))
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
+        .route("/apps/{name}/config", web::get().to(apps::config))
+        .route("/apps/{name}/logs", web::get().to(apps::logs))
         .service(
             web::resource("/apps/{name}/delete")
                 .route(web::get().to(apps::delete_confirm))
                 .route(web::post().to(apps::destroy)),
         )
+        .route("/apps/{name}/start", web::post().to(apps::start))
+        .route("/apps/{name}/stop", web::post().to(apps::stop))
+        .route("/apps/{name}/restart", web::post().to(apps::restart))
         .default_service(web::to(not_found))
 }
 

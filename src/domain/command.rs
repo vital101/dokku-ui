@@ -55,7 +55,7 @@ impl DokkuCommand {
             DokkuCommand::Logs { app, num_lines } => vec![
                 "logs".into(),
                 app.as_str().into(),
-                "--num-lines".into(),
+                "--num".into(),
                 num_lines.to_string(),
             ],
         }
@@ -162,7 +162,7 @@ mod tests {
                 num_lines: 200
             }
             .argv(),
-            vec!["logs", "myapp", "--num-lines", "200"]
+            vec!["logs", "myapp", "--num", "200"]
         );
     }
 }

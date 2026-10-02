@@ -1,8 +1,8 @@
-use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{ParseError, parse_apps_list, parse_apps_report, parse_ps_report};
+use crate::domain::parse::{ParseError, parse_apps_report, parse_ps_report};
 use crate::domain::types::{AppHealth, AppOverview};
 
+use super::app_pages::ensure_app_exists;
 use super::client::{DokkuClient, DokkuError};
 
 #[derive(Debug, thiserror::Error)]
@@ -21,13 +21,7 @@ pub async fn app_overview(
     client: &dyn DokkuClient,
     name: &str,
 ) -> Result<AppOverview, OverviewError> {
-    let names = parse_apps_list(&client.exec(&DokkuCommand::AppsList).await?.stdout)?;
-    if !names.iter().any(|n| n == name) {
-        return Err(OverviewError::AppNotFound(name.to_owned()));
-    }
-
-    let app = AppName::try_from(name.to_owned())
-        .map_err(|_| OverviewError::AppNotFound(name.to_owned()))?;
+    let app = ensure_app_exists(client, name).await?;
 
     let app_info = match client
         .exec(&DokkuCommand::AppsReport { app: app.clone() })
@@ -56,6 +50,8 @@ pub async fn app_overview(
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::AppName;
+
     use super::*;
     use crate::dokku::{DokkuOutput, MockClient};
 

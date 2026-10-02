@@ -22,6 +22,9 @@ fn app_name(name: &str) -> AppName {
     AppName::try_from(name).expect("valid app name")
 }
 
+const CONFIG_FIXTURE: &str = include_str!("fixtures/config_show.txt");
+const LOGS_FIXTURE: &str = include_str!("fixtures/logs.txt");
+
 fn apps_report() -> DokkuOutput {
     DokkuOutput::ok(
         r#"{"app created at": "2026-01-01T00:00:00Z", "app locked": "false"}"#.to_owned(),
@@ -82,7 +85,13 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
     seed_user(&state, "admin@example.com", "correct-horse-battery").await;
     let app = test::init_service(build_app(state)).await;
 
-    for path in ["/apps/new", "/apps/alpha", "/apps/alpha/delete"] {
+    for path in [
+        "/apps/new",
+        "/apps/alpha",
+        "/apps/alpha/delete",
+        "/apps/alpha/config",
+        "/apps/alpha/logs",
+    ] {
         let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
         assert_eq!(location(&resp), "/login", "{path}");
@@ -91,6 +100,9 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
     for (path, body) in [
         ("/apps", "name=alpha"),
         ("/apps/alpha/delete", "name=alpha"),
+        ("/apps/alpha/start", ""),
+        ("/apps/alpha/stop", ""),
+        ("/apps/alpha/restart", ""),
     ] {
         let resp = test::call_service(&app, form_request(path, body.to_owned()).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -454,6 +466,9 @@ async fn app_posts_without_valid_csrf_are_rejected() {
     for (path, body) in [
         ("/apps", "name=alpha"),
         ("/apps/alpha/delete", "name=alpha"),
+        ("/apps/alpha/start", ""),
+        ("/apps/alpha/stop", ""),
+        ("/apps/alpha/restart", ""),
     ] {
         let resp = test::call_service(
             &app,
@@ -477,4 +492,436 @@ async fn app_posts_without_valid_csrf_are_rejected() {
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path} wrong token");
     }
+}
+
+#[tokio::test]
+async fn actions_succeed_flash_and_redirect_to_show() {
+    for (path, command, flash) in [
+        (
+            "/apps/alpha/start",
+            DokkuCommand::PsStart {
+                app: app_name("alpha"),
+            },
+            "App &#39;alpha&#39; started.",
+        ),
+        (
+            "/apps/alpha/stop",
+            DokkuCommand::PsStop {
+                app: app_name("alpha"),
+            },
+            "App &#39;alpha&#39; stopped.",
+        ),
+        (
+            "/apps/alpha/restart",
+            DokkuCommand::PsRestart {
+                app: app_name("alpha"),
+            },
+            "App &#39;alpha&#39; restarted.",
+        ),
+    ] {
+        let (state, client, _dir) =
+            harness(seeded_app_client().stub(command.clone(), Ok(DokkuOutput::ok("")))).await;
+        let app = test::init_service(build_app(state)).await;
+        let cookie = complete_setup(&app).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/apps/alpha")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        let csrf = extract_csrf(&get_body(resp).await);
+
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token={csrf}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "{path}");
+        assert_eq!(location(&resp), "/apps/alpha", "{path}");
+        let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+        assert!(client.calls().contains(&command), "{path} called dokku");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/apps/alpha")
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        let body = get_body(resp).await;
+        assert!(body.contains(flash), "{path} flash");
+    }
+}
+
+#[tokio::test]
+async fn action_error_flashes_stderr_and_redirects_to_show() {
+    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+        DokkuCommand::PsStart {
+            app: app_name("alpha"),
+        },
+        Err(exit_error(1, "no such app")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/alpha/start", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Failed to start app"));
+    assert!(body.contains("no such app"));
+}
+
+#[tokio::test]
+async fn action_with_invalid_app_name_flashes_and_skips_dokku() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/Bad_App/start", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, DokkuCommand::PsStart { .. })),
+        "no PsStart call for invalid name"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Invalid app name"));
+}
+
+#[tokio::test]
+async fn action_buttons_render_on_show_page() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+
+    assert!(body.contains(r#"action="/apps/alpha/start""#));
+    assert!(body.contains(r#"action="/apps/alpha/stop""#));
+    assert!(body.contains(r#"action="/apps/alpha/restart""#));
+}
+
+#[tokio::test]
+async fn config_renders_env_vars_and_tabs() {
+    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+        DokkuCommand::ConfigShow {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok(CONFIG_FIXTURE)),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("DATABASE_URL"));
+    assert!(body.contains("SECRET_KEY"));
+    assert!(
+        !body.contains("postgres://user:pass@host/db"),
+        "value masked"
+    );
+    assert!(!body.contains("s3cr3t"), "value masked");
+    assert!(body.contains("••••••••"), "masked values rendered");
+    assert!(!body.contains("=====>"), "dokku header line skipped");
+    assert!(body.contains("Values are masked"));
+    assert!(body.contains(r#"href="/apps/alpha/config""#), "config tab");
+    assert!(body.contains(r#"href="/apps/alpha/logs""#), "logs tab");
+    assert!(body.contains(r#"href="/apps/alpha""#), "overview tab");
+    assert!(
+        body.contains("border-emerald-500"),
+        "active tab highlighted"
+    );
+}
+
+#[tokio::test]
+async fn config_empty_renders_empty_state() {
+    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+        DokkuCommand::ConfigShow {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("=====> alpha env vars\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("No environment variables set."));
+}
+
+#[tokio::test]
+async fn config_unknown_app_renders_404_without_config_call() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/nope/config")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, DokkuCommand::ConfigShow { .. })),
+        "no ConfigShow call for unknown app"
+    );
+}
+
+#[tokio::test]
+async fn config_fetch_error_renders_502() {
+    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+        DokkuCommand::ConfigShow {
+            app: app_name("alpha"),
+        },
+        Err(exit_error(1, "boom")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = get_body(resp).await;
+    assert!(body.contains("boom"));
+}
+
+#[tokio::test]
+async fn logs_defaults_to_200_lines_and_strips_ansi() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::Logs {
+            app: app_name("alpha"),
+            num_lines: 200,
+        },
+        Ok(DokkuOutput::ok(LOGS_FIXTURE)),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("listening on 0.0.0.0:8080"));
+    assert!(body.contains("GET /healthz 200"));
+    assert!(body.contains("ERROR something failed"));
+    assert!(!body.contains('\x1b'), "ANSI escapes stripped");
+    assert!(client.calls().contains(&DokkuCommand::Logs {
+        app: app_name("alpha"),
+        num_lines: 200
+    }));
+    assert!(body.contains("Lines"));
+}
+
+#[tokio::test]
+async fn logs_clamps_lines_parameter() {
+    for (query, expected) in [
+        ("", 200),
+        ("?lines=5", 10),
+        ("?lines=99999", 1000),
+        ("?lines=abc", 200),
+        ("?lines=50", 50),
+    ] {
+        let command = DokkuCommand::Logs {
+            app: app_name("alpha"),
+            num_lines: expected,
+        };
+        let (state, client, _dir) =
+            harness(seeded_app_client().stub(command.clone(), Ok(DokkuOutput::ok("")))).await;
+        let app = test::init_service(build_app(state)).await;
+        let cookie = complete_setup(&app).await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/apps/alpha/logs{query}"))
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{query}");
+        assert!(
+            client.calls().contains(&command),
+            "{query} requests {expected} lines"
+        );
+    }
+}
+
+#[tokio::test]
+async fn logs_unknown_app_renders_404() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/nope/logs")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn logs_empty_renders_empty_state() {
+    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+        DokkuCommand::Logs {
+            app: app_name("alpha"),
+            num_lines: 200,
+        },
+        Ok(DokkuOutput::ok("")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("No log lines yet."));
+}
+
+#[tokio::test]
+async fn logs_fetch_error_renders_502() {
+    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+        DokkuCommand::Logs {
+            app: app_name("alpha"),
+            num_lines: 200,
+        },
+        Err(exit_error(1, "boom")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = get_body(resp).await;
+    assert!(body.contains("boom"));
 }

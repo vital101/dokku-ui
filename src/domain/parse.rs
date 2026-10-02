@@ -92,6 +92,17 @@ pub fn parse_logs(output: &str) -> LogLines {
     LogLines::new(output.lines().map(strip_ansi).collect())
 }
 
+pub const LOG_LINES_DEFAULT: u32 = 200;
+pub const LOG_LINES_MIN: u32 = 10;
+pub const LOG_LINES_MAX: u32 = 1000;
+
+pub fn clamp_log_lines(raw: Option<&str>) -> u32 {
+    let parsed = raw
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(LOG_LINES_DEFAULT);
+    parsed.clamp(LOG_LINES_MIN, LOG_LINES_MAX)
+}
+
 fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars();
@@ -338,5 +349,31 @@ mod tests {
     #[test]
     fn parses_empty_logs() {
         assert!(parse_logs("").is_empty());
+    }
+
+    #[test]
+    fn clamp_defaults_to_200_for_missing_or_unparseable() {
+        for raw in [None, Some(""), Some("abc"), Some("-5"), Some("12.5")] {
+            assert_eq!(clamp_log_lines(raw), LOG_LINES_DEFAULT, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn clamp_enforces_minimum() {
+        assert_eq!(clamp_log_lines(Some("0")), LOG_LINES_MIN);
+        assert_eq!(clamp_log_lines(Some("5")), LOG_LINES_MIN);
+        assert_eq!(clamp_log_lines(Some("10")), LOG_LINES_MIN);
+    }
+
+    #[test]
+    fn clamp_enforces_maximum() {
+        assert_eq!(clamp_log_lines(Some("1000")), LOG_LINES_MAX);
+        assert_eq!(clamp_log_lines(Some("5000")), LOG_LINES_MAX);
+    }
+
+    #[test]
+    fn clamp_passes_through_in_range_values() {
+        assert_eq!(clamp_log_lines(Some("50")), 50);
+        assert_eq!(clamp_log_lines(Some("200")), LOG_LINES_DEFAULT);
     }
 }
