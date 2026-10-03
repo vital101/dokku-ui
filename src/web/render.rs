@@ -37,6 +37,7 @@ mod tests {
         flash: Option<crate::web::flash::FlashMessage>,
         stats: crate::domain::types::AppStats,
         rows: Vec<crate::dokku::AppRow>,
+        updated: String,
     }
 
     #[tokio::test]
@@ -47,6 +48,7 @@ mod tests {
             flash: None,
             stats: Default::default(),
             rows: Vec::new(),
+            updated: "just now".into(),
         };
         let resp = render(&page).expect("render");
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);

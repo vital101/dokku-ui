@@ -14,18 +14,17 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
     let pool = storage::connect(&settings.database_url)
         .await
         .map_err(io::Error::other)?;
-    let russh: Arc<dyn dokku::DokkuClient> = Arc::new(dokku::RusshClient::new(&settings));
-    let dokku: Arc<dyn dokku::DokkuClient> = Arc::new(
-        dokku::CachingDokkuClient::new(
-            russh,
-            std::time::Duration::from_secs(settings.report_cache_ttl_secs),
-        )
-        .map_err(io::Error::other)?,
+    let client: Arc<dyn dokku::DokkuClient> = Arc::new(dokku::RusshClient::new(&settings));
+    let snapshot = Arc::new(dokku::SnapshotStore::new(client.clone()));
+    let _refresher = dokku::spawn_refresher(
+        snapshot.clone(),
+        std::time::Duration::from_secs(settings.snapshot_refresh_secs),
     );
     let state = web::AppState {
         db: pool,
         settings: settings.clone(),
-        dokku,
+        dokku: client,
+        snapshot,
     };
     actix_web::HttpServer::new(move || web::build_app(state.clone()))
         .bind(("0.0.0.0", settings.port))?

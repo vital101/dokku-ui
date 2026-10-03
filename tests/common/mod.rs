@@ -11,7 +11,7 @@ use actix_web::http::header::{CONTENT_TYPE, LOCATION};
 use actix_web::test;
 
 use dokku_ui::auth::password::hash_password;
-use dokku_ui::dokku::MockClient;
+use dokku_ui::dokku::{DokkuClient, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
@@ -29,17 +29,28 @@ pub async fn test_state() -> (AppState, tempfile::TempDir) {
 }
 
 pub async fn test_state_with_client(client: MockClient) -> (AppState, tempfile::TempDir) {
+    let (state, _client, dir) = test_state_with_shared_client(client).await;
+    (state, dir)
+}
+
+pub async fn test_state_with_shared_client(
+    client: MockClient,
+) -> (AppState, Arc<MockClient>, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let database_url = format!("sqlite://{}/test.db", dir.path().display());
     let pool = storage::connect(&database_url).await.expect("connect db");
     let settings = Settings::from_map(&HashMap::new()).expect("default settings");
-    let dokku: Arc<dyn dokku_ui::dokku::DokkuClient> = Arc::new(client);
+    let client_arc = Arc::new(client);
+    let dokku: Arc<dyn DokkuClient> = client_arc.clone();
+    let snapshot = Arc::new(SnapshotStore::new(dokku.clone()));
     (
         AppState {
             db: pool,
             settings,
             dokku,
+            snapshot,
         },
+        client_arc,
         dir,
     )
 }

@@ -99,6 +99,7 @@ dokku-ui/
     │   ├── mod.rs
     │   ├── client.rs          # trait DokkuClient + DokkuOutput/DokkuError
     │   ├── russh_client.rs    # the ONLY russh-dependent file
+    │   ├── snapshot.rs        # Snapshot + SnapshotStore + background refresher
     │   └── mock.rs            # fixture-backed MockClient (used by tests)
     ├── storage/
     │   ├── mod.rs             # pool init, migrate, WAL
@@ -219,7 +220,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain fo
 - Collect stdout/stderr, read exit status, 30s timeout via `tokio::time::timeout` (`COMMAND_TIMEOUT_SECS`).
 - Host key policy: accept-on-first-use into `known_hosts`-style file at `DOKKU_SSH_HOST_KEYS_PATH`; optional pre-pinned file works read-only.
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.
-- Dashboard fetches `ps:report` per app, concurrently (4 permits) over the persistent SSH session; `CachingDokkuClient` (TTL `REPORT_CACHE_TTL_SECS`, default 15s) caches reports and invalidates an app's entry on start/stop/restart/destroy. dokku boots its plugin system per command (~750ms), so repeat visits serve from cache. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
+- A background refresher (`SnapshotStore` + `spawn_refresher`) keeps an in-memory, parsed snapshot of the whole host warm (app list + `ps:report` + `apps:report`, fetched concurrently with 4 permits over the persistent SSH session). Every page read then serves from the snapshot (`Arc` clone, no IO); the first request after boot falls back to one synchronous refresh. After start/stop/restart the affected app is re-fetched synchronously before redirecting; create/destroy trigger a full refresh. A miss (app not listed) triggers a live `apps:list` fallback before 404ing, covering apps created via the CLI within the staleness window. Refresh failures keep the last good snapshot and log a warning. dokku boots its plugin system per command (~750ms), so this removes SSH latency from every request. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
 
 ## 9. Templates & UI
 
@@ -243,6 +244,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain fo
 | `SECRET_KEY` | dev value committed | Dokku config secret | actix-session cookie signing (≥32 bytes hex) |
 | `SESSION_TTL_SECS` | 604800 | — | |
 | `COMMAND_TIMEOUT_SECS` | 30 | — | SSH exec timeout |
+| `SNAPSHOT_REFRESH_SECS` | 15 | — | background snapshot refresh interval (positive) |
 | `COOKIE_SECURE` | false | true | Secure flag |
 | `RUST_LOG` | `dokku_ui=debug,tower? n/a` | `info` | tracing filter |
 

@@ -3,7 +3,10 @@ mod common;
 use actix_web::http::StatusCode;
 use actix_web::test;
 
-use common::{complete_setup, get_body, seed_user, test_state, test_state_with_client};
+use common::{
+    complete_setup, get_body, seed_user, test_state, test_state_with_client,
+    test_state_with_shared_client,
+};
 
 use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::AppName;
@@ -160,6 +163,59 @@ async fn dashboard_renders_503_when_apps_list_unreachable() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = get_body(resp).await;
     assert!(body.contains("503"));
+}
+
+#[tokio::test]
+async fn dashboard_second_request_makes_no_new_dokku_calls() {
+    let (state, client, _dir) = test_state_with_shared_client(seeded_dashboard()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let first = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let calls_after_first = client.calls().len();
+
+    let second = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        client.calls().len(),
+        calls_after_first,
+        "second load served entirely from the warm snapshot"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_shows_data_age_chip() {
+    let (state, _dir) = test_state_with_client(seeded_dashboard()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+
+    assert!(body.contains("Updated"));
+    assert!(body.contains("ago") || body.contains("just now"));
 }
 
 #[tokio::test]

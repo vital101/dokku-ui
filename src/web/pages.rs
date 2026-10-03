@@ -2,7 +2,7 @@ use actix_session::Session;
 use actix_web::{HttpResponse, web};
 use askama::Template;
 
-use crate::dokku::{AppRow, DashboardError, dashboard_data};
+use crate::dokku::{AppRow, dashboard_from_snapshot, format_age};
 use crate::domain::types::AppStats;
 use crate::error::AppError;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
@@ -19,6 +19,7 @@ struct DashboardPage {
     flash: Option<FlashMessage>,
     stats: AppStats,
     rows: Vec<AppRow>,
+    updated: String,
 }
 
 pub async fn dashboard(
@@ -35,11 +36,9 @@ pub async fn dashboard(
         .await?
         .ok_or_else(|| AppError::Internal("session user no longer exists".into()))?;
 
-    let data = dashboard_data(state.dokku.as_ref())
-        .await
-        .map_err(|err| match err {
-            DashboardError::List(dokku_err) => AppError::Dokku(dokku_err),
-        })?;
+    let snapshot = state.snapshot.ensure_loaded().await?;
+    let data = dashboard_from_snapshot(&snapshot);
+    let updated = format_age(snapshot.age());
 
     let page = DashboardPage {
         email: user.email,
@@ -47,6 +46,7 @@ pub async fn dashboard(
         flash: take_flash(&session),
         stats: data.stats,
         rows: data.rows,
+        updated,
     };
     Ok(HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")

@@ -11,7 +11,7 @@ use common::{
     test_state, test_state_with_client,
 };
 
-use dokku_ui::dokku::{DokkuClient, DokkuError, DokkuOutput, MockClient};
+use dokku_ui::dokku::{DokkuClient, DokkuError, DokkuOutput, MockClient, SnapshotStore};
 use dokku_ui::domain::AppName;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::settings::Settings;
@@ -62,11 +62,13 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
     let settings = Settings::from_map(&HashMap::new()).expect("default settings");
     let client_arc = Arc::new(client);
     let dokku: Arc<dyn DokkuClient> = client_arc.clone();
+    let snapshot = Arc::new(SnapshotStore::new(dokku.clone()));
     (
         AppState {
             db: pool,
             settings,
             dokku,
+            snapshot,
         },
         client_arc,
         dir,
@@ -267,6 +269,74 @@ async fn show_renders_app_overview() {
     assert!(body.contains("Yes"), "deployed flag");
     assert!(body.contains("2026-10-03 10:36 UTC"), "created at");
     assert!(body.contains("no"), "locked label");
+    assert!(body.contains("Updated"), "data age chip");
+}
+
+#[tokio::test]
+async fn show_unknown_app_falls_back_to_live_list() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/nope")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let list_calls = client
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, DokkuCommand::AppsList))
+        .count();
+    assert_eq!(list_calls, 2, "one cold load plus one live fallback");
+}
+
+#[tokio::test]
+async fn restart_refreshes_that_apps_report() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::PsRestart {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/alpha/restart", format!("csrf_token={csrf}"))
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let report_calls = client
+        .calls()
+        .iter()
+        .filter(|call| {
+            matches!(
+                call,
+                DokkuCommand::PsReport { app } if app.as_str() == "alpha"
+            )
+        })
+        .count();
+    assert_eq!(report_calls, 2, "initial load plus post-action refresh");
 }
 
 #[tokio::test]

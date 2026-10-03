@@ -1,43 +1,24 @@
-use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{parse_apps_report, parse_ps_report};
 use crate::domain::types::{AppHealth, AppOverview};
 
-use super::app_pages::ensure_app_exists;
-use super::client::{DokkuClient, DokkuError};
+use super::snapshot::Snapshot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OverviewError {
-    #[error("failed to list apps: {0}")]
-    List(#[from] DokkuError),
     #[error("app `{0}` was not found")]
     AppNotFound(String),
-    #[error("failed to fetch app report: {0}")]
-    Report(DokkuError),
 }
 
-pub async fn app_overview(
-    client: &dyn DokkuClient,
+/// Pure assembly of an app overview from an already-warm snapshot. No IO.
+pub fn overview_from_snapshot(
+    snapshot: &Snapshot,
     name: &str,
 ) -> Result<AppOverview, OverviewError> {
-    let app = ensure_app_exists(client, name).await?;
+    if !snapshot.contains(name) {
+        return Err(OverviewError::AppNotFound(name.to_owned()));
+    }
 
-    let apps_report_command = DokkuCommand::AppsReport { app: app.clone() };
-    let ps_report_command = DokkuCommand::PsReport { app };
-    let (apps_report, ps_report) = tokio::join!(
-        client.exec(&apps_report_command),
-        client.exec(&ps_report_command)
-    );
-
-    let app_info = match apps_report {
-        Ok(output) => parse_apps_report(&output.stdout, name),
-        Err(_) => None,
-    };
-
-    let ps_report = match ps_report {
-        Ok(output) => parse_ps_report(&output.stdout).ok(),
-        Err(err) => return Err(OverviewError::Report(err)),
-    };
-
+    let ps_report = snapshot.ps_report(name).cloned();
+    let app_info = snapshot.app_info(name).cloned();
     let health = AppHealth::from_report(ps_report.as_ref());
     let process_count = ps_report.as_ref().map(|r| r.process_count).unwrap_or(-1);
 
@@ -52,42 +33,59 @@ pub async fn app_overview(
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::AppName;
+    use std::time::Instant;
 
     use super::*;
-    use crate::dokku::{DokkuOutput, MockClient};
+    use crate::domain::types::{AppInfo, PsReport};
 
-    fn app(name: &str) -> AppName {
-        AppName::try_from(name).expect("valid app name")
+    fn ps_report(running: bool, deployed: bool, process_count: i64) -> PsReport {
+        PsReport {
+            deployed,
+            running,
+            process_count,
+            processes: Vec::new(),
+        }
     }
 
-    fn report(running: bool, deployed: bool, process_count: i64) -> DokkuOutput {
-        DokkuOutput::ok(format!(
-            r#"{{"deployed": "{deployed}", "running": "{running}", "processes": "{process_count}"}}"#
-        ))
+    fn app_info() -> AppInfo {
+        AppInfo {
+            name: "alpha".into(),
+            created_at: "2026-10-03 10:36 UTC".into(),
+            locked: false,
+            image_status: None,
+            link_exists: None,
+            dns_record_exists: None,
+        }
     }
 
-    fn apps_report() -> DokkuOutput {
-        DokkuOutput::ok(r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned())
+    fn snapshot(
+        names: &[&str],
+        reports: Vec<(&str, Option<PsReport>)>,
+        infos: Vec<(&str, Option<AppInfo>)>,
+    ) -> Snapshot {
+        Snapshot {
+            fetched_at: Instant::now(),
+            apps: names.iter().map(|name| (*name).to_owned()).collect(),
+            ps_reports: reports
+                .into_iter()
+                .map(|(name, report)| (name.to_owned(), report))
+                .collect(),
+            apps_reports: infos
+                .into_iter()
+                .map(|(name, info)| (name.to_owned(), info))
+                .collect(),
+        }
     }
 
-    #[tokio::test]
-    async fn happy_path_assembles_overview() {
-        let client = MockClient::new()
-            .stub(
-                DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok("=====> My Apps\nalpha\nbeta")),
-            )
-            .stub(
-                DokkuCommand::AppsReport { app: app("alpha") },
-                Ok(apps_report()),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("alpha") },
-                Ok(report(true, true, 2)),
-            );
+    #[test]
+    fn happy_path_assembles_overview() {
+        let snapshot = snapshot(
+            &["alpha"],
+            vec![("alpha", Some(ps_report(true, true, 2)))],
+            vec![("alpha", Some(app_info()))],
+        );
 
-        let overview = app_overview(&client, "alpha").await.expect("overview");
+        let overview = overview_from_snapshot(&snapshot, "alpha").expect("overview");
 
         assert_eq!(overview.name, "alpha");
         assert_eq!(overview.health, AppHealth::Running);
@@ -97,103 +95,37 @@ mod tests {
         assert_eq!(info.created_at, "2026-10-03 10:36 UTC");
     }
 
-    #[tokio::test]
-    async fn unknown_app_yields_not_found_without_extra_calls() {
-        let client = MockClient::new().stub(
-            DokkuCommand::AppsList,
-            Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
-        );
+    #[test]
+    fn unknown_app_yields_not_found() {
+        let snapshot = snapshot(&["alpha"], vec![], vec![]);
 
         assert!(matches!(
-            app_overview(&client, "nope").await,
+            overview_from_snapshot(&snapshot, "nope"),
             Err(OverviewError::AppNotFound(_))
         ));
-        assert!(
-            client.calls().iter().all(|c| !matches!(
-                c,
-                DokkuCommand::PsReport { .. } | DokkuCommand::AppsReport { .. }
-            )),
-            "no report calls for unknown app"
+    }
+
+    #[test]
+    fn missing_reports_degrade() {
+        let snapshot = snapshot(&["alpha"], vec![("alpha", None)], vec![("alpha", None)]);
+
+        let overview = overview_from_snapshot(&snapshot, "alpha").expect("overview");
+
+        assert!(overview.app_info.is_none());
+        assert_eq!(overview.health, AppHealth::Unknown);
+        assert_eq!(overview.process_count, -1);
+    }
+
+    #[test]
+    fn stopped_app_is_classified() {
+        let snapshot = snapshot(
+            &["alpha"],
+            vec![("alpha", Some(ps_report(false, true, 0)))],
+            vec![],
         );
-    }
 
-    #[tokio::test]
-    async fn ps_report_error_propagates() {
-        let client = MockClient::new()
-            .stub(
-                DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
-            )
-            .stub(
-                DokkuCommand::AppsReport { app: app("alpha") },
-                Ok(apps_report()),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("alpha") },
-                Err(crate::dokku::DokkuError::Exit {
-                    code: 1,
-                    stderr: "boom".into(),
-                }),
-            );
+        let overview = overview_from_snapshot(&snapshot, "alpha").expect("overview");
 
-        assert!(matches!(
-            app_overview(&client, "alpha").await,
-            Err(OverviewError::Report(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn apps_list_error_propagates() {
-        let client =
-            MockClient::with_default(Err(crate::dokku::DokkuError::Connect("refused".into())));
-
-        assert!(matches!(
-            app_overview(&client, "alpha").await,
-            Err(OverviewError::List(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn apps_report_degrades_on_invalid_json() {
-        let client = MockClient::new()
-            .stub(
-                DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
-            )
-            .stub(
-                DokkuCommand::AppsReport { app: app("alpha") },
-                Ok(DokkuOutput::ok("not json")),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("alpha") },
-                Ok(report(true, true, 1)),
-            );
-
-        let overview = app_overview(&client, "alpha").await.expect("overview");
-        assert!(overview.app_info.is_none());
-    }
-
-    #[tokio::test]
-    async fn apps_report_exec_error_degrades() {
-        let client = MockClient::new()
-            .stub(
-                DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
-            )
-            .stub(
-                DokkuCommand::AppsReport { app: app("alpha") },
-                Err(crate::dokku::DokkuError::Exit {
-                    code: 1,
-                    stderr: "boom".into(),
-                }),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("alpha") },
-                Ok(report(false, true, 0)),
-            );
-
-        let overview = app_overview(&client, "alpha").await.expect("overview");
-        assert!(overview.app_info.is_none());
         assert_eq!(overview.health, AppHealth::Stopped);
     }
 }

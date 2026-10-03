@@ -5,7 +5,7 @@ use actix_web::{HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
 
-use crate::dokku::{app_config, app_logs, app_overview};
+use crate::dokku::{app_config, app_logs, format_age, overview_from_snapshot};
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
@@ -48,6 +48,7 @@ struct ShowPage<'a> {
     image_status_label: &'static str,
     link_exists_label: &'static str,
     dns_record_exists_label: &'static str,
+    updated: String,
 }
 
 #[derive(Template)]
@@ -121,6 +122,9 @@ pub async fn create(
 
     match state.dokku.exec(&DokkuCommand::AppsCreate { app }).await {
         Ok(_) => {
+            if let Err(err) = state.snapshot.refresh().await {
+                tracing::warn!(error = %err, "snapshot refresh after create failed");
+            }
             set_flash(
                 &session,
                 FlashLevel::Success,
@@ -147,7 +151,8 @@ pub async fn show(
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
 
-    let overview = app_overview(&*state.dokku, &name).await?;
+    let (snapshot, _app) = state.snapshot.resolve_app(&name).await?;
+    let overview = overview_from_snapshot(&snapshot, &name)?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
@@ -181,6 +186,7 @@ pub async fn show(
         dns_record_exists_label: app_info
             .map(AppInfo::dns_record_exists_label)
             .unwrap_or("unknown"),
+        updated: format_age(snapshot.age()),
     };
 
     render(&page)
@@ -194,7 +200,8 @@ pub async fn config(
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
 
-    let vars = app_config(&*state.dokku, &name).await?;
+    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
+    let vars = app_config(&*state.dokku, app).await?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
@@ -234,7 +241,8 @@ pub async fn logs(
     let user = current_user(&state, &session).await?;
 
     let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
-    let log_lines = app_logs(&*state.dokku, &name, num_lines).await?;
+    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
+    let log_lines = app_logs(&*state.dokku, app, num_lines).await?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
@@ -308,6 +316,9 @@ pub async fn destroy(
         .await
     {
         Ok(_) => {
+            if let Err(err) = state.snapshot.refresh().await {
+                tracing::warn!(error = %err, "snapshot refresh after destroy failed");
+            }
             set_flash(
                 &session,
                 FlashLevel::Success,
@@ -412,8 +423,11 @@ async fn process_action(
         }
     };
 
-    match state.dokku.exec(&action.command(app)).await {
+    match state.dokku.exec(&action.command(app.clone())).await {
         Ok(_) => {
+            if let Err(err) = state.snapshot.refresh_app(app.as_str()).await {
+                tracing::warn!(error = %err, "snapshot refresh after action failed");
+            }
             set_flash(
                 session,
                 FlashLevel::Success,
