@@ -95,77 +95,6 @@ pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
     })
 }
 
-pub fn parse_ps_report_all(output: &str) -> Vec<(String, PsReport)> {
-    let mut reports = Vec::new();
-    let mut current: Option<(String, PsReportBuilder)> = None;
-
-    for raw_line in output.lines() {
-        let line = strip_ansi(raw_line);
-        let trimmed = line.trim();
-
-        if let Some(name) = trimmed
-            .strip_prefix("=====>")
-            .and_then(|rest| rest.strip_suffix(" ps information"))
-            .map(str::trim)
-        {
-            if let Some((name, builder)) = current.take() {
-                reports.push((name, builder.build()));
-            }
-            current = Some((name.to_owned(), PsReportBuilder::default()));
-            continue;
-        }
-
-        let Some((_, builder)) = current.as_mut() else {
-            continue;
-        };
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        match key.trim() {
-            "Deployed" => builder.deployed = Some(value == "true"),
-            "Running" => builder.running = Some(value == "true"),
-            "Processes" => {
-                if let Ok(count) = value.parse::<i64>() {
-                    builder.processes = Some(count);
-                }
-            }
-            status if status.starts_with("Status ") => {
-                let process_type = status.trim_start_matches("Status ").replace(' ', ".");
-                builder.statuses.push(ProcessStatus {
-                    process_type,
-                    state: ProcessState::parse(value),
-                });
-            }
-            _ => {}
-        }
-    }
-
-    if let Some((name, builder)) = current.take() {
-        reports.push((name, builder.build()));
-    }
-    reports
-}
-
-#[derive(Default)]
-struct PsReportBuilder {
-    deployed: Option<bool>,
-    running: Option<bool>,
-    processes: Option<i64>,
-    statuses: Vec<ProcessStatus>,
-}
-
-impl PsReportBuilder {
-    fn build(self) -> PsReport {
-        PsReport {
-            deployed: self.deployed.unwrap_or(false),
-            running: self.running.unwrap_or(false),
-            process_count: self.processes.unwrap_or(-1),
-            processes: self.statuses,
-        }
-    }
-}
-
 pub fn parse_config_show(output: &str) -> Vec<EnvVar> {
     output
         .lines()
@@ -228,7 +157,6 @@ mod tests {
     const PS_REPORT_NOT_DEPLOYED: &str =
         include_str!("../../tests/fixtures/ps_report_not_deployed.json");
     const PS_REPORT_MISSING: &str = include_str!("../../tests/fixtures/ps_report_missing.json");
-    const PS_REPORT_ALL: &str = include_str!("../../tests/fixtures/ps_report_all.txt");
     const CONFIG_SHOW: &str = include_str!("../../tests/fixtures/config_show.txt");
     const CONFIG_SHOW_EMPTY: &str = include_str!("../../tests/fixtures/config_show_empty.txt");
     const LOGS: &str = include_str!("../../tests/fixtures/logs.txt");
@@ -402,92 +330,6 @@ mod tests {
             parse_ps_report(r#"{"deployed": "true", "running": "false", "processes": 2}"#),
             Err(ParseError::MissingKey("processes"))
         ));
-    }
-
-    #[test]
-    fn parses_multi_app_report_fixture() {
-        let reports = parse_ps_report_all(PS_REPORT_ALL);
-        assert_eq!(
-            reports
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["myapp", "worker-app", "ghost-app"]
-        );
-
-        let (_, myapp) = &reports[0];
-        assert!(myapp.deployed);
-        assert!(myapp.running);
-        assert_eq!(myapp.process_count, 2);
-        assert_eq!(
-            myapp.processes,
-            vec![
-                ProcessStatus {
-                    process_type: "web.1".into(),
-                    state: ProcessState::Running,
-                },
-                ProcessStatus {
-                    process_type: "web.2".into(),
-                    state: ProcessState::Running,
-                },
-            ]
-        );
-
-        let (_, worker) = &reports[1];
-        assert!(worker.deployed);
-        assert!(!worker.running);
-        assert_eq!(
-            worker.processes,
-            vec![ProcessStatus {
-                process_type: "web.1".into(),
-                state: ProcessState::Stopped,
-            }]
-        );
-
-        let (_, ghost) = &reports[2];
-        assert!(!ghost.deployed);
-        assert!(!ghost.running);
-        assert_eq!(ghost.process_count, 0);
-        assert!(ghost.processes.is_empty());
-    }
-
-    #[test]
-    fn multi_app_report_is_empty_without_sections() {
-        assert!(parse_ps_report_all("").is_empty());
-        assert!(parse_ps_report_all("=====> My Apps\nalpha\n").is_empty());
-    }
-
-    #[test]
-    fn multi_app_report_skips_lines_outside_sections() {
-        let output = "noise before any section\nDeployed: true\n=====> myapp ps information\n       Deployed: true\n       Running: true\n       Processes: 1\n";
-        let reports = parse_ps_report_all(output);
-        assert_eq!(reports.len(), 1);
-        let (_, report) = &reports[0];
-        assert!(report.deployed);
-        assert!(report.running);
-        assert_eq!(report.process_count, 1);
-    }
-
-    #[test]
-    fn multi_app_report_missing_fields_default_tolerantly() {
-        let output = "=====> bare-app ps information\n       Deployed: true\n";
-        let reports = parse_ps_report_all(output);
-        assert_eq!(reports.len(), 1);
-        let (_, report) = &reports[0];
-        assert!(report.deployed);
-        assert!(!report.running);
-        assert_eq!(report.process_count, -1);
-        assert!(report.processes.is_empty());
-    }
-
-    #[test]
-    fn multi_app_report_strips_ansi_noise() {
-        let output = "\u{1b}[36m=====> myapp ps information\u{1b}[0m\n\u{1b}[32m       Deployed: true\u{1b}[0m\n       Running: true\n       Processes: 1\n";
-        let reports = parse_ps_report_all(output);
-        assert_eq!(reports.len(), 1);
-        let (_, report) = &reports[0];
-        assert!(report.deployed);
-        assert!(report.running);
     }
 
     #[test]

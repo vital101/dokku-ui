@@ -996,6 +996,7 @@ dependencies = [
  "argon2",
  "askama",
  "async-trait",
+ "futures-util",
  "rand 0.9.5",
  "russh",
  "serde",

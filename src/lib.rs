@@ -14,7 +14,14 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
     let pool = storage::connect(&settings.database_url)
         .await
         .map_err(io::Error::other)?;
-    let dokku: Arc<dyn dokku::DokkuClient> = Arc::new(dokku::RusshClient::new(&settings));
+    let russh: Arc<dyn dokku::DokkuClient> = Arc::new(dokku::RusshClient::new(&settings));
+    let dokku: Arc<dyn dokku::DokkuClient> = Arc::new(
+        dokku::CachingDokkuClient::new(
+            russh,
+            std::time::Duration::from_secs(settings.report_cache_ttl_secs),
+        )
+        .map_err(io::Error::other)?,
+    );
     let state = web::AppState {
         db: pool,
         settings: settings.clone(),
