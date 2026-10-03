@@ -1,5 +1,5 @@
 use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{ParseError, parse_apps_report, parse_ps_report};
+use crate::domain::parse::{parse_apps_report, parse_ps_report};
 use crate::domain::types::{AppHealth, AppOverview};
 
 use super::app_pages::ensure_app_exists;
@@ -9,8 +9,6 @@ use super::client::{DokkuClient, DokkuError};
 pub enum OverviewError {
     #[error("failed to list apps: {0}")]
     List(#[from] DokkuError),
-    #[error("failed to parse apps:list output: {0}")]
-    ParseList(#[from] ParseError),
     #[error("app `{0}` was not found")]
     AppNotFound(String),
     #[error("failed to fetch app report: {0}")]
@@ -66,9 +64,7 @@ mod tests {
     }
 
     fn apps_report() -> DokkuOutput {
-        DokkuOutput::ok(
-            r#"{"app created at": "2026-01-01T00:00:00Z", "app locked": "false"}"#.to_owned(),
-        )
+        DokkuOutput::ok(r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned())
     }
 
     #[tokio::test]
@@ -76,7 +72,7 @@ mod tests {
         let client = MockClient::new()
             .stub(
                 DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok(r#"["alpha","beta"]"#)),
+                Ok(DokkuOutput::ok("=====> My Apps\nalpha\nbeta")),
             )
             .stub(
                 DokkuCommand::AppsReport { app: app("alpha") },
@@ -94,13 +90,15 @@ mod tests {
         assert_eq!(overview.process_count, 2);
         let info = overview.app_info.expect("app_info");
         assert!(!info.locked);
-        assert_eq!(info.created_at, "2026-01-01T00:00:00Z");
+        assert_eq!(info.created_at, "2026-10-03 10:36 UTC");
     }
 
     #[tokio::test]
     async fn unknown_app_yields_not_found_without_extra_calls() {
-        let client =
-            MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)));
+        let client = MockClient::new().stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+        );
 
         assert!(matches!(
             app_overview(&client, "nope").await,
@@ -118,7 +116,10 @@ mod tests {
     #[tokio::test]
     async fn ps_report_error_propagates() {
         let client = MockClient::new()
-            .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)))
+            .stub(
+                DokkuCommand::AppsList,
+                Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+            )
             .stub(
                 DokkuCommand::AppsReport { app: app("alpha") },
                 Ok(apps_report()),
@@ -149,20 +150,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apps_list_parse_error_propagates() {
-        let client =
-            MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok("not json")));
-
-        assert!(matches!(
-            app_overview(&client, "alpha").await,
-            Err(OverviewError::ParseList(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn apps_report_degrades_on_invalid_json() {
         let client = MockClient::new()
-            .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)))
+            .stub(
+                DokkuCommand::AppsList,
+                Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+            )
             .stub(
                 DokkuCommand::AppsReport { app: app("alpha") },
                 Ok(DokkuOutput::ok("not json")),
@@ -179,7 +172,10 @@ mod tests {
     #[tokio::test]
     async fn apps_report_exec_error_degrades() {
         let client = MockClient::new()
-            .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)))
+            .stub(
+                DokkuCommand::AppsList,
+                Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+            )
             .stub(
                 DokkuCommand::AppsReport { app: app("alpha") },
                 Err(crate::dokku::DokkuError::Exit {

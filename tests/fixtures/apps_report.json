@@ -1,8 +1,1 @@
-{
-  "app created at": "2026-09-15T10:30:00+00:00",
-  "app deploy source": "",
-  "app deploy source metadata": "",
-  "app dir": "/home/dokku/myapp",
-  "app disable automatic creation": "false",
-  "app locked": "false"
-}
+{"app-created-at":"1791023796","app-deploy-source":"git-push","app-deploy-source-metadata":"1cca1f1c1ad3918fa4c12f97b8775d9ac752fee1","app-dir":"/home/dokku/dokku-ui","app-locked":"false"}

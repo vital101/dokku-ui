@@ -32,14 +32,9 @@ impl From<crate::dokku::app_pages::AppPageError> for AppError {
 impl From<crate::dokku::overview::OverviewError> for AppError {
     fn from(err: crate::dokku::overview::OverviewError) -> Self {
         match err {
-            crate::dokku::overview::OverviewError::List(dokku_err)
-            | crate::dokku::overview::OverviewError::Report(dokku_err) => {
-                AppError::Dokku(dokku_err)
-            }
-            crate::dokku::overview::OverviewError::ParseList(parse_err) => {
-                AppError::Internal(parse_err.to_string())
-            }
+            crate::dokku::overview::OverviewError::List(dokku_err) => AppError::Dokku(dokku_err),
             crate::dokku::overview::OverviewError::AppNotFound(_) => AppError::NotFound,
+            crate::dokku::overview::OverviewError::Report(dokku_err) => AppError::Dokku(dokku_err),
         }
     }
 }
@@ -175,12 +170,6 @@ mod tests {
                 stderr: "boom".into()
             })),
             AppError::Dokku(DokkuError::Exit { .. })
-        ));
-        assert!(matches!(
-            AppError::from(OverviewError::ParseList(
-                crate::domain::ParseError::InvalidJson("x".into())
-            )),
-            AppError::Internal(_)
         ));
     }
 

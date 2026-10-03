@@ -31,7 +31,7 @@ fn seeded_dashboard() -> MockClient {
     MockClient::new()
         .stub(
             DokkuCommand::AppsList,
-            Ok(DokkuOutput::ok(r#"["alpha","beta","gamma"]"#)),
+            Ok(DokkuOutput::ok("=====> My Apps\nalpha\nbeta\ngamma")),
         )
         .stub(
             DokkuCommand::PsReport { app: app("alpha") },
@@ -86,7 +86,7 @@ async fn dashboard_survives_single_app_report_failure() {
         MockClient::new()
             .stub(
                 DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok(r#"["good","bad"]"#)),
+                Ok(DokkuOutput::ok("=====> My Apps\ngood\nbad")),
             )
             .stub(
                 DokkuCommand::PsReport { app: app("good") },
@@ -117,9 +117,10 @@ async fn dashboard_survives_single_app_report_failure() {
 
 #[tokio::test]
 async fn dashboard_shows_empty_state_without_apps() {
-    let (state, _dir) = test_state_with_client(
-        MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok("[]"))),
-    )
+    let (state, _dir) = test_state_with_client(MockClient::new().stub(
+        DokkuCommand::AppsList,
+        Ok(DokkuOutput::ok("=====> My Apps")),
+    ))
     .await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -159,28 +160,6 @@ async fn dashboard_renders_503_when_apps_list_unreachable() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = get_body(resp).await;
     assert!(body.contains("503"));
-}
-
-#[tokio::test]
-async fn dashboard_renders_500_when_apps_list_is_unparseable() {
-    let (state, _dir) = test_state_with_client(
-        MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok("not json"))),
-    )
-    .await;
-    let app = test::init_service(build_app(state)).await;
-    let cookie = complete_setup(&app).await;
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/")
-            .cookie(cookie)
-            .to_request(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = get_body(resp).await;
-    assert!(body.contains("500"));
 }
 
 #[tokio::test]

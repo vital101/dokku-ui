@@ -39,7 +39,6 @@ pub async fn dashboard(
         .await
         .map_err(|err| match err {
             DashboardError::List(dokku_err) => AppError::Dokku(dokku_err),
-            DashboardError::Parse(parse_err) => AppError::Internal(parse_err.to_string()),
         })?;
 
     let page = DashboardPage {

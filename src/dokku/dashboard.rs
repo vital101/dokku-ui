@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{ParseError, parse_apps_list, parse_ps_report};
+use crate::domain::parse::{parse_apps_list, parse_ps_report};
 use crate::domain::types::{AppHealth, AppStats, PsReport};
 
 use super::client::{DokkuClient, DokkuError};
@@ -38,12 +38,10 @@ pub struct DashboardData {
 pub enum DashboardError {
     #[error("failed to list apps: {0}")]
     List(#[from] DokkuError),
-    #[error("failed to parse apps:list output: {0}")]
-    Parse(#[from] ParseError),
 }
 
 pub async fn dashboard_data(client: &dyn DokkuClient) -> Result<DashboardData, DashboardError> {
-    let names = parse_apps_list(&client.exec(&DokkuCommand::AppsList).await?.stdout)?;
+    let names = parse_apps_list(&client.exec(&DokkuCommand::AppsList).await?.stdout);
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REPORTS));
 
     let results: Vec<(String, Option<PsReport>)> = join_all(names.into_iter().map(|name| {
@@ -103,12 +101,21 @@ mod tests {
         client.calls().iter().filter(|c| c == &command).count()
     }
 
+    fn apps_list_output(names: &[&str]) -> DokkuOutput {
+        let mut output = String::from("=====> My Apps");
+        for name in names {
+            output.push('\n');
+            output.push_str(name);
+        }
+        DokkuOutput::ok(output)
+    }
+
     #[tokio::test]
     async fn happy_path_assembles_rows_and_stats() {
         let client = MockClient::new()
             .stub(
                 DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok(r#"["alpha","beta","gamma"]"#)),
+                Ok(apps_list_output(&["alpha", "beta", "gamma"])),
             )
             .stub(
                 DokkuCommand::PsReport { app: app("alpha") },
@@ -167,7 +174,7 @@ mod tests {
         let client = MockClient::new()
             .stub(
                 DokkuCommand::AppsList,
-                Ok(DokkuOutput::ok(r#"["good","bad"]"#)),
+                Ok(apps_list_output(&["good", "bad"])),
             )
             .stub(
                 DokkuCommand::PsReport { app: app("good") },
@@ -211,7 +218,7 @@ mod tests {
     #[tokio::test]
     async fn unparseable_report_degrades_to_unknown_row() {
         let client = MockClient::new()
-            .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["weird"]"#)))
+            .stub(DokkuCommand::AppsList, Ok(apps_list_output(&["weird"])))
             .stub(
                 DokkuCommand::PsReport { app: app("weird") },
                 Ok(DokkuOutput::ok("not json")),
@@ -225,10 +232,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_app_name_renders_unknown_without_exec() {
-        let client = MockClient::new().stub(
-            DokkuCommand::AppsList,
-            Ok(DokkuOutput::ok(r#"["Bad_Name"]"#)),
-        );
+        let client =
+            MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list_output(&["Bad_Name"])));
 
         let data = dashboard_data(&client).await.expect("dashboard data");
 
@@ -255,19 +260,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apps_list_parse_error_propagates() {
-        let client =
-            MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok("not json")));
-
-        assert!(matches!(
-            dashboard_data(&client).await,
-            Err(DashboardError::Parse(_))
-        ));
-    }
-
-    #[tokio::test]
     async fn empty_apps_list_yields_empty_data() {
-        let client = MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok("[]")));
+        let client = MockClient::new().stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps")),
+        );
 
         let data = dashboard_data(&client).await.expect("dashboard data");
 
@@ -278,10 +275,9 @@ mod tests {
     #[tokio::test]
     async fn many_apps_all_receive_reports_without_deadlock() {
         let names: Vec<String> = (0..20).map(|i| format!("app{i:02}")).collect();
-        let mut client = MockClient::new().stub(
-            DokkuCommand::AppsList,
-            Ok(DokkuOutput::ok(format!("{names:?}"))),
-        );
+        let list_output = format!("=====> My Apps\n{}", names.to_vec().join("\n"));
+        let mut client =
+            MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(list_output)));
         for name in &names {
             let app = app(name);
             client = client.stub(

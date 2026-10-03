@@ -18,7 +18,7 @@ pub async fn ensure_app_exists(
     client: &dyn DokkuClient,
     name: &str,
 ) -> Result<AppName, OverviewError> {
-    let names = parse_apps_list(&client.exec(&DokkuCommand::AppsList).await?.stdout)?;
+    let names = parse_apps_list(&client.exec(&DokkuCommand::AppsList).await?.stdout);
     if !names.iter().any(|n| n == name) {
         return Err(OverviewError::AppNotFound(name.to_owned()));
     }
@@ -56,7 +56,10 @@ mod tests {
     const LOGS: &str = include_str!("../../tests/fixtures/logs.txt");
 
     fn alpha_client() -> MockClient {
-        MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)))
+        MockClient::new().stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+        )
     }
 
     #[tokio::test]

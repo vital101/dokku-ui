@@ -17,9 +17,7 @@ pub enum DokkuCommand {
 impl DokkuCommand {
     pub fn argv(&self) -> Vec<String> {
         match self {
-            DokkuCommand::AppsList => {
-                vec!["apps:list".into(), "--format".into(), "json".into()]
-            }
+            DokkuCommand::AppsList => vec!["apps:list".into()],
             DokkuCommand::AppsCreate { app } => {
                 vec!["apps:create".into(), app.as_str().into()]
             }
@@ -72,10 +70,7 @@ mod tests {
 
     #[test]
     fn apps_list_argv() {
-        assert_eq!(
-            DokkuCommand::AppsList.argv(),
-            vec!["apps:list", "--format", "json"]
-        );
+        assert_eq!(DokkuCommand::AppsList.argv(), vec!["apps:list"]);
     }
 
     #[test]

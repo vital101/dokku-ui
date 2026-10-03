@@ -1,11 +1,1 @@
-{
-  "deployed": "true",
-  "processes": "2",
-  "ps-can-scale": "true",
-  "running": "true",
-  "restore": "true",
-  "status-web": "running (CID: abc123def4567)",
-  "status-worker": "exited (CID: fedcba7654321)",
-  "ps-computed-procfile-path": "Procfile",
-  "ps-computed-restart-policy": "on-failure:10"
-}
+{"computed-stop-timeout-seconds":"30","deployed":"true","global-stop-timeout-seconds":"30","processes":"1","ps-can-scale":"true","ps-computed-procfile-path":"Procfile","ps-global-procfile-path":"Procfile","ps-procfile-path":"","ps-restart-policy":"on-failure:10","restore":"true","running":"true","status-web.1":"running (CID: b1a216b5b1d)","stop-timeout-seconds":"30"}

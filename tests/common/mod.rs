@@ -23,7 +23,7 @@ pub const SESSION_COOKIE: &str = "dokku-ui-session";
 pub async fn test_state() -> (AppState, tempfile::TempDir) {
     let client = MockClient::new().stub(
         dokku_ui::domain::command::DokkuCommand::AppsList,
-        Ok(dokku_ui::dokku::DokkuOutput::ok("[]")),
+        Ok(dokku_ui::dokku::DokkuOutput::ok("=====> My Apps")),
     );
     test_state_with_client(client).await
 }

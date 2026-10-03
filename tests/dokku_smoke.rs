@@ -13,6 +13,7 @@ async fn live_host_lists_apps() {
         .exec(&DokkuCommand::AppsList)
         .await
         .expect("apps:list succeeds against live host");
-    let apps = parse_apps_list(&output.stdout).expect("parses apps list");
+    let apps = parse_apps_list(&output.stdout);
+    assert!(!apps.is_empty(), "live host should list at least one app");
     tracing::info!(apps = ?apps, "listed apps from live host");
 }

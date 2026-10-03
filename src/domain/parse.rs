@@ -10,28 +10,53 @@ pub enum ParseError {
     InvalidBool(&'static str, String),
 }
 
-pub fn parse_apps_list(json: &str) -> Result<Vec<String>, ParseError> {
-    serde_json::from_str::<Vec<String>>(json)
-        .map_err(|err| ParseError::InvalidJson(err.to_string()))
+pub fn parse_apps_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty() && !line.starts_with("====="))
+        .collect()
 }
 
 pub fn parse_apps_report(json: &str, name: &str) -> Option<AppInfo> {
     let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).ok()?;
 
-    let str_of = |key: &str| -> Option<String> {
-        map.get(key)
-            .and_then(|value| value.as_str())
-            .map(str::to_owned)
+    let str_of = |keys: [&str; 2]| -> Option<String> {
+        keys.iter().find_map(|key| {
+            map.get(*key)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
     };
 
     Some(AppInfo {
         name: name.to_owned(),
-        created_at: str_of("app created at").unwrap_or_default(),
-        locked: str_of("app locked").as_deref() == Some("true"),
+        created_at: format_created_at(
+            &str_of(["app-created-at", "app created at"]).unwrap_or_default(),
+        ),
+        locked: str_of(["app-locked", "app locked"]).as_deref() == Some("true"),
         image_status: None,
         link_exists: None,
         dns_record_exists: None,
     })
+}
+
+fn format_created_at(raw: &str) -> String {
+    let Ok(secs) = raw.parse::<i64>() else {
+        return raw.to_owned();
+    };
+    let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(secs) else {
+        return raw.to_owned();
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} UTC",
+        datetime.year(),
+        u8::from(datetime.month()),
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute()
+    )
 }
 
 pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
@@ -126,7 +151,7 @@ fn strip_ansi(input: &str) -> String {
 mod tests {
     use super::*;
 
-    const APPS_LIST: &str = include_str!("../../tests/fixtures/apps_list.json");
+    const APPS_LIST: &str = include_str!("../../tests/fixtures/apps_list.txt");
     const APPS_REPORT: &str = include_str!("../../tests/fixtures/apps_report.json");
     const PS_REPORT: &str = include_str!("../../tests/fixtures/ps_report.json");
     const PS_REPORT_NOT_DEPLOYED: &str =
@@ -139,29 +164,28 @@ mod tests {
     #[test]
     fn parses_apps_list_fixture() {
         assert_eq!(
-            parse_apps_list(APPS_LIST).expect("parse"),
+            parse_apps_list(APPS_LIST),
             vec!["myapp", "my-app", "api.internal", "1st-app"]
         );
     }
 
     #[test]
     fn parses_empty_apps_list() {
-        assert_eq!(parse_apps_list("[]").expect("parse"), Vec::<String>::new());
+        assert_eq!(parse_apps_list("=====> My Apps\n"), Vec::<String>::new());
+        assert_eq!(parse_apps_list(""), Vec::<String>::new());
     }
 
     #[test]
-    fn rejects_invalid_apps_list_json() {
-        assert!(matches!(
-            parse_apps_list("not json"),
-            Err(ParseError::InvalidJson(_))
-        ));
+    fn apps_list_strips_ansi_and_skips_headers_and_blanks() {
+        let output = "\u{1b}[36m=====> My Apps\u{1b}[0m\n\n  alpha  \n\u{1b}[32mbeta\u{1b}[0m\n\n";
+        assert_eq!(parse_apps_list(output), vec!["alpha", "beta"]);
     }
 
     #[test]
     fn parses_apps_report_fixture() {
-        let info = parse_apps_report(APPS_REPORT, "myapp").expect("parse");
-        assert_eq!(info.name, "myapp");
-        assert_eq!(info.created_at, "2026-09-15T10:30:00+00:00");
+        let info = parse_apps_report(APPS_REPORT, "dokku-ui").expect("parse");
+        assert_eq!(info.name, "dokku-ui");
+        assert_eq!(info.created_at, "2026-10-03 10:36 UTC");
         assert!(!info.locked);
         assert_eq!(info.image_status, None);
         assert_eq!(info.link_exists, None);
@@ -171,7 +195,7 @@ mod tests {
     #[test]
     fn apps_report_locked_flag_parses() {
         let info = parse_apps_report(
-            r#"{"app locked": "true", "app created at": "2026-01-01T00:00:00Z"}"#,
+            r#"{"app-created-at": "1791023796", "app-locked": "true"}"#,
             "myapp",
         )
         .expect("parse");
@@ -179,10 +203,48 @@ mod tests {
     }
 
     #[test]
+    fn apps_report_accepts_spaced_keys_from_older_dokku() {
+        let info = parse_apps_report(
+            r#"{"app created at": "2026-01-01T00:00:00Z", "app locked": "true"}"#,
+            "myapp",
+        )
+        .expect("parse");
+        assert_eq!(info.created_at, "2026-01-01T00:00:00Z");
+        assert!(info.locked);
+    }
+
+    #[test]
     fn apps_report_missing_locked_defaults_to_false() {
-        let info = parse_apps_report(r#"{"app created at": "2026-01-01T00:00:00Z"}"#, "myapp")
-            .expect("parse");
+        let info =
+            parse_apps_report(r#"{"app-created-at": "1791023796"}"#, "myapp").expect("parse");
         assert!(!info.locked);
+    }
+
+    #[test]
+    fn apps_report_missing_created_at_defaults_to_empty() {
+        let info = parse_apps_report(r#"{"app-locked": "false"}"#, "myapp").expect("parse");
+        assert_eq!(info.created_at, "");
+    }
+
+    #[test]
+    fn created_at_epoch_formats_as_utc() {
+        for (raw, expected) in [
+            ("0", "1970-01-01 00:00 UTC"),
+            ("1791023796", "2026-10-03 10:36 UTC"),
+        ] {
+            let info = parse_apps_report(&format!(r#"{{"app-created-at": "{raw}"}}"#), "myapp")
+                .expect("parse");
+            assert_eq!(info.created_at, expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn created_at_non_epoch_values_pass_through() {
+        for raw in ["2026-01-01T00:00:00Z", "", "not-a-date"] {
+            let info = parse_apps_report(&format!(r#"{{"app-created-at": "{raw}"}}"#), "myapp")
+                .expect("parse");
+            assert_eq!(info.created_at, raw);
+        }
     }
 
     #[test]
@@ -204,19 +266,13 @@ mod tests {
         let report = parse_ps_report(PS_REPORT).expect("parse");
         assert!(report.deployed);
         assert!(report.running);
-        assert_eq!(report.process_count, 2);
+        assert_eq!(report.process_count, 1);
         assert_eq!(
             report.processes,
-            vec![
-                ProcessStatus {
-                    process_type: "web".into(),
-                    state: ProcessState::Running,
-                },
-                ProcessStatus {
-                    process_type: "worker".into(),
-                    state: ProcessState::Stopped,
-                },
-            ]
+            vec![ProcessStatus {
+                process_type: "web.1".into(),
+                state: ProcessState::Running,
+            }]
         );
     }
 

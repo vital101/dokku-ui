@@ -26,9 +26,7 @@ const CONFIG_FIXTURE: &str = include_str!("fixtures/config_show.txt");
 const LOGS_FIXTURE: &str = include_str!("fixtures/logs.txt");
 
 fn apps_report() -> DokkuOutput {
-    DokkuOutput::ok(
-        r#"{"app created at": "2026-01-01T00:00:00Z", "app locked": "false"}"#.to_owned(),
-    )
+    DokkuOutput::ok(r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned())
 }
 
 fn ps_report(running: bool, deployed: bool, processes: i64) -> DokkuOutput {
@@ -39,7 +37,10 @@ fn ps_report(running: bool, deployed: bool, processes: i64) -> DokkuOutput {
 
 fn seeded_app_client() -> MockClient {
     MockClient::new()
-        .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(r#"["alpha"]"#)))
+        .stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+        )
         .stub(
             DokkuCommand::AppsReport {
                 app: app_name("alpha"),
@@ -264,7 +265,7 @@ async fn show_renders_app_overview() {
     assert!(body.contains("Running"));
     assert!(body.contains(r#">2</p>"#), "process count");
     assert!(body.contains("Yes"), "deployed flag");
-    assert!(body.contains("2026-01-01T00:00:00Z"), "created at");
+    assert!(body.contains("2026-10-03 10:36 UTC"), "created at");
     assert!(body.contains("no"), "locked label");
 }
 

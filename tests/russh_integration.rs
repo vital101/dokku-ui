@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use dokku_ui::dokku::{DokkuClient, RusshClient};
 use dokku_ui::domain::command::DokkuCommand;
-use dokku_ui::domain::parse::parse_ps_report;
+use dokku_ui::domain::parse::{parse_apps_list, parse_ps_report};
 use dokku_ui::settings::Settings;
 use russh::keys::{PrivateKey, PublicKey};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
@@ -53,8 +53,8 @@ impl server::Handler for FakeDokku {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data).into_owned();
         match command.as_str() {
-            "apps:list --format json" => {
-                session.data(channel, "[\"myapp\",\"api.internal\"]\n")?;
+            "apps:list" => {
+                session.data(channel, "=====> My Apps\nmyapp\napi.internal\n")?;
                 session.exit_status_request(channel, 0)?;
             }
             "ps:report myapp --format json" => {
@@ -101,7 +101,11 @@ async fn executes_command_and_reads_stdout() {
         .await
         .expect("apps:list succeeds");
     assert_eq!(output.exit_code, 0);
-    assert_eq!(output.stdout, "[\"myapp\",\"api.internal\"]\n");
+    assert_eq!(output.stdout, "=====> My Apps\nmyapp\napi.internal\n");
+    assert_eq!(
+        parse_apps_list(&output.stdout),
+        vec!["myapp".to_owned(), "api.internal".to_owned()]
+    );
 
     server.abort();
 }

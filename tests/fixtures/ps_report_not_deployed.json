@@ -1,6 +1,1 @@
-{
-  "deployed": "false",
-  "processes": "0",
-  "running": "false",
-  "ps-computed-procfile-path": ""
-}
+{"computed-stop-timeout-seconds":"30","deployed":"false","global-stop-timeout-seconds":"30","processes":"0","ps-can-scale":"true","ps-computed-procfile-path":"Procfile","ps-global-procfile-path":"Procfile","ps-procfile-path":"","ps-restart-policy":"on-failure:10","restore":"true","running":"false","stop-timeout-seconds":"30"}
