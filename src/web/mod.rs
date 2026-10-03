@@ -2,9 +2,11 @@ mod apps;
 mod auth_handlers;
 mod auth_middleware;
 mod csrf_form;
+mod favicon;
 mod flash;
 mod pages;
 mod render;
+mod security_headers;
 mod state;
 
 use actix_session::SessionMiddleware;
@@ -75,8 +77,12 @@ pub fn build_app(
                 )
                 .build(),
         )
+        .wrap(actix_web::middleware::from_fn(
+            security_headers::security_headers_middleware,
+        ))
         .service(actix_files::Files::new("/static", "./static"))
         .route("/healthz", web::get().to(healthz))
+        .route("/favicon.ico", web::get().to(favicon::favicon))
         .service(
             web::resource("/setup")
                 .route(web::get().to(auth_handlers::setup_form))
