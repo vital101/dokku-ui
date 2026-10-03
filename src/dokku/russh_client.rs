@@ -15,6 +15,8 @@ use super::client::{DokkuClient, DokkuError, DokkuOutput};
 
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+type Session = Arc<client::Handle<HostKeyHandler>>;
+
 pub struct RusshClient {
     config: Arc<client::Config>,
     host: String,
@@ -23,7 +25,7 @@ pub struct RusshClient {
     key_path: PathBuf,
     known_hosts_path: Option<PathBuf>,
     timeout: Duration,
-    session: tokio::sync::Mutex<Option<client::Handle<HostKeyHandler>>>,
+    session: tokio::sync::Mutex<Option<Session>>,
 }
 
 impl RusshClient {
@@ -43,6 +45,19 @@ impl RusshClient {
             timeout: Duration::from_secs(settings.command_timeout_secs),
             session: tokio::sync::Mutex::new(None),
         }
+    }
+
+    async fn session_handle(&self) -> Result<Session, DokkuError> {
+        let mut guard = self.session.lock().await;
+        if let Some(session) = guard.as_ref() {
+            if !session.is_closed() {
+                return Ok(session.clone());
+            }
+            Self::close_session(guard.take().expect("checked above")).await;
+        }
+        let session = Arc::new(self.connect().await?);
+        *guard = Some(session.clone());
+        Ok(session)
     }
 
     async fn connect(&self) -> Result<client::Handle<HostKeyHandler>, DokkuError> {
@@ -70,43 +85,47 @@ impl RusshClient {
         Ok(session)
     }
 
-    async fn run_command(&self, command: &str) -> Result<DokkuOutput, DokkuError> {
-        let mut guard = self.session.lock().await;
-        if let Some(session) = guard.take() {
-            let outcome = if session.is_closed() {
-                None
-            } else {
-                Self::run_channel(&session, command).await.ok()
-            };
-            match outcome {
-                Some(output) => {
-                    *guard = Some(session);
-                    return finalize(output);
-                }
-                None => Self::close_session(session).await,
+    async fn invalidate_if_current(&self, session: &Session) {
+        let taken = {
+            let mut guard = self.session.lock().await;
+            match guard.as_ref() {
+                Some(current) if Arc::ptr_eq(current, session) => guard.take(),
+                _ => None,
             }
+        };
+        if let Some(stale) = taken {
+            Self::close_session(stale).await;
         }
+    }
 
-        let session = self.connect().await?;
-        let output = match Self::run_channel(&session, command).await {
+    async fn run_command(&self, command: &str) -> Result<DokkuOutput, DokkuError> {
+        let session = self.session_handle().await?;
+        let channel = match session.channel_open_session().await {
+            Ok(channel) => channel,
+            Err(_) => {
+                self.invalidate_if_current(&session).await;
+                let session = self.session_handle().await?;
+                session
+                    .channel_open_session()
+                    .await
+                    .map_err(|err| DokkuError::Connect(err.to_string()))?
+            }
+        };
+
+        let output = match Self::exec_on_channel(channel, command).await {
             Ok(output) => output,
             Err(err) => {
-                Self::close_session(session).await;
+                self.invalidate_if_current(&session).await;
                 return Err(err);
             }
         };
-        *guard = Some(session);
         finalize(output)
     }
 
-    async fn run_channel(
-        session: &client::Handle<HostKeyHandler>,
+    async fn exec_on_channel(
+        mut channel: russh::Channel<russh::client::Msg>,
         command: &str,
     ) -> Result<DokkuOutput, DokkuError> {
-        let mut channel = session
-            .channel_open_session()
-            .await
-            .map_err(|err| DokkuError::Connect(err.to_string()))?;
         channel
             .exec(true, command)
             .await
@@ -135,7 +154,7 @@ impl RusshClient {
         })
     }
 
-    async fn close_session(session: client::Handle<HostKeyHandler>) {
+    async fn close_session(session: Session) {
         let _ = tokio::time::timeout(
             DISCONNECT_TIMEOUT,
             session.disconnect(Disconnect::ByApplication, "", ""),
@@ -217,5 +236,14 @@ impl client::Handler for HostKeyHandler {
                 Ok(false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn handle_is_sync() {
+        fn assert_sync<T: Sync>() {}
+        assert_sync::<russh::client::Handle<super::HostKeyHandler>>();
     }
 }

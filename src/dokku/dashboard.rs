@@ -10,7 +10,7 @@ use crate::domain::types::{AppHealth, AppStats, PsReport};
 
 use super::client::{DokkuClient, DokkuError};
 
-const MAX_CONCURRENT_REPORTS: usize = 4;
+const MAX_CONCURRENT_REPORTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppRow {

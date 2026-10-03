@@ -215,6 +215,42 @@ async fn failing_commands_do_not_tear_down_the_session() {
     server.abort();
 }
 
+#[tokio::test]
+async fn concurrent_commands_share_one_connection() {
+    let (addr, server, connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+    let app = || dokku_ui::domain::AppName::try_from("myapp").expect("app name");
+    let list_command = DokkuCommand::AppsList;
+    let ps_commands: Vec<_> = (0..3)
+        .map(|_| DokkuCommand::PsReport { app: app() })
+        .collect();
+
+    let results = tokio::join!(
+        client.exec(&list_command),
+        client.exec(&ps_commands[0]),
+        client.exec(&ps_commands[1]),
+        client.exec(&ps_commands[2])
+    );
+    for (i, result) in [&results.0, &results.1, &results.2, &results.3]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(result.is_ok(), "concurrent command {i} failed");
+    }
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "all concurrent commands multiplex over one connection"
+    );
+
+    server.abort();
+}
+
 async fn spawn_fake_dokku() -> (
     std::net::SocketAddr,
     tokio::task::JoinHandle<()>,

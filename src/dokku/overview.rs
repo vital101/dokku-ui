@@ -21,15 +21,19 @@ pub async fn app_overview(
 ) -> Result<AppOverview, OverviewError> {
     let app = ensure_app_exists(client, name).await?;
 
-    let app_info = match client
-        .exec(&DokkuCommand::AppsReport { app: app.clone() })
-        .await
-    {
+    let apps_report_command = DokkuCommand::AppsReport { app: app.clone() };
+    let ps_report_command = DokkuCommand::PsReport { app };
+    let (apps_report, ps_report) = tokio::join!(
+        client.exec(&apps_report_command),
+        client.exec(&ps_report_command)
+    );
+
+    let app_info = match apps_report {
         Ok(output) => parse_apps_report(&output.stdout, name),
         Err(_) => None,
     };
 
-    let ps_report = match client.exec(&DokkuCommand::PsReport { app }).await {
+    let ps_report = match ps_report {
         Ok(output) => parse_ps_report(&output.stdout).ok(),
         Err(err) => return Err(OverviewError::Report(err)),
     };
