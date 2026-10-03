@@ -14,17 +14,10 @@ fn app(name: &str) -> AppName {
     AppName::try_from(name).expect("valid app name")
 }
 
-fn ps_report(running: bool, deployed: bool, processes: i64) -> DokkuOutput {
-    DokkuOutput::ok(format!(
-        r#"{{"deployed": "{deployed}", "running": "{running}", "processes": "{processes}"}}"#
-    ))
-}
-
-fn ps_failure() -> Result<DokkuOutput, DokkuError> {
-    Err(DokkuError::Exit {
-        code: 1,
-        stderr: "boom".into(),
-    })
+fn ps_report_section(name: &str, deployed: bool, running: bool, processes: i64) -> String {
+    format!(
+        "=====> {name} ps information\n       Deployed: {deployed}\n       Running: {running}\n       Processes: {processes}\n"
+    )
 }
 
 fn seeded_dashboard() -> MockClient {
@@ -34,16 +27,15 @@ fn seeded_dashboard() -> MockClient {
             Ok(DokkuOutput::ok("=====> My Apps\nalpha\nbeta\ngamma")),
         )
         .stub(
-            DokkuCommand::PsReport { app: app("alpha") },
-            Ok(ps_report(true, true, 2)),
-        )
-        .stub(
-            DokkuCommand::PsReport { app: app("beta") },
-            Ok(ps_report(false, true, 1)),
-        )
-        .stub(
-            DokkuCommand::PsReport { app: app("gamma") },
-            Ok(ps_report(false, false, 0)),
+            DokkuCommand::PsReportAll {
+                apps: vec![app("alpha"), app("beta"), app("gamma")],
+            },
+            Ok(DokkuOutput::ok(format!(
+                "{}{}{}",
+                ps_report_section("alpha", true, true, 2),
+                ps_report_section("beta", true, false, 1),
+                ps_report_section("gamma", false, false, 0),
+            ))),
         )
 }
 
@@ -81,7 +73,7 @@ async fn dashboard_shows_stats_and_status_badges() {
 }
 
 #[tokio::test]
-async fn dashboard_survives_single_app_report_failure() {
+async fn dashboard_survives_report_failure() {
     let (state, _dir) = test_state_with_client(
         MockClient::new()
             .stub(
@@ -89,10 +81,14 @@ async fn dashboard_survives_single_app_report_failure() {
                 Ok(DokkuOutput::ok("=====> My Apps\ngood\nbad")),
             )
             .stub(
-                DokkuCommand::PsReport { app: app("good") },
-                Ok(ps_report(true, true, 1)),
-            )
-            .stub(DokkuCommand::PsReport { app: app("bad") }, ps_failure()),
+                DokkuCommand::PsReportAll {
+                    apps: vec![app("good"), app("bad")],
+                },
+                Err(DokkuError::Exit {
+                    code: 1,
+                    stderr: "boom".into(),
+                }),
+            ),
     )
     .await;
     let app = test::init_service(build_app(state)).await;
@@ -110,9 +106,8 @@ async fn dashboard_survives_single_app_report_failure() {
     let body = get_body(resp).await;
 
     assert!(body.contains("good"));
-    assert!(body.contains("Running"));
-    assert!(body.contains("bad"));
     assert!(body.contains("Unknown"));
+    assert!(body.contains("bad"));
 }
 
 #[tokio::test]

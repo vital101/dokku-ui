@@ -219,7 +219,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain fo
 - Collect stdout/stderr, read exit status, 30s timeout via `tokio::time::timeout` (`COMMAND_TIMEOUT_SECS`).
 - Host key policy: accept-on-first-use into `known_hosts`-style file at `DOKKU_SSH_HOST_KEYS_PATH`; optional pre-pinned file works read-only.
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.
-- Dashboard fan-out: `apps:list` then concurrent `ps:report` per app with `join_all` + semaphore (4 permits) so the dashboard stays responsive.
+- Dashboard fetches all app statuses in **one** `ps:report <app>...` invocation (plain-text multi-app output) over the persistent session, instead of one report per app — a per-app fan-out hit both the host's SSH rate limit and dokku's ~750ms plugin-boot cost per command.
 
 ## 9. Templates & UI
 

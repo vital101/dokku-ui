@@ -20,6 +20,7 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `apps_list.txt` | `dokku apps:list` | Plain text: `=====> My Apps` header, one app per line. **`apps:list` has no `--format` flag** (exit 2 on 0.38.4); the parser strips ANSI, trims, and skips blank/header lines. |
 | `apps_report.json` | `dokku apps:report <app> --format json` | Flat map with **hyphenated keys** (`app-created-at`, `app-locked`). `created_at` is a unix-epoch string, formatted to UTC at parse time. Spaced keys from older dokku are accepted as a fallback. |
 | `ps_report.json` | `dokku ps:report <app> --format json` | Captured from a running app. `status-<type>.<n>` keys (e.g. `status-web.1`) hold `<state> (CID: ...)`. |
+| `ps_report_all.txt` | `dokku ps:report <app1> <app2> ...` | **Dashboard uses this** (JSON mode ignores extra apps). One command reports every app: `=====> <app> ps information` sections with indented `Key: value` lines; `Status web 1` maps to process `web.1`. |
 | `ps_report_not_deployed.json` | `dokku ps:report <app> --format json` | Captured from a created-but-never-deployed app: `deployed=false`, `processes=0`, no `status-*` keys. |
 | `ps_report_missing.json` | synthetic | Covers the `missing` process state for a removed container. |
 | `config_show.txt` | `dokku config:show <app>` | `=====> <app> env vars` header + `KEY:  value` lines. Values are fetched **unmasked**; the UI masks client-side with a fixed-length glyph string (deviation from plan.md §8's `--masked`, same visible result). |

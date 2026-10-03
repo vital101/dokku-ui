@@ -6,6 +6,7 @@ pub enum DokkuCommand {
     AppsCreate { app: AppName },
     AppsDestroy { app: AppName, force: bool },
     PsReport { app: AppName },
+    PsReportAll { apps: Vec<AppName> },
     PsStart { app: AppName },
     PsStop { app: AppName },
     PsRestart { app: AppName },
@@ -35,6 +36,11 @@ impl DokkuCommand {
                     "--format".into(),
                     "json".into(),
                 ]
+            }
+            DokkuCommand::PsReportAll { apps } => {
+                let mut argv = vec!["ps:report".into()];
+                argv.extend(apps.iter().map(|app| app.as_str().to_owned()));
+                argv
             }
             DokkuCommand::PsStart { app } => vec!["ps:start".into(), app.as_str().into()],
             DokkuCommand::PsStop { app } => vec!["ps:stop".into(), app.as_str().into()],
@@ -110,6 +116,25 @@ mod tests {
         assert_eq!(
             DokkuCommand::PsReport { app: app("myapp") }.argv(),
             vec!["ps:report", "myapp", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn ps_report_all_argv_lists_every_app() {
+        assert_eq!(
+            DokkuCommand::PsReportAll {
+                apps: vec![app("alpha"), app("beta")]
+            }
+            .argv(),
+            vec!["ps:report", "alpha", "beta"]
+        );
+    }
+
+    #[test]
+    fn ps_report_all_with_no_apps_is_bare_command() {
+        assert_eq!(
+            DokkuCommand::PsReportAll { apps: vec![] }.argv(),
+            vec!["ps:report"]
         );
     }
 

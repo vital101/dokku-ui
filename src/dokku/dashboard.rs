@@ -1,16 +1,11 @@
-use std::sync::Arc;
-
-use futures_util::future::join_all;
-use tokio::sync::Semaphore;
+use std::collections::HashMap;
 
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{parse_apps_list, parse_ps_report};
+use crate::domain::parse::{parse_apps_list, parse_ps_report_all};
 use crate::domain::types::{AppHealth, AppStats, PsReport};
 
 use super::client::{DokkuClient, DokkuError};
-
-const MAX_CONCURRENT_REPORTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppRow {
@@ -42,46 +37,37 @@ pub enum DashboardError {
 
 pub async fn dashboard_data(client: &dyn DokkuClient) -> Result<DashboardData, DashboardError> {
     let names = parse_apps_list(&client.exec(&DokkuCommand::AppsList).await?.stdout);
-    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REPORTS));
-
-    let results: Vec<(String, Option<PsReport>)> = join_all(names.into_iter().map(|name| {
-        let permits = permits.clone();
-        async move {
-            let report = match AppName::try_from(name.clone()) {
-                Err(_) => None,
-                Ok(app) => {
-                    let _permit = permits.acquire().await.ok();
-                    let output = client.exec(&DokkuCommand::PsReport { app }).await;
-                    match output {
-                        Ok(output) => parse_ps_report(&output.stdout).ok(),
-                        Err(_) => None,
-                    }
-                }
-            };
-            (name, report)
-        }
-    }))
-    .await;
-
-    let mut rows: Vec<AppRow> = results
+    let apps: Vec<AppName> = names
         .iter()
-        .map(|(name, report)| AppRow {
-            process_count: report.as_ref().map(|r| r.process_count).unwrap_or(-1),
-            health: AppHealth::from_report(report.as_ref()),
-            name: name.clone(),
+        .filter_map(|name| AppName::try_from(name.clone()).ok())
+        .collect();
+
+    let reports: HashMap<String, PsReport> = if apps.is_empty() {
+        HashMap::new()
+    } else {
+        match client.exec(&DokkuCommand::PsReportAll { apps }).await {
+            Ok(output) => parse_ps_report_all(&output.stdout).into_iter().collect(),
+            Err(_) => HashMap::new(),
+        }
+    };
+
+    let mut rows: Vec<AppRow> = names
+        .iter()
+        .map(|name| {
+            let report = reports.get(name);
+            AppRow {
+                name: name.clone(),
+                health: AppHealth::from_report(report),
+                process_count: report.map(|r| r.process_count).unwrap_or(-1),
+            }
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let reports: Vec<PsReport> = results
-        .iter()
-        .filter_map(|(_, report)| report.clone())
-        .collect();
-    let stats = AppStats::from_reports(&reports);
+    let stats = AppStats::from_reports(&reports.values().cloned().collect::<Vec<_>>());
 
     Ok(DashboardData { rows, stats })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,16 +75,6 @@ mod tests {
 
     fn app(name: &str) -> crate::domain::AppName {
         crate::domain::AppName::try_from(name).expect("valid app name")
-    }
-
-    fn report(running: bool, deployed: bool, process_count: i64) -> DokkuOutput {
-        DokkuOutput::ok(format!(
-            r#"{{"deployed": "{deployed}", "running": "{running}", "processes": "{process_count}"}}"#
-        ))
-    }
-
-    fn calls_for(client: &MockClient, command: &DokkuCommand) -> usize {
-        client.calls().iter().filter(|c| c == &command).count()
     }
 
     fn apps_list_output(names: &[&str]) -> DokkuOutput {
@@ -110,6 +86,26 @@ mod tests {
         DokkuOutput::ok(output)
     }
 
+    fn section(
+        name: &str,
+        deployed: bool,
+        running: bool,
+        processes: i64,
+        statuses: &[&str],
+    ) -> String {
+        let mut out = format!(
+            "=====> {name} ps information\n       Deployed: {deployed}\n       Running: {running}\n       Processes: {processes}\n"
+        );
+        for status in statuses {
+            out.push_str(&format!("       Status {status}\n"));
+        }
+        out
+    }
+
+    fn multi_report_output(sections: &[String]) -> DokkuOutput {
+        DokkuOutput::ok(sections.join(""))
+    }
+
     #[tokio::test]
     async fn happy_path_assembles_rows_and_stats() {
         let client = MockClient::new()
@@ -118,16 +114,20 @@ mod tests {
                 Ok(apps_list_output(&["alpha", "beta", "gamma"])),
             )
             .stub(
-                DokkuCommand::PsReport { app: app("alpha") },
-                Ok(report(true, true, 2)),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("beta") },
-                Ok(report(false, true, 1)),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("gamma") },
-                Ok(report(false, false, 0)),
+                DokkuCommand::PsReportAll {
+                    apps: vec![app("alpha"), app("beta"), app("gamma")],
+                },
+                Ok(multi_report_output(&[
+                    section(
+                        "alpha",
+                        true,
+                        true,
+                        2,
+                        &["web.1: running (CID: a1)", "web.2: running (CID: a2)"],
+                    ),
+                    section("beta", true, false, 1, &["web.1: exited (CID: b1)"]),
+                    section("gamma", false, false, 0, &[]),
+                ])),
             );
 
         let data = dashboard_data(&client).await.expect("dashboard data");
@@ -160,28 +160,20 @@ mod tests {
                 stopped: 2,
             }
         );
-        for name in ["alpha", "beta", "gamma"] {
-            assert_eq!(
-                calls_for(&client, &DokkuCommand::PsReport { app: app(name) }),
-                1,
-                "{name} queried once"
-            );
-        }
+        assert_eq!(client.calls().len(), 2, "one list + one multi-app report");
     }
 
     #[tokio::test]
-    async fn failing_report_degrades_to_unknown_row() {
+    async fn failing_multi_report_degrades_all_rows_to_unknown() {
         let client = MockClient::new()
             .stub(
                 DokkuCommand::AppsList,
                 Ok(apps_list_output(&["good", "bad"])),
             )
             .stub(
-                DokkuCommand::PsReport { app: app("good") },
-                Ok(report(true, true, 1)),
-            )
-            .stub(
-                DokkuCommand::PsReport { app: app("bad") },
+                DokkuCommand::PsReportAll {
+                    apps: vec![app("good"), app("bad")],
+                },
                 Err(crate::dokku::DokkuError::Exit {
                     code: 1,
                     stderr: "boom".into(),
@@ -200,28 +192,23 @@ mod tests {
                 },
                 AppRow {
                     name: "good".into(),
-                    health: AppHealth::Running,
-                    process_count: 1,
+                    health: AppHealth::Unknown,
+                    process_count: -1,
                 },
             ]
         );
-        assert_eq!(
-            data.stats,
-            AppStats {
-                total: 1,
-                running: 1,
-                stopped: 0,
-            }
-        );
+        assert_eq!(data.stats, AppStats::default());
     }
 
     #[tokio::test]
-    async fn unparseable_report_degrades_to_unknown_row() {
+    async fn unparseable_multi_report_degrades_to_unknown_rows() {
         let client = MockClient::new()
             .stub(DokkuCommand::AppsList, Ok(apps_list_output(&["weird"])))
             .stub(
-                DokkuCommand::PsReport { app: app("weird") },
-                Ok(DokkuOutput::ok("not json")),
+                DokkuCommand::PsReportAll {
+                    apps: vec![app("weird")],
+                },
+                Ok(DokkuOutput::ok("not a report")),
             );
 
         let data = dashboard_data(&client).await.expect("dashboard data");
@@ -231,7 +218,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_app_name_renders_unknown_without_exec() {
+    async fn partial_report_covers_only_reported_apps() {
+        let client = MockClient::new()
+            .stub(
+                DokkuCommand::AppsList,
+                Ok(apps_list_output(&["alpha", "beta"])),
+            )
+            .stub(
+                DokkuCommand::PsReportAll {
+                    apps: vec![app("alpha"), app("beta")],
+                },
+                Ok(multi_report_output(&[section(
+                    "alpha",
+                    true,
+                    true,
+                    1,
+                    &["web.1: running (CID: a1)"],
+                )])),
+            );
+
+        let data = dashboard_data(&client).await.expect("dashboard data");
+
+        assert_eq!(data.rows[0].name, "alpha");
+        assert_eq!(data.rows[0].health, AppHealth::Running);
+        assert_eq!(data.rows[1].name, "beta");
+        assert_eq!(data.rows[1].health, AppHealth::Unknown);
+        assert_eq!(data.stats.total, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_app_name_renders_unknown_without_report_call() {
         let client =
             MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list_output(&["Bad_Name"])));
 
@@ -239,13 +255,7 @@ mod tests {
 
         assert_eq!(data.rows.len(), 1);
         assert_eq!(data.rows[0].health, AppHealth::Unknown);
-        assert!(
-            client
-                .calls()
-                .iter()
-                .all(|c| !matches!(c, DokkuCommand::PsReport { .. })),
-            "no ps:report executed for invalid name"
-        );
+        assert_eq!(client.calls(), vec![DokkuCommand::AppsList]);
     }
 
     #[tokio::test]
@@ -260,7 +270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_apps_list_yields_empty_data() {
+    async fn empty_apps_list_yields_empty_data_and_skips_report() {
         let client = MockClient::new().stub(
             DokkuCommand::AppsList,
             Ok(DokkuOutput::ok("=====> My Apps")),
@@ -270,26 +280,30 @@ mod tests {
 
         assert!(data.rows.is_empty());
         assert_eq!(data.stats, AppStats::default());
+        assert_eq!(client.calls(), vec![DokkuCommand::AppsList]);
     }
 
     #[tokio::test]
-    async fn many_apps_all_receive_reports_without_deadlock() {
+    async fn many_apps_fetch_in_one_command() {
         let names: Vec<String> = (0..20).map(|i| format!("app{i:02}")).collect();
         let list_output = format!("=====> My Apps\n{}", names.to_vec().join("\n"));
-        let mut client =
-            MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(list_output)));
-        for name in &names {
-            let app = app(name);
-            client = client.stub(
-                DokkuCommand::PsReport { app: app.clone() },
-                Ok(report(true, true, 1)),
+        let sections: Vec<String> = names
+            .iter()
+            .map(|name| section(name, true, true, 1, &["web.1: running (CID: c)"]))
+            .collect();
+        let apps: Vec<_> = names.iter().map(|n| app(n)).collect();
+        let client = MockClient::new()
+            .stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok(list_output)))
+            .stub(
+                DokkuCommand::PsReportAll { apps },
+                Ok(multi_report_output(&sections)),
             );
-        }
 
         let data = dashboard_data(&client).await.expect("dashboard data");
 
         assert_eq!(data.rows.len(), 20);
         assert_eq!(data.stats.total, 20);
         assert!(data.rows.iter().all(|row| row.health == AppHealth::Running));
+        assert_eq!(client.calls().len(), 2);
     }
 }
