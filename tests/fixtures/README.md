@@ -13,11 +13,16 @@ domain parsers' unit tests and the `MockClient` integration suite.
   `parse_apps_list`. `tests/russh_integration.rs` runs the client against an
   in-process fake SSH server.
 
-> The App Detail fixtures (`ps_scale*`, `ps_inspect`, `resource_report`,
-> `*_info`) are **synthetic** and must be re-captured from the target host and
-> reconciled with their parsers before the App Detail milestone is signed off
-> against production. The argv each parser expects is built by
-> `src/domain/command.rs`.
+> **Installed plugin/dokku versions matter.** The App Detail fixtures were
+> captured from the host above (dokku 0.38.4, redis 1.42.1, postgres 1.36.4).
+> These versions do **not** support `--format json` on `ps:scale` or on the
+> service `<plugin>:info` commands (the current dokku.com docs describe a newer
+> release), so both are parsed from their **plain-text** reports. Commands and
+> argv live in `src/domain/command.rs`, in lockstep with the parsers.
+>
+> Service fixture DSNs contain credentials on the live host and are **redacted
+> to `XXXXXX`** here. The parser never reads the `Dsn` line and the UI never
+> renders it; a test asserts the DSN does not appear in `ServiceInfo`.
 
 ## Formats
 
@@ -39,16 +44,17 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `config_show.txt` | `dokku config:show <app>` | `=====> <app> env vars` header + `KEY:  value` lines. Values are fetched **unmasked**; the UI masks client-side with a fixed-length glyph string (deviation from plan.md §8's `--masked`, same visible result). |
 | `config_show_empty.txt` | `dokku config:show <app>` | No env vars set. |
 | `logs.txt` | `dokku logs <app> --num 200` | Docker log lines **with ANSI color codes**; the parser strips them. |
-| `ps_scale.json` | `dokku ps:scale <app> --format json` | Desired formation (`[{"process_type":"web","quantity":1},...]`). **Synthetic pending real-host validation.** |
-| `ps_scale_empty.json` | `dokku ps:scale <app> --format json` | Never-scaled app: `[]`. |
-| `ps_inspect.json` | `dokku ps:inspect <app>` | Sanitized `docker inspect` array. Parser reads `Id`, `Name`, `Config.Image`, `State.{Status,StartedAt,RestartCount,OOMKilled,ExitCode}`. **Synthetic pending real-host validation of exact shape.** |
-| `resource_report.txt` | `dokku resource:report <app>` | Indented `web limit memory: 1024` / `web reservation cpu:` lines. Parser keeps cpu/memory/memory-swap limits + cpu/memory reservations; ignores network/GPU. **Synthetic pending real-host validation.** |
-| `redis_info.json` | `dokku redis:info <service> --format json` | Service status/version/internal-ip/links. The DSN is present in the fixture but **never parsed or rendered**. **Synthetic pending real-host validation.** |
-| `postgres_info.json` | `dokku postgres:info <service> --format json` | Same, array shape. **Synthetic pending real-host validation.** |
+| `ps_scale.txt` | `dokku ps:scale <app>` | Plain text: `-----> Scaling for <app>`, `proctype: qty` / `--------: ---` header, then `<type>: <qty>` rows (real capture: release 0, web 1, worker 2). **No `--format json` on 0.38.4.** |
+| `ps_inspect.json` | `dokku ps:inspect <app>` | Sanitized `docker inspect` array. Real-host keys confirmed: `Id`, `Name`, `Config.Image`, `State.{Status,StartedAt,RestartCount,OOMKilled,ExitCode}`. Fixture body is representative (trimmed). |
+| `resource_report.txt` | `dokku resource:report <app>` | Indented `web limit memory: 1024` / `web reservation cpu:` lines (synthetic populated case). Parser keeps cpu/memory/memory-swap limits + cpu/memory reservations; ignores network/GPU. |
+| `resource_report_empty.txt` | `dokku resource:report <app>` | Real capture for an app with no limits: the header line only. |
+| `redis_info.txt` | `dokku redis:info <service>` | Plain-text report (real capture, DSN redacted): `Status`, `Version` (`redis:7.2.4`), `Exposed ports` (`-` when unset), `Internal ip` (often empty), `Id`, `Links` (apps). **No `--format json` on 1.42.1.** |
+| `postgres_info.txt` | `dokku postgres:info <service>` | Same format (real capture, DSN redacted); shows `Exposed ports: 5432->15432`. |
 
 ## Maintenance
 
 When dokku output drifts (after a host upgrade), re-capture with the exact
 argv built by `src/domain/command.rs` and refresh the fixtures; the parsers
-are tolerant (unknown JSON fields ignored, `#[serde(default)]`-style
-defaults) so minor additions should not break anything.
+are tolerant (unknown keys ignored, empty/`-` values treated as unset) so minor
+additions should not break anything. If a plugin upgrade adds `--format json`,
+prefer switching the command + parser together and re-capturing.

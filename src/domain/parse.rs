@@ -169,28 +169,34 @@ pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
     })
 }
 
-/// `dokku ps:scale <app> --format json` -> the desired formation. An empty
-/// array (never scaled) yields an empty list; malformed input also yields empty
-/// so the caller degrades rather than erroring.
-pub fn parse_ps_scale(json: &str) -> Vec<ScaleEntry> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let serde_json::Value::Array(entries) = value else {
-        return Vec::new();
-    };
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let process_type = entry.get("process_type")?.as_str()?.to_owned();
-            let quantity = entry.get("quantity")?;
-            let quantity = quantity
-                .as_u64()
-                .or_else(|| quantity.as_str()?.parse::<u64>().ok())?;
-            Some(ScaleEntry {
-                process_type,
-                quantity: u32::try_from(quantity).unwrap_or(u32::MAX),
-            })
+/// `dokku ps:scale <app>` plain text -> the desired formation. The report is:
+///
+/// ```text
+/// -----> Scaling for myapp
+/// proctype: qty
+/// --------: ---
+/// web:  1
+/// worker: 2
+/// ```
+///
+/// The `----->` banner and the `proctype: qty` / `--------: ---` column header
+/// are skipped. Malformed input yields an empty list so the caller degrades.
+pub fn parse_ps_scale(output: &str) -> Vec<ScaleEntry> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('-') {
+                return None;
+            }
+            let (process_type, quantity) = line.split_once(':')?;
+            let process_type = process_type.trim();
+            if process_type.is_empty() {
+                return None;
+            }
+            let quantity = quantity.trim().parse::<u32>().ok()?;
+            Some(ScaleEntry::new(process_type, quantity))
         })
         .collect()
 }
@@ -300,76 +306,50 @@ pub fn parse_resource_report(output: &str) -> Vec<ResourceReport> {
     by_type.into_values().collect()
 }
 
-/// `<plugin>:info <service> --format json`. Accepts a single JSON object, a
-/// JSON array, or JSON-lines; unknown keys are ignored and the DSN is dropped.
-pub fn parse_service_info(json: &str, plugin: &str, service: &str) -> Option<ServiceInfo> {
-    let value = parse_first_json_object(json)?;
-    let field = |keys: &[&str]| -> String {
-        keys.iter()
-            .find_map(|key| value.get(*key).and_then(json_value_to_string))
-            .unwrap_or_default()
-    };
-    let linked_apps = value
-        .get("links")
-        .map(json_value_to_list)
-        .unwrap_or_default();
-    Some(ServiceInfo {
-        plugin: plugin.to_owned(),
-        service: {
-            let reported = field(&["service"]);
-            if reported.is_empty() {
-                service.to_owned()
-            } else {
-                reported
+/// `<plugin>:info <service>` plain text -> service details. Reads `Key: value`
+/// lines under a `=====> <service> <plugin> service information` header; an
+/// empty or `-` value means unset. The DSN is intentionally never parsed into
+/// the returned struct, and an unrecognisable report yields `None`.
+pub fn parse_service_info(output: &str, plugin: &str, service: &str) -> Option<ServiceInfo> {
+    let mut info = ServiceInfo::unknown(plugin, service);
+    let mut saw_header = false;
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("=====>") {
+            saw_header = true;
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = normalize_report_value(value);
+        match key.trim().to_lowercase().as_str() {
+            "status" => info.status = value,
+            "version" => info.version = value,
+            "exposed ports" => info.exposed_ports = value,
+            "internal ip" => info.internal_ip = value,
+            "id" => info.id_short = value.chars().take(12).collect(),
+            "links" => {
+                info.linked_apps = value.split_whitespace().map(str::to_owned).collect();
             }
-        },
-        status: field(&["status"]),
-        version: field(&["version", "image-version"]),
-        exposed_ports: field(&["exposed-ports", "exposed_ports"]),
-        internal_ip: field(&["internal-ip", "internal_ip"]),
-        memory: field(&["memory"]),
-        created: field(&["created"]),
-        linked_apps,
-    })
-}
-
-fn parse_first_json_object(json: &str) -> Option<serde_json::Value> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
-        match value {
-            serde_json::Value::Object(_) => return Some(value),
-            serde_json::Value::Array(entries) => {
-                return entries.into_iter().find(|entry| entry.is_object());
-            }
+            // The Dsn contains credentials; it is read and discarded.
+            "dsn" => {}
             _ => {}
         }
     }
-    json.lines()
-        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(serde_json::Value::is_object)
+    (saw_header && !info.status.is_empty()).then_some(info)
 }
 
-fn json_value_to_string(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        serde_json::Value::Bool(flag) => Some(flag.to_string()),
-        _ => None,
-    }
-}
-
-fn json_value_to_list(value: &serde_json::Value) -> Vec<String> {
-    match value {
-        serde_json::Value::Array(entries) => entries
-            .iter()
-            .filter_map(json_value_to_string)
-            .filter(|entry| !entry.is_empty() && entry != "-")
-            .collect(),
-        serde_json::Value::String(text) => text
-            .split_whitespace()
-            .filter(|entry| !entry.is_empty() && *entry != "-")
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
+fn normalize_report_value(raw: &str) -> String {
+    let value = raw.trim();
+    if value == "-" {
+        String::new()
+    } else {
+        value.to_owned()
     }
 }
 
@@ -447,12 +427,13 @@ mod tests {
         include_str!("../../tests/fixtures/domains_report_default.json");
     const PLUGIN_LIST: &str = include_str!("../../tests/fixtures/plugin_list.txt");
     const APP_LINKS: &str = include_str!("../../tests/fixtures/app_links.txt");
-    const PS_SCALE: &str = include_str!("../../tests/fixtures/ps_scale.json");
-    const PS_SCALE_EMPTY: &str = include_str!("../../tests/fixtures/ps_scale_empty.json");
+    const PS_SCALE: &str = include_str!("../../tests/fixtures/ps_scale.txt");
     const PS_INSPECT: &str = include_str!("../../tests/fixtures/ps_inspect.json");
     const RESOURCE_REPORT: &str = include_str!("../../tests/fixtures/resource_report.txt");
-    const REDIS_INFO: &str = include_str!("../../tests/fixtures/redis_info.json");
-    const POSTGRES_INFO: &str = include_str!("../../tests/fixtures/postgres_info.json");
+    const RESOURCE_REPORT_EMPTY: &str =
+        include_str!("../../tests/fixtures/resource_report_empty.txt");
+    const REDIS_INFO: &str = include_str!("../../tests/fixtures/redis_info.txt");
+    const POSTGRES_INFO: &str = include_str!("../../tests/fixtures/postgres_info.txt");
 
     #[test]
     fn parses_apps_list_fixture() {
@@ -812,32 +793,34 @@ mod tests {
     fn parses_ps_scale_fixture() {
         assert_eq!(
             parse_ps_scale(PS_SCALE),
-            vec![ScaleEntry::new("web", 1), ScaleEntry::new("worker", 3)]
+            vec![
+                ScaleEntry::new("release", 0),
+                ScaleEntry::new("web", 1),
+                ScaleEntry::new("worker", 2),
+            ]
         );
     }
 
     #[test]
     fn parses_empty_ps_scale() {
-        assert_eq!(parse_ps_scale(PS_SCALE_EMPTY), Vec::<ScaleEntry>::new());
-        assert_eq!(parse_ps_scale("[]"), Vec::<ScaleEntry>::new());
+        let header_only = "-----> Scaling for myapp\nproctype: qty\n--------: ---\n";
+        assert_eq!(parse_ps_scale(header_only), Vec::<ScaleEntry>::new());
+        assert_eq!(parse_ps_scale(""), Vec::<ScaleEntry>::new());
     }
 
     #[test]
-    fn ps_scale_accepts_string_quantities_and_skips_bad_entries() {
-        let json = r#"[{"process_type":"web","quantity":"2"},{"process_type":"worker"},{"quantity":1},{"process_type":"cron","quantity":0}]"#;
+    fn ps_scale_ignores_malformed_rows() {
+        let output = "-----> Scaling for myapp\nproctype: qty\n--------: ---\nweb:  1\nnot a row\nworker: lots\ncron: 0\n";
         assert_eq!(
-            parse_ps_scale(json),
-            vec![ScaleEntry::new("web", 2), ScaleEntry::new("cron", 0)]
+            parse_ps_scale(output),
+            vec![ScaleEntry::new("web", 1), ScaleEntry::new("cron", 0)]
         );
     }
 
     #[test]
-    fn ps_scale_malformed_is_empty() {
-        assert_eq!(parse_ps_scale("not json"), Vec::<ScaleEntry>::new());
-        assert_eq!(
-            parse_ps_scale(r#"{"process_type":"web"}"#),
-            Vec::<ScaleEntry>::new()
-        );
+    fn ps_scale_strips_ansi_and_trims() {
+        let output = "\u{1b}[32m-----> Scaling for myapp\u{1b}[0m\n  web:   3  \n";
+        assert_eq!(parse_ps_scale(output), vec![ScaleEntry::new("web", 3)]);
     }
 
     #[test]
@@ -902,43 +885,66 @@ mod tests {
     #[test]
     fn resource_report_empty_is_empty() {
         assert_eq!(parse_resource_report(""), Vec::<ResourceReport>::new());
+        assert_eq!(
+            parse_resource_report(RESOURCE_REPORT_EMPTY),
+            Vec::<ResourceReport>::new()
+        );
     }
 
     #[test]
     fn parses_redis_service_info_without_the_dsn() {
-        let info = parse_service_info(REDIS_INFO, "redis", "roboswarm-db").expect("info");
+        let info = parse_service_info(REDIS_INFO, "redis", "candid").expect("info");
         assert_eq!(info.plugin, "redis");
+        assert_eq!(info.service, "candid");
+        assert_eq!(info.status, "running");
+        assert_eq!(info.version, "redis:7.2.4");
+        assert_eq!(info.exposed_ports, "");
+        assert_eq!(info.internal_ip, "");
+        assert_eq!(info.id_short, "7a1aa2430d7a");
+        assert_eq!(info.linked_apps, vec!["candid"]);
+    }
+
+    #[test]
+    fn parses_postgres_service_info_with_exposed_ports() {
+        let info = parse_service_info(POSTGRES_INFO, "postgres", "roboswarm-db").expect("info");
         assert_eq!(info.service, "roboswarm-db");
         assert_eq!(info.status, "running");
-        assert_eq!(info.version, "8.10.1");
-        assert_eq!(info.internal_ip, "172.17.0.5");
-        assert_eq!(info.linked_apps, vec!["alpha", "beta"]);
+        assert_eq!(info.version, "postgres:16.2");
+        assert_eq!(info.exposed_ports, "5432->15432");
+        assert_eq!(info.linked_apps, vec!["roboswarm-server"]);
+        assert_eq!(info.id_short, "ca71688c254d");
     }
 
     #[test]
-    fn parses_postgres_service_info_array_shape() {
-        let info = parse_service_info(POSTGRES_INFO, "postgres", "db").expect("info");
-        assert_eq!(info.service, "db");
-        assert_eq!(info.exposed_ports, "5432");
+    fn service_info_never_parses_the_dsn() {
+        let output = "=====> x redis service information\n       Dsn:                 redis://:secret@host:6379\n       Status:              running\n";
+        let info = parse_service_info(output, "redis", "x").expect("info");
+        assert_eq!(info.status, "running");
+        assert!(!format!("{info:?}").contains("secret"));
+    }
+
+    #[test]
+    fn service_info_ignores_dashes_and_unknown_keys() {
+        let output = "=====> x postgres service information\n       Exposed ports:       -\n       Internal ip:\n       Service root:        /var/lib/dokku/services/postgres/x\n       Status:              stopped\n";
+        let info = parse_service_info(output, "postgres", "x").expect("info");
+        assert_eq!(info.exposed_ports, "");
+        assert_eq!(info.internal_ip, "");
         assert!(info.linked_apps.is_empty());
+        assert_eq!(info.status, "stopped");
     }
 
     #[test]
-    fn service_info_falls_back_to_requested_service_and_ignores_dashes() {
-        let json = r#"{"status":"running","links":"-","dsn":"redis://:secret@host"}"#;
-        let info = parse_service_info(json, "redis", "cache").expect("info");
-        assert_eq!(info.service, "cache");
-        assert!(info.linked_apps.is_empty());
-    }
-
-    #[test]
-    fn service_info_parses_json_lines_and_rejects_garbage() {
-        let json = "{\"service\":\"one\",\"status\":\"running\"}\n{\"service\":\"two\",\"status\":\"stopped\"}";
-        assert_eq!(
-            parse_service_info(json, "redis", "x").map(|info| info.service),
-            Some("one".to_owned())
-        );
+    fn service_info_requires_a_recognisable_report() {
         assert_eq!(parse_service_info("nope", "redis", "x"), None);
+        // A header but no status is treated as unrecognisable.
+        assert_eq!(
+            parse_service_info(
+                "=====> x redis service information\n       Version: redis:7.2.4\n",
+                "redis",
+                "x"
+            ),
+            None
+        );
     }
 
     #[test]

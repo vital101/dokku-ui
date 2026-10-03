@@ -47,15 +47,11 @@
           <dd class="font-mono text-white">{% if service.internal_ip.is_empty() %}—{% else %}{{ service.internal_ip }}{% endif %}</dd>
         </div>
         <div class="flex justify-between">
-          <dt class="text-slate-400">Memory</dt>
-          <dd class="text-white">{% if service.memory.is_empty() %}—{% else %}{{ service.memory }}{% endif %}</dd>
+          <dt class="text-slate-400">Container ID</dt>
+          <dd class="font-mono text-white">{% if service.id_short.is_empty() %}—{% else %}{{ service.id_short }}{% endif %}</dd>
         </div>
         <div class="flex justify-between">
-          <dt class="text-slate-400">Created</dt>
-          <dd class="text-white">{% if service.created.is_empty() %}—{% else %}{{ service.created }}{% endif %}</dd>
-        </div>
-        <div class="flex justify-between">
-          <dt class="text-slate-400">Also linked to</dt>
+          <dt class="text-slate-400">Linked apps</dt>
           <dd class="text-white">{{ service.linked_apps_label() }}</dd>
         </div>
       </dl>

@@ -377,14 +377,16 @@ Extends the per-app UI with deep runtime detail, read from the same
 `DokkuClient` seam (all commands pure/argv-tested in `domain/command.rs`):
 
 - **Processes tab** (`GET /apps/{name}/processes`): desired formation
-  (`ps:scale --format json`) merged with observed states (`ps:report`),
+  (`ps:scale <app>`) merged with observed states (`ps:report`),
   a scale form (`POST /apps/{name}/scale`, `CsrfForm`, capped at
-  `SCALE_MAX = 100`, hidden when `ps-can-scale=false` or no formation),
-  per-container detail (`ps:inspect`), and resource limits/reservations
-  (`resource:report`). Pure assembly lives in `dokku/processes.rs`.
+  `SCALE_MAX = 100`, hidden when `ps-can-scale=false` or no formation; the
+  `release` process type is shown read-only), per-container detail
+  (`ps:inspect`), and resource limits/reservations (`resource:report`). Pure
+  assembly lives in `dokku/processes.rs`.
 - **Services tab** (`GET /apps/{name}/services`): linked services from the
-  snapshot detail pass, enriched live per service via
-  `<plugin>:info <service> --format json`. DSNs are never parsed or rendered.
+  snapshot detail pass, enriched live per service via `<plugin>:info <service>`
+  (plain-text report). DSNs are never parsed or rendered; the card shows status,
+  version, exposed ports, internal IP, container ID, and linked apps.
 - **Rebuild action** (`POST /apps/{name}/rebuild`): reuses the start/stop/
   restart action path; long commands get a per-command timeout override
   (`PsRebuild` 300s, `PsScaleSet` 120s).
@@ -395,9 +397,11 @@ Extends the per-app UI with deep runtime detail, read from the same
   sections / an "unknown" card rather than a 5xx. Unknown apps still 404 via
   `SnapshotStore::resolve_app`.
 
-New fixtures (`ps_scale*`, `ps_inspect`, `resource_report`, `*_info`) are
-currently synthetic; see `tests/fixtures/README.md` for the re-capture
-requirement against the target host.
+**Version constraint:** the target host runs dokku 0.38.4 with redis plugin
+1.42.1 and postgres 1.36.4. Those versions do **not** support `--format json`
+on `ps:scale` or on `<plugin>:info` (current dokku.com docs describe a newer
+release), so both are parsed from plain text. Fixtures were captured from the
+host (service DSNs redacted); see `tests/fixtures/README.md`.
 
 ---
 

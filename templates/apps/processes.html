@@ -37,8 +37,12 @@
           {% if scale_note.is_none() %}
           <td class="py-2">
             {% if let Some(desired) = row.desired %}
-            <input type="number" min="0" max="100" name="scale_{{ row.process_type }}" value="{{ desired }}"
-                   class="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+              {% if row.process_type != "release" %}
+              <input type="number" min="0" max="100" name="scale_{{ row.process_type }}" value="{{ desired }}"
+                     class="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+              {% else %}
+              <span class="text-slate-500">{{ desired }}</span>
+              {% endif %}
             {% else %}
             <span class="text-slate-500">—</span>
             {% endif %}

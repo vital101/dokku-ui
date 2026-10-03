@@ -1,0 +1,6 @@
+-----> Scaling for roboswarm-server
+proctype: qty
+--------: ---
+release: 0
+web:  1
+worker: 2

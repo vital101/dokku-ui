@@ -92,12 +92,9 @@ impl DokkuCommand {
             DokkuCommand::PsStop { app } => vec!["ps:stop".into(), app.as_str().into()],
             DokkuCommand::PsRestart { app } => vec!["ps:restart".into(), app.as_str().into()],
             DokkuCommand::PsRebuild { app } => vec!["ps:rebuild".into(), app.as_str().into()],
-            DokkuCommand::PsScaleGet { app } => vec![
-                "ps:scale".into(),
-                app.as_str().into(),
-                "--format".into(),
-                "json".into(),
-            ],
+            DokkuCommand::PsScaleGet { app } => {
+                vec!["ps:scale".into(), app.as_str().into()]
+            }
             DokkuCommand::PsScaleSet { app, scales } => {
                 let mut argv = vec!["ps:scale".into(), app.as_str().into()];
                 argv.extend(scales.iter().map(ScaleEntry::arg));
@@ -131,12 +128,9 @@ impl DokkuCommand {
             DokkuCommand::ResourceReport { app } => {
                 vec!["resource:report".into(), app.as_str().into()]
             }
-            DokkuCommand::ServiceInfo { plugin, service } => vec![
-                format!("{plugin}:info"),
-                service.clone(),
-                "--format".into(),
-                "json".into(),
-            ],
+            DokkuCommand::ServiceInfo { plugin, service } => {
+                vec![format!("{plugin}:info"), service.clone()]
+            }
             DokkuCommand::PluginList => vec!["plugin:list".into()],
             DokkuCommand::AppLinks { plugin, app } => {
                 vec![format!("{plugin}:app-links"), app.as_str().into()]
@@ -290,7 +284,7 @@ mod tests {
     fn ps_scale_get_argv() {
         assert_eq!(
             DokkuCommand::PsScaleGet { app: app("myapp") }.argv(),
-            vec!["ps:scale", "myapp", "--format", "json"]
+            vec!["ps:scale", "myapp"]
         );
     }
 
@@ -342,7 +336,7 @@ mod tests {
                 service: "cache".into()
             }
             .argv(),
-            vec!["redis:info", "cache", "--format", "json"]
+            vec!["redis:info", "cache"]
         );
     }
 

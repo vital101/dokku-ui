@@ -1,0 +1,15 @@
+=====> roboswarm-db postgres service information
+       Config dir:          /var/lib/dokku/services/postgres/roboswarm-db/data
+       Config options:
+       Data dir:            /var/lib/dokku/services/postgres/roboswarm-db/data
+       Dsn:                 postgres://postgres:XXXXXX@dokku-postgres-roboswarm-db:5432/roboswarm_db
+       Exposed ports:       5432->15432
+       Id:                  ca71688c254d87a61c71968940cd7f4afcff4868ed9b6624a3e65e7b58180fd0
+       Internal ip:
+       Initial network:
+       Links:               roboswarm-server
+       Post create network:
+       Post start network:
+       Service root:        /var/lib/dokku/services/postgres/roboswarm-db
+       Status:              running
+       Version:             postgres:16.2

@@ -1,1 +1,0 @@
-[{"service":"db","status":"running","version":"16.4","exposed-ports":"5432","internal-ip":"172.17.0.7","memory":"","created":"2026-09-20 11:04 UTC","links":"","dsn":"postgres://postgres:secret-password@dokku-postgres-db:5432/db"}]

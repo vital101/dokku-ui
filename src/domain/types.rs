@@ -86,8 +86,9 @@ pub struct ServiceLink {
     pub service: String,
 }
 
-/// Details for a single linked service, from `<plugin>:info <service> --format json`.
-/// The DSN is deliberately never parsed into this struct.
+/// Details for a single linked service, parsed from the plain-text
+/// `<plugin>:info <service>` report. The DSN is deliberately never parsed into
+/// this struct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceInfo {
     pub plugin: String,
@@ -96,8 +97,7 @@ pub struct ServiceInfo {
     pub version: String,
     pub exposed_ports: String,
     pub internal_ip: String,
-    pub memory: String,
-    pub created: String,
+    pub id_short: String,
     pub linked_apps: Vec<String>,
 }
 
@@ -110,8 +110,7 @@ impl ServiceInfo {
             version: String::new(),
             exposed_ports: String::new(),
             internal_ip: String::new(),
-            memory: String::new(),
-            created: String::new(),
+            id_short: String::new(),
             linked_apps: Vec::new(),
         }
     }

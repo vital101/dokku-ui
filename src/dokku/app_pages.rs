@@ -75,10 +75,10 @@ mod tests {
 
     const CONFIG_SHOW: &str = include_str!("../../tests/fixtures/config_show.txt");
     const LOGS: &str = include_str!("../../tests/fixtures/logs.txt");
-    const PS_SCALE: &str = include_str!("../../tests/fixtures/ps_scale.json");
+    const PS_SCALE: &str = include_str!("../../tests/fixtures/ps_scale.txt");
     const PS_INSPECT: &str = include_str!("../../tests/fixtures/ps_inspect.json");
     const RESOURCE_REPORT: &str = include_str!("../../tests/fixtures/resource_report.txt");
-    const REDIS_INFO: &str = include_str!("../../tests/fixtures/redis_info.json");
+    const REDIS_INFO: &str = include_str!("../../tests/fixtures/redis_info.txt");
 
     #[tokio::test]
     async fn app_config_parses_fixture_output() {
@@ -151,8 +151,9 @@ mod tests {
         let formation = app_formation(&client, app("alpha"))
             .await
             .expect("formation");
-        assert_eq!(formation.len(), 2);
-        assert_eq!(formation[0].process_type, "web");
+        assert_eq!(formation.len(), 3);
+        assert_eq!(formation[1].process_type, "web");
+        assert_eq!(formation[1].quantity, 1);
     }
 
     #[tokio::test]
@@ -212,18 +213,19 @@ mod tests {
         let client = MockClient::new().stub(
             DokkuCommand::ServiceInfo {
                 plugin: "redis".into(),
-                service: "roboswarm-db".into(),
+                service: "candid".into(),
             },
             Ok(DokkuOutput::ok(REDIS_INFO)),
         );
 
-        let info = service_info(&client, "redis", "roboswarm-db")
+        let info = service_info(&client, "redis", "candid")
             .await
             .expect("fetch")
             .expect("parsed");
-        assert_eq!(info.service, "roboswarm-db");
+        assert_eq!(info.service, "candid");
         assert_eq!(info.status, "running");
-        assert_eq!(info.linked_apps, vec!["alpha", "beta"]);
+        assert_eq!(info.version, "redis:7.2.4");
+        assert_eq!(info.linked_apps, vec!["candid"]);
     }
 
     #[tokio::test]

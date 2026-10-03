@@ -1,0 +1,15 @@
+=====> candid redis service information
+       Config dir:          /var/lib/dokku/services/redis/candid/config
+       Config options:
+       Data dir:            /var/lib/dokku/services/redis/candid/data
+       Dsn:                 redis://:XXXXXX@dokku-redis-candid:6379
+       Exposed ports:       -
+       Id:                  7a1aa2430d7aadfdd059c268efa7442acfe3ee4b992433823991d2fe8f72193c
+       Internal ip:
+       Initial network:
+       Links:               candid
+       Post create network:
+       Post start network:
+       Service root:        /var/lib/dokku/services/redis/candid
+       Status:              running
+       Version:             redis:7.2.4

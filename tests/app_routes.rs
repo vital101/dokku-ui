@@ -26,9 +26,10 @@ fn app_name(name: &str) -> AppName {
 
 const CONFIG_FIXTURE: &str = include_str!("fixtures/config_show.txt");
 const LOGS_FIXTURE: &str = include_str!("fixtures/logs.txt");
-const PS_SCALE_FIXTURE: &str = include_str!("fixtures/ps_scale.json");
+const PS_SCALE_FIXTURE: &str = include_str!("fixtures/ps_scale.txt");
 const PS_INSPECT_FIXTURE: &str = include_str!("fixtures/ps_inspect.json");
 const RESOURCE_REPORT_FIXTURE: &str = include_str!("fixtures/resource_report.txt");
+const POSTGRES_INFO_FIXTURE: &str = include_str!("fixtures/postgres_info.txt");
 
 fn apps_report() -> DokkuOutput {
     DokkuOutput::ok(r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned())
@@ -1126,6 +1127,10 @@ async fn processes_renders_formation_containers_and_resources() {
         body.contains(r#"name="scale_web""#),
         "scale input for web: {body}"
     );
+    assert!(
+        !body.contains(r#"name="scale_release""#),
+        "release is not editable"
+    );
     assert!(body.contains("alpha.web.1"), "container row");
     assert!(body.contains("1024"), "resource limit");
     assert!(body.contains("Apply scale"));
@@ -1443,9 +1448,14 @@ async fn services_renders_linked_service_details() {
                 plugin: "postgres".into(),
                 service: "roboswarm-db".into(),
             },
-            Ok(DokkuOutput::ok(
-                r#"{"service":"roboswarm-db","status":"running","version":"16.4","exposed-ports":"5432","internal-ip":"172.17.0.7","links":"alpha gamma","dsn":"postgres://postgres:secret@host/db"}"#,
-            )),
+            Ok(DokkuOutput::ok(POSTGRES_INFO_FIXTURE)),
+        )
+        .stub(
+            DokkuCommand::AppLinks {
+                plugin: "postgres".into(),
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/app_links.txt"))),
         );
     let (state, _client, _dir) = harness(client).await;
     state.snapshot.ensure_loaded().await.expect("load");
@@ -1468,10 +1478,14 @@ async fn services_renders_linked_service_details() {
     assert!(body.contains("postgres"));
     assert!(body.contains("roboswarm-db"));
     assert!(body.contains("running"));
-    assert!(body.contains("16.4"));
-    assert!(body.contains("5432"));
-    assert!(body.contains("alpha, gamma"));
-    assert!(!body.contains("secret"), "dsn never rendered: {body}");
+    assert!(body.contains("postgres:16.2"));
+    assert!(
+        body.contains("5432-&#62;15432"),
+        "exposed ports missing: {body}"
+    );
+    assert!(body.contains("roboswarm-server"));
+    assert!(!body.contains("postgres://"), "dsn never rendered: {body}");
+    assert!(body.contains("Container ID"));
     assert!(
         body.contains(r#"href="/apps/alpha/services""#),
         "services tab active"
