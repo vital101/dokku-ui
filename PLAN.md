@@ -215,7 +215,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain fo
 
 ### russh client (isolated)
 - Connect: `DOKKU_SSH_USER@DOKKU_HOST:DOKKU_SSH_PORT`, ed25519 key from `DOKKU_SSH_KEY_PATH` (OpenSSH/PEM formats accepted).
-- **v1: one session per command** (correctness first; a connection pool is a documented post-v1 optimization).
+- **Persistent SSH session**: the client keeps one authenticated connection alive (keepalive 30s) and opens one channel per command; stale sessions are detected (`is_closed`/transport errors) and reconnected transparently. (v1 shipped one session per command; bursts of ~15 connections per dashboard load tripped the host's ufw rate limit on port 22, so pooling was pulled forward.)
 - Collect stdout/stderr, read exit status, 30s timeout via `tokio::time::timeout` (`COMMAND_TIMEOUT_SECS`).
 - Host key policy: accept-on-first-use into `known_hosts`-style file at `DOKKU_SSH_HOST_KEYS_PATH`; optional pre-pinned file works read-only.
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.

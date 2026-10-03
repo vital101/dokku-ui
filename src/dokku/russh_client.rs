@@ -13,6 +13,8 @@ use crate::settings::Settings;
 
 use super::client::{DokkuClient, DokkuError, DokkuOutput};
 
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct RusshClient {
     config: Arc<client::Config>,
     host: String,
@@ -21,6 +23,7 @@ pub struct RusshClient {
     key_path: PathBuf,
     known_hosts_path: Option<PathBuf>,
     timeout: Duration,
+    session: tokio::sync::Mutex<Option<client::Handle<HostKeyHandler>>>,
 }
 
 impl RusshClient {
@@ -38,10 +41,11 @@ impl RusshClient {
             key_path: settings.dokku_ssh_key_path.clone(),
             known_hosts_path: settings.dokku_ssh_known_hosts_path.clone(),
             timeout: Duration::from_secs(settings.command_timeout_secs),
+            session: tokio::sync::Mutex::new(None),
         }
     }
 
-    async fn run_command(&self, command: &str) -> Result<DokkuOutput, DokkuError> {
+    async fn connect(&self) -> Result<client::Handle<HostKeyHandler>, DokkuError> {
         let handler = HostKeyHandler {
             host: self.host.clone(),
             port: self.port,
@@ -63,7 +67,42 @@ impl RusshClient {
         if !auth.success() {
             return Err(DokkuError::AuthFailed);
         }
+        Ok(session)
+    }
 
+    async fn run_command(&self, command: &str) -> Result<DokkuOutput, DokkuError> {
+        let mut guard = self.session.lock().await;
+        if let Some(session) = guard.take() {
+            let outcome = if session.is_closed() {
+                None
+            } else {
+                Self::run_channel(&session, command).await.ok()
+            };
+            match outcome {
+                Some(output) => {
+                    *guard = Some(session);
+                    return finalize(output);
+                }
+                None => Self::close_session(session).await,
+            }
+        }
+
+        let session = self.connect().await?;
+        let output = match Self::run_channel(&session, command).await {
+            Ok(output) => output,
+            Err(err) => {
+                Self::close_session(session).await;
+                return Err(err);
+            }
+        };
+        *guard = Some(session);
+        finalize(output)
+    }
+
+    async fn run_channel(
+        session: &client::Handle<HostKeyHandler>,
+        command: &str,
+    ) -> Result<DokkuOutput, DokkuError> {
         let mut channel = session
             .channel_open_session()
             .await
@@ -89,15 +128,24 @@ impl RusshClient {
             }
         }
 
-        let _ = session.disconnect(Disconnect::ByApplication, "", "").await;
+        Ok(DokkuOutput {
+            exit_code,
+            stdout,
+            stderr,
+        })
+    }
 
-        match exit_code {
-            0 => Ok(DokkuOutput {
-                exit_code: 0,
-                stdout,
-                stderr,
-            }),
-            code => Err(DokkuError::Exit { code, stderr }),
+    async fn close_session(session: client::Handle<HostKeyHandler>) {
+        let _ = tokio::time::timeout(
+            DISCONNECT_TIMEOUT,
+            session.disconnect(Disconnect::ByApplication, "", ""),
+        )
+        .await;
+    }
+
+    async fn invalidate_session(&self) {
+        if let Some(session) = self.session.lock().await.take() {
+            Self::close_session(session).await;
         }
     }
 
@@ -112,15 +160,29 @@ impl RusshClient {
     }
 }
 
+fn finalize(output: DokkuOutput) -> Result<DokkuOutput, DokkuError> {
+    match output.exit_code {
+        0 => Ok(output),
+        code => Err(DokkuError::Exit {
+            code,
+            stderr: output.stderr,
+        }),
+    }
+}
+
 #[async_trait]
 impl DokkuClient for RusshClient {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError> {
         let remote_command = command.argv().join(" ");
-        tokio::time::timeout(self.timeout, self.run_command(&remote_command))
-            .await
-            .map_err(|_| DokkuError::Timeout {
-                secs: self.timeout.as_secs(),
-            })?
+        match tokio::time::timeout(self.timeout, self.run_command(&remote_command)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.invalidate_session().await;
+                Err(DokkuError::Timeout {
+                    secs: self.timeout.as_secs(),
+                })
+            }
+        }
     }
 }
 

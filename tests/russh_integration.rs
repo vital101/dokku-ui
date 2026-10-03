@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dokku_ui::dokku::{DokkuClient, RusshClient};
 use dokku_ui::domain::command::DokkuCommand;
@@ -89,7 +90,7 @@ async fn client(addr: std::net::SocketAddr, key_path: &std::path::Path) -> Russh
 
 #[tokio::test]
 async fn executes_command_and_reads_stdout() {
-    let (addr, server) = spawn_fake_dokku().await;
+    let (addr, server, _connections) = spawn_fake_dokku().await;
 
     let dir = TempDir::new().expect("temp dir");
     let key_path = dir.path().join("id_ed25519");
@@ -112,7 +113,7 @@ async fn executes_command_and_reads_stdout() {
 
 #[tokio::test]
 async fn streams_stderr_and_exit_code_for_failures() {
-    let (addr, server) = spawn_fake_dokku().await;
+    let (addr, server, _connections) = spawn_fake_dokku().await;
 
     let dir = TempDir::new().expect("temp dir");
     let key_path = dir.path().join("id_ed25519");
@@ -135,7 +136,7 @@ async fn streams_stderr_and_exit_code_for_failures() {
 
 #[tokio::test]
 async fn output_parses_with_domain_parsers() {
-    let (addr, server) = spawn_fake_dokku().await;
+    let (addr, server, _connections) = spawn_fake_dokku().await;
 
     let dir = TempDir::new().expect("temp dir");
     let key_path = dir.path().join("id_ed25519");
@@ -156,11 +157,74 @@ async fn output_parses_with_domain_parsers() {
     server.abort();
 }
 
-async fn spawn_fake_dokku() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+#[tokio::test]
+async fn reuses_one_connection_across_many_commands() {
+    let (addr, server, connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+    let app = dokku_ui::domain::AppName::try_from("myapp").expect("app name");
+
+    let outputs = [
+        client.exec(&DokkuCommand::AppsList).await,
+        client
+            .exec(&DokkuCommand::PsReport { app: app.clone() })
+            .await,
+        client.exec(&DokkuCommand::AppsList).await,
+        client.exec(&DokkuCommand::PsReport { app }).await,
+    ];
+    for output in &outputs {
+        assert!(
+            output.is_ok(),
+            "every command succeeds on the reused session"
+        );
+    }
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "persistent session: one TCP connection for all commands"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn failing_commands_do_not_tear_down_the_session() {
+    let (addr, server, connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+    let app = dokku_ui::domain::AppName::try_from("myapp").expect("app name");
+
+    let err = client.exec(&DokkuCommand::PsStart { app }).await;
+    assert!(
+        matches!(err, Err(dokku_ui::dokku::DokkuError::Exit { code: 1, .. })),
+        "unknown command exits nonzero"
+    );
+
+    let output = client.exec(&DokkuCommand::AppsList).await;
+    assert!(output.is_ok(), "session survives a failed command");
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+
+    server.abort();
+}
+
+async fn spawn_fake_dokku() -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("local addr");
+    let connections = Arc::new(AtomicUsize::new(0));
 
     let host_key = PrivateKey::from_openssh(HOST_KEY).expect("parse host key");
     let config = Arc::new(server::Config {
@@ -168,11 +232,13 @@ async fn spawn_fake_dokku() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
         ..server::Config::default()
     });
 
+    let connections_for_task = connections.clone();
     let server = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            connections_for_task.fetch_add(1, Ordering::SeqCst);
             let config = config.clone();
             tokio::spawn(async move {
                 let _ = server::run_stream(config, stream, FakeDokku).await;
@@ -180,5 +246,5 @@ async fn spawn_fake_dokku() -> (std::net::SocketAddr, tokio::task::JoinHandle<()
         }
     });
 
-    (addr, server)
+    (addr, server, connections)
 }
