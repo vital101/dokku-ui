@@ -98,6 +98,9 @@ pub fn build_app(
         .route("/apps/new", web::get().to(apps::new_form))
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
+        .route("/apps/{name}/processes", web::get().to(apps::processes))
+        .route("/apps/{name}/scale", web::post().to(apps::scale))
+        .route("/apps/{name}/services", web::get().to(apps::services))
         .route("/apps/{name}/config", web::get().to(apps::config))
         .route("/apps/{name}/logs", web::get().to(apps::logs))
         .service(
@@ -108,6 +111,7 @@ pub fn build_app(
         .route("/apps/{name}/start", web::post().to(apps::start))
         .route("/apps/{name}/stop", web::post().to(apps::stop))
         .route("/apps/{name}/restart", web::post().to(apps::restart))
+        .route("/apps/{name}/rebuild", web::post().to(apps::rebuild))
         .default_service(web::to(not_found))
 }
 

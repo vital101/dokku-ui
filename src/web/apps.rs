@@ -4,12 +4,17 @@ use actix_session::Session;
 use actix_web::{HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
+use time::OffsetDateTime;
 
-use crate::dokku::{app_config, app_logs, format_age, overview_from_snapshot};
+use crate::dokku::{
+    ContainerRow, ProcessRow, app_config, app_containers, app_formation, app_logs, app_resources,
+    container_rows, format_age, formation_rows, overview_from_snapshot, parse_scale_form,
+    service_info,
+};
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
-use crate::domain::types::{AppInfo, EnvVar};
+use crate::domain::types::{AppInfo, EnvVar, ResourceReport, ServiceInfo};
 use crate::error::AppError;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
@@ -46,7 +51,9 @@ struct ShowPage<'a> {
     created_at: &'a str,
     locked_label: &'static str,
     image_status_label: &'static str,
+    last_build_label: String,
     link_exists_label: &'static str,
+    domains_label: String,
     dns_record_exists_label: &'static str,
     updated: String,
 }
@@ -180,9 +187,15 @@ pub async fn show(
         image_status_label: app_info
             .map(AppInfo::image_status_label)
             .unwrap_or("unknown"),
+        last_build_label: app_info
+            .map(AppInfo::last_build_label)
+            .unwrap_or_else(|| "unknown".to_owned()),
         link_exists_label: app_info
             .map(AppInfo::link_exists_label)
             .unwrap_or("unknown"),
+        domains_label: app_info
+            .map(AppInfo::domains_label)
+            .unwrap_or_else(|| "—".to_owned()),
         dns_record_exists_label: app_info
             .map(AppInfo::dns_record_exists_label)
             .unwrap_or("unknown"),
@@ -256,6 +269,188 @@ pub async fn logs(
         line_count: num_lines,
         min_lines: LOG_LINES_MIN,
         max_lines: LOG_LINES_MAX,
+    };
+
+    render(&page)
+}
+
+#[derive(Template)]
+#[template(path = "apps/processes.html")]
+struct ProcessesPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+    rows: Vec<ProcessRow>,
+    containers: Vec<ContainerRow>,
+    resources: Vec<ResourceReport>,
+    scale_note: Option<String>,
+    updated: String,
+}
+
+pub async fn processes(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let user = current_user(&state, &session).await?;
+
+    let (snapshot, app) = state.snapshot.resolve_app(&name).await?;
+    let ps_report = snapshot.ps_report(&name);
+
+    // Detail commands are best-effort: a failure degrades to an empty section
+    // rather than taking the whole page down.
+    let formation = app_formation(&*state.dokku, app.clone())
+        .await
+        .unwrap_or_default();
+    let containers = app_containers(&*state.dokku, app.clone())
+        .await
+        .unwrap_or_default();
+    let resources = app_resources(&*state.dokku, app).await.unwrap_or_default();
+
+    let rows = formation_rows(&formation, ps_report);
+    let container_rows = container_rows(&containers, OffsetDateTime::now_utc());
+    let scale_note = scale_note(ps_report, &formation);
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = ProcessesPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "processes",
+        rows,
+        containers: container_rows,
+        resources,
+        scale_note,
+        updated: format_age(snapshot.age()),
+    };
+
+    render(&page)
+}
+
+fn scale_note(
+    ps_report: Option<&crate::domain::types::PsReport>,
+    formation: &[crate::domain::types::ScaleEntry],
+) -> Option<String> {
+    if formation.is_empty() {
+        return Some(
+            "No formation found yet — deploy the app before scaling its processes.".to_owned(),
+        );
+    }
+    match ps_report.and_then(|report| report.can_scale) {
+        Some(false) => Some(
+            "Scaling is managed by the app's app.json formation and cannot be changed here."
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+pub async fn scale(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    form: CsrfForm<std::collections::HashMap<String, String>>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
+    let redirect_to = format!("/apps/{name}/processes");
+
+    let formation = match app_formation(&*state.dokku, app.clone()).await {
+        Ok(formation) => formation,
+        Err(err) => {
+            set_flash(
+                &session,
+                FlashLevel::Error,
+                format!("Failed to read current scale: {err}"),
+            );
+            return Ok(see_other(&redirect_to));
+        }
+    };
+
+    let entries = match parse_scale_form(&formation, &form.0) {
+        Ok(entries) => entries,
+        Err(err) => {
+            set_flash(&session, FlashLevel::Error, err.to_string());
+            return Ok(see_other(&redirect_to));
+        }
+    };
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::PsScaleSet {
+            app: app.clone(),
+            scales: entries,
+        })
+        .await
+    {
+        Ok(_) => {
+            if let Err(err) = state.snapshot.refresh_app(app.as_str()).await {
+                tracing::warn!(error = %err, "snapshot refresh after scale failed");
+            }
+            set_flash(&session, FlashLevel::Success, format!("Scaled '{}'.", name));
+        }
+        Err(err) => {
+            set_flash(
+                &session,
+                FlashLevel::Error,
+                format!("Failed to scale app: {err}"),
+            );
+        }
+    }
+    Ok(see_other(&redirect_to))
+}
+
+#[derive(Template)]
+#[template(path = "apps/services.html")]
+struct ServicesPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+    services: Vec<ServiceInfo>,
+    links_unknown: bool,
+    updated: String,
+}
+
+pub async fn services(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let user = current_user(&state, &session).await?;
+    let (snapshot, _app) = state.snapshot.resolve_app(&name).await?;
+
+    let links = snapshot.app_info(&name).and_then(|info| info.links.clone());
+    let links_unknown = links.is_none();
+    let links = links.unwrap_or_default();
+
+    let mut services = Vec::with_capacity(links.len());
+    for link in &links {
+        let info = match service_info(&*state.dokku, &link.plugin, &link.service).await {
+            Ok(Some(info)) => info,
+            _ => ServiceInfo::unknown(link.plugin.clone(), link.service.clone()),
+        };
+        services.push(info);
+    }
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = ServicesPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "services",
+        services,
+        links_unknown,
+        updated: format_age(snapshot.age()),
     };
 
     render(&page)
@@ -350,6 +545,7 @@ enum AppAction {
     Start,
     Stop,
     Restart,
+    Rebuild,
 }
 
 impl AppAction {
@@ -358,6 +554,7 @@ impl AppAction {
             AppAction::Start => "start",
             AppAction::Stop => "stop",
             AppAction::Restart => "restart",
+            AppAction::Rebuild => "rebuild",
         }
     }
 
@@ -366,6 +563,7 @@ impl AppAction {
             AppAction::Start => "started",
             AppAction::Stop => "stopped",
             AppAction::Restart => "restarted",
+            AppAction::Rebuild => "rebuilt",
         }
     }
 
@@ -374,6 +572,7 @@ impl AppAction {
             AppAction::Start => DokkuCommand::PsStart { app },
             AppAction::Stop => DokkuCommand::PsStop { app },
             AppAction::Restart => DokkuCommand::PsRestart { app },
+            AppAction::Rebuild => DokkuCommand::PsRebuild { app },
         }
     }
 }
@@ -403,6 +602,15 @@ pub async fn restart(
     _form: CsrfForm<ActionForm>,
 ) -> Result<HttpResponse, AppError> {
     process_action(&state, &session, path.into_inner(), AppAction::Restart).await
+}
+
+pub async fn rebuild(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    process_action(&state, &session, path.into_inner(), AppAction::Rebuild).await
 }
 
 async fn process_action(

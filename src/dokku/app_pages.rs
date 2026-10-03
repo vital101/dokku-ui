@@ -1,7 +1,12 @@
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{parse_config_show, parse_logs};
-use crate::domain::types::{EnvVar, LogLines};
+use crate::domain::parse::{
+    parse_config_show, parse_logs, parse_ps_inspect, parse_ps_scale, parse_resource_report,
+    parse_service_info,
+};
+use crate::domain::types::{
+    ContainerDetails, EnvVar, LogLines, ResourceReport, ScaleEntry, ServiceInfo,
+};
 
 use super::client::{DokkuClient, DokkuError};
 
@@ -19,6 +24,46 @@ pub async fn app_logs(
     Ok(parse_logs(&output.stdout))
 }
 
+pub async fn app_formation(
+    client: &dyn DokkuClient,
+    app: AppName,
+) -> Result<Vec<ScaleEntry>, DokkuError> {
+    let output = client.exec(&DokkuCommand::PsScaleGet { app }).await?;
+    Ok(parse_ps_scale(&output.stdout))
+}
+
+pub async fn app_containers(
+    client: &dyn DokkuClient,
+    app: AppName,
+) -> Result<Vec<ContainerDetails>, DokkuError> {
+    let output = client.exec(&DokkuCommand::PsInspect { app }).await?;
+    Ok(parse_ps_inspect(&output.stdout))
+}
+
+pub async fn app_resources(
+    client: &dyn DokkuClient,
+    app: AppName,
+) -> Result<Vec<ResourceReport>, DokkuError> {
+    let output = client.exec(&DokkuCommand::ResourceReport { app }).await?;
+    Ok(parse_resource_report(&output.stdout))
+}
+
+/// Fetches `<plugin>:info <service> --format json`. A response that does not
+/// parse yields `None` (the caller renders an unknown-status card).
+pub async fn service_info(
+    client: &dyn DokkuClient,
+    plugin: &str,
+    service: &str,
+) -> Result<Option<ServiceInfo>, DokkuError> {
+    let output = client
+        .exec(&DokkuCommand::ServiceInfo {
+            plugin: plugin.to_owned(),
+            service: service.to_owned(),
+        })
+        .await?;
+    Ok(parse_service_info(&output.stdout, plugin, service))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,6 +75,10 @@ mod tests {
 
     const CONFIG_SHOW: &str = include_str!("../../tests/fixtures/config_show.txt");
     const LOGS: &str = include_str!("../../tests/fixtures/logs.txt");
+    const PS_SCALE: &str = include_str!("../../tests/fixtures/ps_scale.json");
+    const PS_INSPECT: &str = include_str!("../../tests/fixtures/ps_inspect.json");
+    const RESOURCE_REPORT: &str = include_str!("../../tests/fixtures/resource_report.txt");
+    const REDIS_INFO: &str = include_str!("../../tests/fixtures/redis_info.json");
 
     #[tokio::test]
     async fn app_config_parses_fixture_output() {
@@ -90,5 +139,108 @@ mod tests {
             app: app("alpha"),
             num_lines: 50
         }));
+    }
+
+    #[tokio::test]
+    async fn app_formation_parses_fixture() {
+        let client = MockClient::new().stub(
+            DokkuCommand::PsScaleGet { app: app("alpha") },
+            Ok(DokkuOutput::ok(PS_SCALE)),
+        );
+
+        let formation = app_formation(&client, app("alpha"))
+            .await
+            .expect("formation");
+        assert_eq!(formation.len(), 2);
+        assert_eq!(formation[0].process_type, "web");
+    }
+
+    #[tokio::test]
+    async fn app_formation_fetch_error_propagates() {
+        let client = MockClient::new().stub(
+            DokkuCommand::PsScaleGet { app: app("alpha") },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "boom".into(),
+            }),
+        );
+
+        assert!(app_formation(&client, app("alpha")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn app_containers_parses_fixture() {
+        let client = MockClient::new().stub(
+            DokkuCommand::PsInspect { app: app("alpha") },
+            Ok(DokkuOutput::ok(PS_INSPECT)),
+        );
+
+        let containers = app_containers(&client, app("alpha"))
+            .await
+            .expect("containers");
+        assert_eq!(containers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn app_resources_parses_fixture() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ResourceReport { app: app("alpha") },
+            Ok(DokkuOutput::ok(RESOURCE_REPORT)),
+        );
+
+        let resources = app_resources(&client, app("alpha"))
+            .await
+            .expect("resources");
+        assert_eq!(resources.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn app_resources_fetch_error_propagates() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ResourceReport { app: app("alpha") },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "boom".into(),
+            }),
+        );
+
+        assert!(app_resources(&client, app("alpha")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn service_info_parses_fixture() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ServiceInfo {
+                plugin: "redis".into(),
+                service: "roboswarm-db".into(),
+            },
+            Ok(DokkuOutput::ok(REDIS_INFO)),
+        );
+
+        let info = service_info(&client, "redis", "roboswarm-db")
+            .await
+            .expect("fetch")
+            .expect("parsed");
+        assert_eq!(info.service, "roboswarm-db");
+        assert_eq!(info.status, "running");
+        assert_eq!(info.linked_apps, vec!["alpha", "beta"]);
+    }
+
+    #[tokio::test]
+    async fn service_info_unparseable_yields_none() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ServiceInfo {
+                plugin: "redis".into(),
+                service: "cache".into(),
+            },
+            Ok(DokkuOutput::ok("nonsense")),
+        );
+
+        assert_eq!(
+            service_info(&client, "redis", "cache")
+                .await
+                .expect("fetch"),
+            None
+        );
     }
 }

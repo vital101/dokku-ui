@@ -1,0 +1,132 @@
+{% extends "apps/base_app.html" %}
+
+{% block app_content %}
+<div class="space-y-6">
+  <div class="flex items-center justify-between">
+    <h3 class="text-sm font-medium text-white">Processes</h3>
+    <span class="text-xs text-slate-500">Updated {{ updated }}</span>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Formation</h3>
+
+    {% if scale_note.is_none() %}
+    <form method="post" action="/apps/{{ name }}/scale">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% endif %}
+
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Process</th>
+          <th class="py-2 pr-4 font-medium">Desired</th>
+          <th class="py-2 pr-4 font-medium">Running</th>
+          <th class="py-2 pr-4 font-medium">Stopped</th>
+          {% if scale_note.is_none() %}
+          <th class="py-2 font-medium">New scale</th>
+          {% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 font-mono text-white">{{ row.process_type }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ row.desired_label() }}</td>
+          <td class="py-2 pr-4 text-emerald-400">{{ row.running }}</td>
+          <td class="py-2 pr-4 text-slate-400">{{ row.stopped }}</td>
+          {% if scale_note.is_none() %}
+          <td class="py-2">
+            {% if let Some(desired) = row.desired %}
+            <input type="number" min="0" max="100" name="scale_{{ row.process_type }}" value="{{ desired }}"
+                   class="w-20 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+            {% else %}
+            <span class="text-slate-500">—</span>
+            {% endif %}
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% if scale_note.is_none() %}
+      <button type="submit"
+              class="mt-4 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+        Apply scale
+      </button>
+    </form>
+    {% endif %}
+
+    {% if let Some(note) = scale_note %}
+    <p class="mt-4 text-sm text-slate-400">{{ note }}</p>
+    {% endif %}
+    <p class="mt-4 text-xs text-slate-500">Scaling a process type to 0 stops its containers.</p>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Containers</h3>
+    {% if containers.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No running containers.</p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Name</th>
+          <th class="py-2 pr-4 font-medium">Image</th>
+          <th class="py-2 pr-4 font-medium">State</th>
+          <th class="py-2 pr-4 font-medium">Uptime</th>
+          <th class="py-2 pr-4 font-medium">Restarts</th>
+          <th class="py-2 font-medium">OOM</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for container in containers %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 font-mono text-white">{{ container.name }}</td>
+          <td class="py-2 pr-4 font-mono text-slate-300">{{ container.image }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ container.state }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ container.uptime }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ container.restart_count }}</td>
+          <td class="py-2 {% if container.oom_killed %}text-red-400{% else %}text-slate-400{% endif %}">
+            {% if container.oom_killed %}yes{% else %}no{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Resource limits</h3>
+    {% if resources.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No resource limits or reservations configured.</p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Process</th>
+          <th class="py-2 pr-4 font-medium">Limit CPU</th>
+          <th class="py-2 pr-4 font-medium">Limit memory</th>
+          <th class="py-2 pr-4 font-medium">Limit swap</th>
+          <th class="py-2 pr-4 font-medium">Reserve CPU</th>
+          <th class="py-2 font-medium">Reserve memory</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for resource in resources %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 font-mono text-white">{{ resource.process_type }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ resource.limit_cpu }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ resource.limit_memory }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ resource.limit_memory_swap }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ resource.reserve_cpu }}</td>
+          <td class="py-2 text-slate-300">{{ resource.reserve_memory }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

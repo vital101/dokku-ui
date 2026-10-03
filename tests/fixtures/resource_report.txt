@@ -1,0 +1,29 @@
+=====> alpha resource information
+       web limit cpu:
+       web limit memory: 1024
+       web limit memory swap: 0
+       web limit network: 10
+       web limit network ingress:
+       web limit network egress:
+       web limit nvidia gpu:
+       web reservation cpu:
+       web reservation memory: 512
+       web reservation memory swap:
+       web reservation network: 8
+       web reservation network ingress:
+       web reservation network egress:
+       web reservation nvidia gpu:
+       worker limit cpu: 2
+       worker limit memory:
+       worker limit memory swap:
+       worker limit network:
+       worker limit network ingress:
+       worker limit network egress:
+       worker limit nvidia gpu:
+       worker reservation cpu:
+       worker reservation memory:
+       worker reservation memory swap:
+       worker reservation network:
+       worker reservation network ingress:
+       worker reservation network egress:
+       worker reservation nvidia gpu:

@@ -1,21 +1,69 @@
 use crate::domain::AppName;
+use crate::domain::types::ScaleEntry;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DokkuCommand {
     AppsList,
-    AppsCreate { app: AppName },
-    AppsDestroy { app: AppName, force: bool },
-    PsReport { app: AppName },
-    PsStart { app: AppName },
-    PsStop { app: AppName },
-    PsRestart { app: AppName },
-    AppsReport { app: AppName },
-    BuildsReport { app: AppName },
-    DomainsReport { app: AppName },
+    AppsCreate {
+        app: AppName,
+    },
+    AppsDestroy {
+        app: AppName,
+        force: bool,
+    },
+    PsReport {
+        app: AppName,
+    },
+    PsStart {
+        app: AppName,
+    },
+    PsStop {
+        app: AppName,
+    },
+    PsRestart {
+        app: AppName,
+    },
+    PsRebuild {
+        app: AppName,
+    },
+    PsScaleGet {
+        app: AppName,
+    },
+    PsScaleSet {
+        app: AppName,
+        scales: Vec<ScaleEntry>,
+    },
+    PsInspect {
+        app: AppName,
+    },
+    AppsReport {
+        app: AppName,
+    },
+    BuildsReport {
+        app: AppName,
+    },
+    DomainsReport {
+        app: AppName,
+    },
+    ResourceReport {
+        app: AppName,
+    },
+    ServiceInfo {
+        plugin: String,
+        service: String,
+    },
     PluginList,
-    AppLinks { plugin: String, app: AppName },
-    ConfigShow { app: AppName },
-    Logs { app: AppName, num_lines: u32 },
+    AppLinks {
+        plugin: String,
+        app: AppName,
+    },
+    ConfigShow {
+        app: AppName,
+    },
+    Logs {
+        app: AppName,
+        num_lines: u32,
+    },
 }
 
 impl DokkuCommand {
@@ -43,6 +91,19 @@ impl DokkuCommand {
             DokkuCommand::PsStart { app } => vec!["ps:start".into(), app.as_str().into()],
             DokkuCommand::PsStop { app } => vec!["ps:stop".into(), app.as_str().into()],
             DokkuCommand::PsRestart { app } => vec!["ps:restart".into(), app.as_str().into()],
+            DokkuCommand::PsRebuild { app } => vec!["ps:rebuild".into(), app.as_str().into()],
+            DokkuCommand::PsScaleGet { app } => vec![
+                "ps:scale".into(),
+                app.as_str().into(),
+                "--format".into(),
+                "json".into(),
+            ],
+            DokkuCommand::PsScaleSet { app, scales } => {
+                let mut argv = vec!["ps:scale".into(), app.as_str().into()];
+                argv.extend(scales.iter().map(ScaleEntry::arg));
+                argv
+            }
+            DokkuCommand::PsInspect { app } => vec!["ps:inspect".into(), app.as_str().into()],
             DokkuCommand::AppsReport { app } => {
                 vec![
                     "apps:report".into(),
@@ -67,6 +128,15 @@ impl DokkuCommand {
                     "json".into(),
                 ]
             }
+            DokkuCommand::ResourceReport { app } => {
+                vec!["resource:report".into(), app.as_str().into()]
+            }
+            DokkuCommand::ServiceInfo { plugin, service } => vec![
+                format!("{plugin}:info"),
+                service.clone(),
+                "--format".into(),
+                "json".into(),
+            ],
             DokkuCommand::PluginList => vec!["plugin:list".into()],
             DokkuCommand::AppLinks { plugin, app } => {
                 vec![format!("{plugin}:app-links"), app.as_str().into()]
@@ -80,6 +150,16 @@ impl DokkuCommand {
                 "--num".into(),
                 num_lines.to_string(),
             ],
+        }
+    }
+
+    /// Commands that trigger a deploy/rebuild can outlast the global command
+    /// timeout; this returns a longer per-command ceiling where needed.
+    pub fn timeout_override_secs(&self) -> Option<u64> {
+        match self {
+            DokkuCommand::PsScaleSet { .. } => Some(120),
+            DokkuCommand::PsRebuild { .. } => Some(300),
+            _ => None,
         }
     }
 }
@@ -196,6 +276,98 @@ mod tests {
             .argv(),
             vec!["postgres:app-links", "myapp"]
         );
+    }
+
+    #[test]
+    fn ps_rebuild_argv() {
+        assert_eq!(
+            DokkuCommand::PsRebuild { app: app("myapp") }.argv(),
+            vec!["ps:rebuild", "myapp"]
+        );
+    }
+
+    #[test]
+    fn ps_scale_get_argv() {
+        assert_eq!(
+            DokkuCommand::PsScaleGet { app: app("myapp") }.argv(),
+            vec!["ps:scale", "myapp", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn ps_scale_set_argv_formats_each_entry() {
+        assert_eq!(
+            DokkuCommand::PsScaleSet {
+                app: app("myapp"),
+                scales: vec![ScaleEntry::new("web", 2), ScaleEntry::new("worker", 3)],
+            }
+            .argv(),
+            vec!["ps:scale", "myapp", "web=2", "worker=3"]
+        );
+    }
+
+    #[test]
+    fn ps_scale_set_argv_allows_zero() {
+        assert_eq!(
+            DokkuCommand::PsScaleSet {
+                app: app("myapp"),
+                scales: vec![ScaleEntry::new("worker", 0)],
+            }
+            .argv(),
+            vec!["ps:scale", "myapp", "worker=0"]
+        );
+    }
+
+    #[test]
+    fn ps_inspect_argv() {
+        assert_eq!(
+            DokkuCommand::PsInspect { app: app("myapp") }.argv(),
+            vec!["ps:inspect", "myapp"]
+        );
+    }
+
+    #[test]
+    fn resource_report_argv() {
+        assert_eq!(
+            DokkuCommand::ResourceReport { app: app("myapp") }.argv(),
+            vec!["resource:report", "myapp"]
+        );
+    }
+
+    #[test]
+    fn service_info_argv() {
+        assert_eq!(
+            DokkuCommand::ServiceInfo {
+                plugin: "redis".into(),
+                service: "cache".into()
+            }
+            .argv(),
+            vec!["redis:info", "cache", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn timeout_override_only_for_long_commands() {
+        assert_eq!(
+            DokkuCommand::PsRebuild { app: app("myapp") }.timeout_override_secs(),
+            Some(300)
+        );
+        assert_eq!(
+            DokkuCommand::PsScaleSet {
+                app: app("myapp"),
+                scales: vec![ScaleEntry::new("web", 1)],
+            }
+            .timeout_override_secs(),
+            Some(120)
+        );
+        for command in [
+            DokkuCommand::AppsList,
+            DokkuCommand::PsReport { app: app("myapp") },
+            DokkuCommand::PsScaleGet { app: app("myapp") },
+            DokkuCommand::PsInspect { app: app("myapp") },
+        ] {
+            assert_eq!(command.timeout_override_secs(), None, "{command:?}");
+        }
     }
 
     #[test]

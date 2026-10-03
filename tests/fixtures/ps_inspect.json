@@ -1,0 +1,45 @@
+[
+  {
+    "Id": "b1a216b5b1d4a8f2c3e4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b",
+    "Name": "/alpha.web.1",
+    "Config": {
+      "Image": "dokku/alpha:latest"
+    },
+    "State": {
+      "Status": "running",
+      "Running": true,
+      "OOMKilled": false,
+      "RestartCount": 0,
+      "ExitCode": 0,
+      "StartedAt": "2026-10-03T17:10:55.123456789Z",
+      "FinishedAt": "0001-01-01T00:00:00Z",
+      "Health": {
+        "Status": "healthy"
+      }
+    },
+    "HostConfig": {
+      "Memory": 1073741824,
+      "NanoCpus": 500000000
+    }
+  },
+  {
+    "Id": "c9f8e7d6c5b4a392817061524330291807162534435261708192031425364758",
+    "Name": "/alpha.worker.1",
+    "Config": {
+      "Image": "dokku/alpha:latest"
+    },
+    "State": {
+      "Status": "running",
+      "Running": true,
+      "OOMKilled": true,
+      "RestartCount": 2,
+      "ExitCode": 137,
+      "StartedAt": "2026-10-03T16:02:00.000000000Z",
+      "FinishedAt": "0001-01-01T00:00:00Z"
+    },
+    "HostConfig": {
+      "Memory": 0,
+      "NanoCpus": 0
+    }
+  }
+]

@@ -13,6 +13,12 @@ domain parsers' unit tests and the `MockClient` integration suite.
   `parse_apps_list`. `tests/russh_integration.rs` runs the client against an
   in-process fake SSH server.
 
+> The App Detail fixtures (`ps_scale*`, `ps_inspect`, `resource_report`,
+> `*_info`) are **synthetic** and must be re-captured from the target host and
+> reconciled with their parsers before the App Detail milestone is signed off
+> against production. The argv each parser expects is built by
+> `src/domain/command.rs`.
+
 ## Formats
 
 | Fixture | Command | Notes |
@@ -33,6 +39,12 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `config_show.txt` | `dokku config:show <app>` | `=====> <app> env vars` header + `KEY:  value` lines. Values are fetched **unmasked**; the UI masks client-side with a fixed-length glyph string (deviation from plan.md §8's `--masked`, same visible result). |
 | `config_show_empty.txt` | `dokku config:show <app>` | No env vars set. |
 | `logs.txt` | `dokku logs <app> --num 200` | Docker log lines **with ANSI color codes**; the parser strips them. |
+| `ps_scale.json` | `dokku ps:scale <app> --format json` | Desired formation (`[{"process_type":"web","quantity":1},...]`). **Synthetic pending real-host validation.** |
+| `ps_scale_empty.json` | `dokku ps:scale <app> --format json` | Never-scaled app: `[]`. |
+| `ps_inspect.json` | `dokku ps:inspect <app>` | Sanitized `docker inspect` array. Parser reads `Id`, `Name`, `Config.Image`, `State.{Status,StartedAt,RestartCount,OOMKilled,ExitCode}`. **Synthetic pending real-host validation of exact shape.** |
+| `resource_report.txt` | `dokku resource:report <app>` | Indented `web limit memory: 1024` / `web reservation cpu:` lines. Parser keeps cpu/memory/memory-swap limits + cpu/memory reservations; ignores network/GPU. **Synthetic pending real-host validation.** |
+| `redis_info.json` | `dokku redis:info <service> --format json` | Service status/version/internal-ip/links. The DSN is present in the fixture but **never parsed or rendered**. **Synthetic pending real-host validation.** |
+| `postgres_info.json` | `dokku postgres:info <service> --format json` | Same, array shape. **Synthetic pending real-host validation.** |
 
 ## Maintenance
 

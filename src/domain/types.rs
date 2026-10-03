@@ -4,6 +4,7 @@ pub struct PsReport {
     pub running: bool,
     pub process_count: i64,
     pub processes: Vec<ProcessStatus>,
+    pub can_scale: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,156 @@ impl ProcessState {
             "exited" | "stopped" | "dead" | "created" | "paused" => ProcessState::Stopped,
             "missing" => ProcessState::Missing,
             other => ProcessState::Other(other.to_owned()),
+        }
+    }
+}
+
+/// One process type's desired instance count, from `ps:scale --format json`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScaleEntry {
+    pub process_type: String,
+    pub quantity: u32,
+}
+
+impl ScaleEntry {
+    pub fn new(process_type: impl Into<String>, quantity: u32) -> Self {
+        Self {
+            process_type: process_type.into(),
+            quantity,
+        }
+    }
+
+    /// `<process_type>=<quantity>`, the argument `ps:scale` accepts.
+    pub fn arg(&self) -> String {
+        format!("{}={}", self.process_type, self.quantity)
+    }
+}
+
+/// Per-container runtime state, distilled from `ps:inspect` (sanitized docker inspect).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerDetails {
+    pub id_short: String,
+    pub name: String,
+    pub image: String,
+    pub state: String,
+    pub started_at: String,
+    pub restart_count: i64,
+    pub oom_killed: bool,
+    pub exit_code: i64,
+}
+
+/// Per-process-type resource limits/reservations from `resource:report`. Empty
+/// strings mean "not set" and render as an em dash.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResourceReport {
+    pub process_type: String,
+    pub limit_cpu: String,
+    pub limit_memory: String,
+    pub limit_memory_swap: String,
+    pub reserve_cpu: String,
+    pub reserve_memory: String,
+}
+
+/// A service (datastore) linked to an app.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServiceLink {
+    pub plugin: String,
+    pub service: String,
+}
+
+/// Details for a single linked service, from `<plugin>:info <service> --format json`.
+/// The DSN is deliberately never parsed into this struct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceInfo {
+    pub plugin: String,
+    pub service: String,
+    pub status: String,
+    pub version: String,
+    pub exposed_ports: String,
+    pub internal_ip: String,
+    pub memory: String,
+    pub created: String,
+    pub linked_apps: Vec<String>,
+}
+
+impl ServiceInfo {
+    pub fn unknown(plugin: impl Into<String>, service: impl Into<String>) -> Self {
+        Self {
+            plugin: plugin.into(),
+            service: service.into(),
+            status: String::new(),
+            version: String::new(),
+            exposed_ports: String::new(),
+            internal_ip: String::new(),
+            memory: String::new(),
+            created: String::new(),
+            linked_apps: Vec::new(),
+        }
+    }
+
+    pub fn status_label(&self) -> &str {
+        if self.status.is_empty() {
+            "unknown"
+        } else {
+            &self.status
+        }
+    }
+
+    pub fn status_badge_css(&self) -> &'static str {
+        match self.status.as_str() {
+            "running" => "bg-emerald-500/10 text-emerald-400",
+            "" => "bg-slate-500/10 text-slate-400",
+            _ => "bg-red-500/10 text-red-400",
+        }
+    }
+
+    pub fn display_or_dash(value: &str) -> &str {
+        if value.is_empty() { "—" } else { value }
+    }
+
+    pub fn linked_apps_label(&self) -> String {
+        if self.linked_apps.is_empty() {
+            "—".to_owned()
+        } else {
+            self.linked_apps.join(", ")
+        }
+    }
+}
+
+/// Summary of the most recent build for an app, from `builds:report --format json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildInfo {
+    pub status: String,
+    pub exit_code: String,
+    pub kind: String,
+    pub started_at: String,
+    pub finished_at: String,
+}
+
+impl BuildInfo {
+    pub fn image_status(&self) -> ImageStatus {
+        match self.status.as_str() {
+            "" => ImageStatus::None,
+            "failed" => {
+                let detail = if self.exit_code.is_empty() {
+                    "build failed".to_owned()
+                } else {
+                    format!("build failed (exit {})", self.exit_code)
+                };
+                ImageStatus::Error(detail)
+            }
+            _ => ImageStatus::Built,
+        }
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status == "failed"
+    }
+
+    pub fn status_label(&self) -> &str {
+        match self.status.as_str() {
+            "" => "never built",
+            other => other,
         }
     }
 }
@@ -113,7 +264,9 @@ pub struct AppInfo {
     pub created_at: String,
     pub locked: bool,
     pub image_status: Option<ImageStatus>,
-    pub link_exists: Option<bool>,
+    pub last_build: Option<BuildInfo>,
+    pub links: Option<Vec<ServiceLink>>,
+    pub domains: Vec<String>,
     pub dns_record_exists: Option<bool>,
 }
 
@@ -135,10 +288,25 @@ impl AppInfo {
     }
 
     pub fn link_exists_label(&self) -> &'static str {
-        match self.link_exists {
+        match &self.links {
             None => "unknown",
-            Some(true) => "yes",
-            Some(false) => "no",
+            Some(links) if links.is_empty() => "no",
+            Some(_) => "yes",
+        }
+    }
+
+    pub fn domains_label(&self) -> String {
+        if self.domains.is_empty() {
+            "—".to_owned()
+        } else {
+            self.domains.join(", ")
+        }
+    }
+
+    pub fn last_build_label(&self) -> String {
+        match &self.last_build {
+            None => "unknown".to_owned(),
+            Some(build) => build.status_label().to_owned(),
         }
     }
 
@@ -198,6 +366,7 @@ mod tests {
             running,
             process_count: 1,
             processes: Vec::new(),
+            can_scale: None,
         }
     }
 
@@ -315,5 +484,28 @@ mod tests {
             .masked_value(),
             ""
         );
+    }
+
+    #[test]
+    fn service_info_unknown_and_labels() {
+        let unknown = ServiceInfo::unknown("redis", "cache");
+        assert_eq!(unknown.status_label(), "unknown");
+        assert!(unknown.status_badge_css().contains("slate"));
+        assert!(unknown.linked_apps.is_empty());
+
+        let running = ServiceInfo {
+            status: "running".into(),
+            ..ServiceInfo::unknown("redis", "cache")
+        };
+        assert_eq!(running.status_label(), "running");
+        assert!(running.status_badge_css().contains("emerald"));
+
+        let stopped = ServiceInfo {
+            status: "stopped".into(),
+            ..ServiceInfo::unknown("redis", "cache")
+        };
+        assert!(stopped.status_badge_css().contains("red"));
+        assert_eq!(ServiceInfo::display_or_dash(""), "—");
+        assert_eq!(ServiceInfo::display_or_dash("5432"), "5432");
     }
 }

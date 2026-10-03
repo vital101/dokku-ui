@@ -26,6 +26,9 @@ fn app_name(name: &str) -> AppName {
 
 const CONFIG_FIXTURE: &str = include_str!("fixtures/config_show.txt");
 const LOGS_FIXTURE: &str = include_str!("fixtures/logs.txt");
+const PS_SCALE_FIXTURE: &str = include_str!("fixtures/ps_scale.json");
+const PS_INSPECT_FIXTURE: &str = include_str!("fixtures/ps_inspect.json");
+const RESOURCE_REPORT_FIXTURE: &str = include_str!("fixtures/resource_report.txt");
 
 fn apps_report() -> DokkuOutput {
     DokkuOutput::ok(r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned())
@@ -96,6 +99,8 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
     for path in [
         "/apps/new",
         "/apps/alpha",
+        "/apps/alpha/processes",
+        "/apps/alpha/services",
         "/apps/alpha/delete",
         "/apps/alpha/config",
         "/apps/alpha/logs",
@@ -111,6 +116,8 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         ("/apps/alpha/start", ""),
         ("/apps/alpha/stop", ""),
         ("/apps/alpha/restart", ""),
+        ("/apps/alpha/rebuild", ""),
+        ("/apps/alpha/scale", "scale_web=2"),
     ] {
         let resp = test::call_service(&app, form_request(path, body.to_owned()).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -595,6 +602,8 @@ async fn app_posts_without_valid_csrf_are_rejected() {
         ("/apps/alpha/start", ""),
         ("/apps/alpha/stop", ""),
         ("/apps/alpha/restart", ""),
+        ("/apps/alpha/rebuild", ""),
+        ("/apps/alpha/scale", "scale_web=2"),
     ] {
         let resp = test::call_service(
             &app,
@@ -643,6 +652,13 @@ async fn actions_succeed_flash_and_redirect_to_show() {
                 app: app_name("alpha"),
             },
             "App &#39;alpha&#39; restarted.",
+        ),
+        (
+            "/apps/alpha/rebuild",
+            DokkuCommand::PsRebuild {
+                app: app_name("alpha"),
+            },
+            "App &#39;alpha&#39; rebuilt.",
         ),
     ] {
         let (state, client, _dir) =
@@ -798,6 +814,7 @@ async fn action_buttons_render_on_show_page() {
     assert!(body.contains(r#"action="/apps/alpha/start""#));
     assert!(body.contains(r#"action="/apps/alpha/stop""#));
     assert!(body.contains(r#"action="/apps/alpha/restart""#));
+    assert!(body.contains(r#"action="/apps/alpha/rebuild""#));
 }
 
 #[tokio::test]
@@ -1050,4 +1067,514 @@ async fn logs_fetch_error_renders_502() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let body = get_body(resp).await;
     assert!(body.contains("boom"));
+}
+
+fn processes_client() -> MockClient {
+    seeded_app_client()
+        .stub(
+            DokkuCommand::PsScaleGet {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(PS_SCALE_FIXTURE)),
+        )
+        .stub(
+            DokkuCommand::PsInspect {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(PS_INSPECT_FIXTURE)),
+        )
+        .stub(
+            DokkuCommand::ResourceReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(RESOURCE_REPORT_FIXTURE)),
+        )
+}
+
+#[tokio::test]
+async fn processes_renders_formation_containers_and_resources() {
+    let (state, _dir) = test_state_with_client(processes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        body.contains(r#"href="/apps/alpha/processes""#),
+        "processes tab"
+    );
+    assert!(
+        body.contains(r#"href="/apps/alpha/services""#),
+        "services tab"
+    );
+    assert!(
+        body.contains("border-emerald-500"),
+        "active tab highlighted"
+    );
+    assert!(body.contains("Formation"));
+    assert!(body.contains(r#"action="/apps/alpha/scale""#), "scale form");
+    assert!(
+        body.contains(r#"name="scale_web""#),
+        "scale input for web: {body}"
+    );
+    assert!(body.contains("alpha.web.1"), "container row");
+    assert!(body.contains("1024"), "resource limit");
+    assert!(body.contains("Apply scale"));
+}
+
+#[tokio::test]
+async fn processes_hides_form_when_scaling_is_disabled() {
+    let client = seeded_app_client()
+        .stub(
+            DokkuCommand::PsReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(
+                r#"{"deployed":"true","running":"true","processes":"1","ps-can-scale":"false","status-web.1":"running"}"#,
+            )),
+        )
+        .stub(
+            DokkuCommand::PsScaleGet {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(PS_SCALE_FIXTURE)),
+        )
+        .stub(
+            DokkuCommand::PsInspect {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok("[]")),
+        )
+        .stub(
+            DokkuCommand::ResourceReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok("")),
+        );
+    let (state, _dir) = test_state_with_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+
+    assert!(
+        !body.contains(r#"action="/apps/alpha/scale""#),
+        "form hidden"
+    );
+    assert!(body.contains("app.json formation"));
+    assert!(body.contains("No running containers."));
+    assert!(body.contains("No resource limits or reservations configured."));
+}
+
+#[tokio::test]
+async fn processes_shows_note_when_no_formation_exists() {
+    let client = processes_client().stub(
+        DokkuCommand::PsScaleGet {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("[]")),
+    );
+    let (state, _dir) = test_state_with_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("No formation found yet"));
+    assert!(!body.contains(r#"action="/apps/alpha/scale""#));
+}
+
+#[tokio::test]
+async fn processes_degrades_when_detail_commands_fail() {
+    let client = seeded_app_client()
+        .stub(
+            DokkuCommand::PsScaleGet {
+                app: app_name("alpha"),
+            },
+            Err(exit_error(1, "nope")),
+        )
+        .stub(
+            DokkuCommand::PsInspect {
+                app: app_name("alpha"),
+            },
+            Err(exit_error(1, "nope")),
+        )
+        .stub(
+            DokkuCommand::ResourceReport {
+                app: app_name("alpha"),
+            },
+            Err(exit_error(1, "nope")),
+        );
+    let (state, _dir) = test_state_with_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("No formation found yet"));
+}
+
+#[tokio::test]
+async fn processes_unknown_app_renders_404() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/nope/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn scale_posts_formation_and_redirects_with_flash() {
+    let scaled = DokkuCommand::PsScaleSet {
+        app: app_name("alpha"),
+        scales: vec![
+            dokku_ui::domain::types::ScaleEntry::new("web", 4),
+            dokku_ui::domain::types::ScaleEntry::new("worker", 0),
+        ],
+    };
+    let (state, client, _dir) = harness(
+        processes_client()
+            .stub(scaled.clone(), Ok(DokkuOutput::ok("")))
+            .stub(
+                DokkuCommand::PsReport {
+                    app: app_name("alpha"),
+                },
+                Ok(DokkuOutput::ok(
+                    r#"{"deployed":"true","running":"true","processes":"4","status-web.1":"running"}"#,
+                )),
+            ),
+    )
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/alpha/scale",
+            format!("csrf_token={csrf}&scale_web=4&scale_worker=0"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha/processes");
+    assert!(client.calls().contains(&scaled), "PsScaleSet called");
+
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Scaled &#39;alpha&#39;."), "success flash");
+}
+
+#[tokio::test]
+async fn scale_rejects_out_of_range_value_without_calling_dokku() {
+    let (state, client, _dir) = harness(processes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/alpha/scale",
+            format!("csrf_token={csrf}&scale_web=999"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha/processes");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::PsScaleSet { .. })),
+        "no PsScaleSet call for out-of-range value"
+    );
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("between 0 and 100"));
+}
+
+#[tokio::test]
+async fn scale_dokku_error_flashes_and_returns_to_processes() {
+    let (state, _client, _dir) = harness(processes_client().stub(
+        DokkuCommand::PsScaleSet {
+            app: app_name("alpha"),
+            scales: vec![dokku_ui::domain::types::ScaleEntry::new("web", 2)],
+        },
+        Err(exit_error(1, "cannot scale")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/alpha/scale",
+            format!("csrf_token={csrf}&scale_web=2"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha/processes");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Failed to scale app"));
+    assert!(body.contains("cannot scale"));
+}
+
+#[tokio::test]
+async fn services_renders_linked_service_details() {
+    let client = seeded_app_client()
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(include_str!("fixtures/plugin_list.txt"))),
+        )
+        .stub(
+            DokkuCommand::AppLinks {
+                plugin: "postgres".into(),
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/app_links.txt"))),
+        )
+        .stub(
+            DokkuCommand::ServiceInfo {
+                plugin: "postgres".into(),
+                service: "roboswarm-db".into(),
+            },
+            Ok(DokkuOutput::ok(
+                r#"{"service":"roboswarm-db","status":"running","version":"16.4","exposed-ports":"5432","internal-ip":"172.17.0.7","links":"alpha gamma","dsn":"postgres://postgres:secret@host/db"}"#,
+            )),
+        );
+    let (state, _client, _dir) = harness(client).await;
+    state.snapshot.ensure_loaded().await.expect("load");
+    state.snapshot.refresh_details().await.expect("details");
+
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("postgres"));
+    assert!(body.contains("roboswarm-db"));
+    assert!(body.contains("running"));
+    assert!(body.contains("16.4"));
+    assert!(body.contains("5432"));
+    assert!(body.contains("alpha, gamma"));
+    assert!(!body.contains("secret"), "dsn never rendered: {body}");
+    assert!(
+        body.contains(r#"href="/apps/alpha/services""#),
+        "services tab active"
+    );
+}
+
+#[tokio::test]
+async fn services_shows_empty_state_when_no_links() {
+    let client = seeded_app_client().stub(
+        DokkuCommand::PluginList,
+        Ok(DokkuOutput::ok(include_str!("fixtures/plugin_list.txt"))),
+    );
+    let (state, _client, _dir) = harness(client).await;
+    state.snapshot.ensure_loaded().await.expect("load");
+    state.snapshot.refresh_details().await.expect("details");
+
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("No services are linked to this app."));
+}
+
+#[tokio::test]
+async fn services_marks_unknown_when_links_not_yet_resolved() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Service links could not be determined yet."));
+}
+
+#[tokio::test]
+async fn services_degrades_to_unknown_status_when_info_fails() {
+    let client = seeded_app_client()
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(include_str!("fixtures/plugin_list.txt"))),
+        )
+        .stub(
+            DokkuCommand::AppLinks {
+                plugin: "postgres".into(),
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/app_links.txt"))),
+        )
+        .stub(
+            DokkuCommand::ServiceInfo {
+                plugin: "postgres".into(),
+                service: "roboswarm-db".into(),
+            },
+            Err(exit_error(1, "boom")),
+        );
+    let (state, _client, _dir) = harness(client).await;
+    state.snapshot.ensure_loaded().await.expect("load");
+    state.snapshot.refresh_details().await.expect("details");
+
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("roboswarm-db"));
+    assert!(body.contains("unknown"));
+}
+
+#[tokio::test]
+async fn services_unknown_app_renders_404() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/nope/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

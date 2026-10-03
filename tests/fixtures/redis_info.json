@@ -1,0 +1,1 @@
+{"service":"roboswarm-db","status":"running","version":"8.10.1","image-version":"8.10.1","exposed-ports":"","internal-ip":"172.17.0.5","memory":"","created":"2026-10-01 08:22 UTC","links":"alpha beta","dsn":"redis://:secret-password@dokku-redis-roboswarm-db:6379"}

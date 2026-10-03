@@ -193,12 +193,16 @@ fn finalize(output: DokkuOutput) -> Result<DokkuOutput, DokkuError> {
 impl DokkuClient for RusshClient {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError> {
         let remote_command = command.argv().join(" ");
-        match tokio::time::timeout(self.timeout, self.run_command(&remote_command)).await {
+        let timeout = command
+            .timeout_override_secs()
+            .map(Duration::from_secs)
+            .unwrap_or(self.timeout);
+        match tokio::time::timeout(timeout, self.run_command(&remote_command)).await {
             Ok(result) => result,
             Err(_) => {
                 self.invalidate_session().await;
                 Err(DokkuError::Timeout {
-                    secs: self.timeout.as_secs(),
+                    secs: timeout.as_secs(),
                 })
             }
         }

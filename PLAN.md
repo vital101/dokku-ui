@@ -351,10 +351,53 @@ Coverage protection rails: `main.rs` stays trivial; anything nontrivial lives be
 - Logs default **200** lines, max **1000**, newest-last (dokku order).
 - Single instance, no horizontal scaling; UTC everywhere.
 - No login rate-limiting in v1 (documented follow-up).
+- App Detail v1: scale per process type capped at **100** (UI guard); `ps:scale`
+  timeout **120s**, `ps:rebuild` timeout **300s**; resources display-only;
+  live CPU/memory deferred (no dokku command).
 
 ## 16. Post-v1 backlog (context, not scope)
 
 Config set/unset UI (re-auth to unmask), live log tailing (websockets/SSE), deployments & build logs, one-off `run` commands, user management/roles UI, audit log, login rate limiting, Let's Encrypt/certs UI, ssh-keys management, plugin screens, backup/export, i18n, themes.
+
+### Deferred from App Detail v1
+
+- **Live CPU/memory utilization.** Dokku exposes no `docker stats` passthrough
+  over SSH, so v1 shows configured limits (`resource:report`) and container
+  state (`ps:inspect`) instead. Fast-follow: a tiny host-side plugin
+  (`dokku ui:stats <app>`) wrapping `docker stats --no-stream`.
+- **Resource limit/reserve editing.** Display-only in v1; setting requires a
+  rebuild to take effect.
+- **Service link/unlink.** Display-only in v1 (unlink unsets env vars and
+  restarts the app).
+- **Per-process restart** (`ps:restart <app> <process-type>`).
+
+## 17. App Detail v1 (implemented)
+
+Extends the per-app UI with deep runtime detail, read from the same
+`DokkuClient` seam (all commands pure/argv-tested in `domain/command.rs`):
+
+- **Processes tab** (`GET /apps/{name}/processes`): desired formation
+  (`ps:scale --format json`) merged with observed states (`ps:report`),
+  a scale form (`POST /apps/{name}/scale`, `CsrfForm`, capped at
+  `SCALE_MAX = 100`, hidden when `ps-can-scale=false` or no formation),
+  per-container detail (`ps:inspect`), and resource limits/reservations
+  (`resource:report`). Pure assembly lives in `dokku/processes.rs`.
+- **Services tab** (`GET /apps/{name}/services`): linked services from the
+  snapshot detail pass, enriched live per service via
+  `<plugin>:info <service> --format json`. DSNs are never parsed or rendered.
+- **Rebuild action** (`POST /apps/{name}/rebuild`): reuses the start/stop/
+  restart action path; long commands get a per-command timeout override
+  (`PsRebuild` 300s, `PsScaleSet` 120s).
+- **Overview enrichment**: last build (`builds:report`), vhost list
+  (`domains:report`), and full linked-service list — all already fetched by
+  the detail pass, so no extra SSH cost.
+- **Degradation:** every detail command is best-effort; failures render empty
+  sections / an "unknown" card rather than a 5xx. Unknown apps still 404 via
+  `SnapshotStore::resolve_app`.
+
+New fixtures (`ps_scale*`, `ps_inspect`, `resource_report`, `*_info`) are
+currently synthetic; see `tests/fixtures/README.md` for the re-capture
+requirement against the target host.
 
 ---
 

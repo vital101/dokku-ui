@@ -39,8 +39,16 @@
         <dd class="font-medium text-white">{{ image_status_label }}</dd>
       </div>
       <div class="flex justify-between">
+        <dt class="text-slate-400">Last build</dt>
+        <dd class="font-medium text-white">{{ last_build_label }}</dd>
+      </div>
+      <div class="flex justify-between">
         <dt class="text-slate-400">Link exists</dt>
         <dd class="font-medium text-white">{{ link_exists_label }}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Domains</dt>
+        <dd class="font-medium text-white">{{ domains_label }}</dd>
       </div>
       <div class="flex justify-between">
         <dt class="text-slate-400">DNS record</dt>
@@ -69,6 +77,13 @@
       <button type="submit"
               class="rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600">
         Restart
+      </button>
+    </form>
+    <form method="post" action="/apps/{{ name }}/rebuild">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="rounded-md bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600">
+        Rebuild
       </button>
     </form>
     <a href="/apps/{{ name }}/delete"

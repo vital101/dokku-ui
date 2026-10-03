@@ -8,10 +8,10 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{
-    parse_app_links, parse_apps_list, parse_apps_report, parse_builds_report, parse_domains_report,
+    parse_app_links, parse_apps_list, parse_apps_report, parse_build_info, parse_domains_report,
     parse_ps_report, parse_service_plugins,
 };
-use crate::domain::types::{AppInfo, ImageStatus, PsReport};
+use crate::domain::types::{AppInfo, BuildInfo, ImageStatus, PsReport, ServiceLink};
 
 use super::client::{DokkuClient, DokkuError};
 use super::dns::{DnsResolver, TokioResolver, dns_record_status};
@@ -116,7 +116,9 @@ pub async fn build_snapshot(client: &dyn DokkuClient) -> Result<Snapshot, DokkuE
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDetails {
     pub image_status: Option<ImageStatus>,
-    pub link_exists: Option<bool>,
+    pub last_build: Option<BuildInfo>,
+    pub links: Option<Vec<ServiceLink>>,
+    pub domains: Vec<String>,
     pub dns_record_exists: Option<bool>,
 }
 
@@ -127,7 +129,9 @@ fn carry_over_details(previous: &Snapshot, next: &mut Snapshot) {
         let Some(info) = info.as_mut() else { continue };
         if let Some(Some(prev)) = previous.apps_reports.get(name) {
             info.image_status = prev.image_status.clone();
-            info.link_exists = prev.link_exists;
+            info.last_build = prev.last_build.clone();
+            info.links = prev.links.clone();
+            info.domains = prev.domains.clone();
             info.dns_record_exists = prev.dns_record_exists;
         }
     }
@@ -159,30 +163,44 @@ async fn fetch_one_details(
     app: &AppName,
     plugins: Option<&[String]>,
 ) -> AppDetails {
+    let (last_build, image_status) = fetch_build(client, app).await;
+    let links = fetch_service_links(client, app, plugins).await;
+    let (domains, dns_record_exists) = fetch_domains(client, dns, app).await;
     AppDetails {
-        image_status: fetch_image_status(client, app).await,
-        link_exists: fetch_link_exists(client, app, plugins).await,
-        dns_record_exists: fetch_dns_record(client, dns, app).await,
+        image_status,
+        last_build,
+        links,
+        domains,
+        dns_record_exists,
     }
 }
 
-async fn fetch_image_status(client: &dyn DokkuClient, app: &AppName) -> Option<ImageStatus> {
-    client
+async fn fetch_build(
+    client: &dyn DokkuClient,
+    app: &AppName,
+) -> (Option<BuildInfo>, Option<ImageStatus>) {
+    let Ok(output) = client
         .exec(&DokkuCommand::BuildsReport { app: app.clone() })
         .await
-        .ok()
-        .and_then(|output| parse_builds_report(&output.stdout))
+    else {
+        return (None, None);
+    };
+    match parse_build_info(&output.stdout) {
+        Some(build) => {
+            let status = build.image_status();
+            (Some(build), Some(status))
+        }
+        None => (None, None),
+    }
 }
 
-async fn fetch_link_exists(
+async fn fetch_service_links(
     client: &dyn DokkuClient,
     app: &AppName,
     plugins: Option<&[String]>,
-) -> Option<bool> {
+) -> Option<Vec<ServiceLink>> {
     let plugins = plugins?;
-    if plugins.is_empty() {
-        return Some(false);
-    }
+    let mut links = Vec::new();
     let mut all_ok = true;
     for plugin in plugins {
         match client
@@ -193,34 +211,40 @@ async fn fetch_link_exists(
             .await
         {
             Ok(output) => {
-                if !parse_app_links(&output.stdout).is_empty() {
-                    return Some(true);
+                for service in parse_app_links(&output.stdout) {
+                    links.push(ServiceLink {
+                        plugin: plugin.clone(),
+                        service,
+                    });
                 }
             }
             Err(_) => all_ok = false,
         }
     }
-    all_ok.then_some(false)
+    all_ok.then_some(links)
 }
 
-async fn fetch_dns_record(
+async fn fetch_domains(
     client: &dyn DokkuClient,
     dns: &dyn DnsResolver,
     app: &AppName,
-) -> Option<bool> {
-    let output = client
+) -> (Vec<String>, Option<bool>) {
+    let Ok(output) = client
         .exec(&DokkuCommand::DomainsReport { app: app.clone() })
         .await
-        .ok()?;
+    else {
+        return (Vec::new(), None);
+    };
     let vhosts = parse_domains_report(&output.stdout);
     if vhosts.is_empty() {
-        return None;
+        return (vhosts, None);
     }
     let mut resolved = Vec::with_capacity(vhosts.len());
     for host in &vhosts {
         resolved.push(dns.resolves(host).await);
     }
-    dns_record_status(&vhosts, &resolved)
+    let status = dns_record_status(&vhosts, &resolved);
+    (vhosts, status)
 }
 
 async fn fetch_service_plugins(client: &dyn DokkuClient) -> Option<Vec<String>> {
@@ -318,7 +342,9 @@ impl SnapshotStore {
                     )
                     .await;
                     info.image_status = details.image_status;
-                    info.link_exists = details.link_exists;
+                    info.last_build = details.last_build;
+                    info.links = details.links;
+                    info.domains = details.domains;
                     info.dns_record_exists = details.dns_record_exists;
                 }
                 (ps, info)
@@ -400,7 +426,9 @@ impl SnapshotStore {
             for (name, detail) in &details {
                 if let Some(Some(info)) = snapshot.apps_reports.get_mut(name.as_str()) {
                     info.image_status = detail.image_status.clone();
-                    info.link_exists = detail.link_exists;
+                    info.last_build = detail.last_build.clone();
+                    info.links = detail.links.clone();
+                    info.domains = detail.domains.clone();
                     info.dns_record_exists = detail.dns_record_exists;
                 }
             }
@@ -827,7 +855,18 @@ mod tests {
             .cloned()
             .expect("app info");
         assert_eq!(info.image_status, Some(ImageStatus::Built));
-        assert_eq!(info.link_exists, Some(true));
+        assert_eq!(
+            info.links,
+            Some(vec![ServiceLink {
+                plugin: "postgres".into(),
+                service: "roboswarm-db".into(),
+            }])
+        );
+        assert_eq!(
+            info.last_build.as_ref().map(|build| build.status.as_str()),
+            Some("succeeded")
+        );
+        assert_eq!(info.domains, vec!["dokku.re-cycledair.com".to_owned()]);
         assert_eq!(info.dns_record_exists, Some(true));
     }
 
@@ -869,7 +908,7 @@ mod tests {
             .expect("snapshot")
             .app_info("alpha")
             .cloned();
-        assert_eq!(info.and_then(|info| info.link_exists), Some(false));
+        assert_eq!(info.and_then(|info| info.links), Some(Vec::new()));
     }
 
     #[tokio::test]
@@ -909,7 +948,9 @@ mod tests {
             .cloned()
             .expect("app info");
         assert_eq!(info.image_status, None);
-        assert_eq!(info.link_exists, None);
+        assert_eq!(info.last_build, None);
+        assert_eq!(info.links, None);
+        assert_eq!(info.domains, Vec::<String>::new());
         assert_eq!(info.dns_record_exists, None);
     }
 
@@ -949,7 +990,7 @@ mod tests {
             .expect("snapshot")
             .app_info("alpha")
             .cloned();
-        assert_eq!(info.and_then(|info| info.link_exists), Some(false));
+        assert_eq!(info.and_then(|info| info.links), Some(Vec::new()));
     }
 
     #[tokio::test]
@@ -988,7 +1029,14 @@ mod tests {
             .cloned()
             .expect("app info");
         assert_eq!(info.image_status, Some(ImageStatus::Built));
-        assert_eq!(info.link_exists, Some(true));
+        assert_eq!(
+            info.links,
+            Some(vec![ServiceLink {
+                plugin: "postgres".into(),
+                service: "roboswarm-db".into(),
+            }])
+        );
+        assert!(info.last_build.is_some());
         assert_eq!(info.dns_record_exists, Some(true));
     }
 
@@ -1025,7 +1073,13 @@ mod tests {
             .cloned()
             .expect("app info");
         assert_eq!(info.image_status, Some(ImageStatus::Built));
-        assert_eq!(info.link_exists, Some(true));
+        assert_eq!(
+            info.links,
+            Some(vec![ServiceLink {
+                plugin: "postgres".into(),
+                service: "roboswarm-db".into(),
+            }])
+        );
         assert_eq!(info.dns_record_exists, Some(true));
     }
 

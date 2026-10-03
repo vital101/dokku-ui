@@ -44,6 +44,7 @@ mod tests {
             running,
             process_count,
             processes: Vec::new(),
+            can_scale: None,
         }
     }
 
@@ -53,7 +54,9 @@ mod tests {
             created_at: "2026-10-03 10:36 UTC".into(),
             locked: false,
             image_status: None,
-            link_exists: None,
+            last_build: None,
+            links: None,
+            domains: Vec::new(),
             dns_record_exists: None,
         }
     }

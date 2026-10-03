@@ -64,6 +64,7 @@ mod tests {
             running,
             process_count: 1,
             processes: Vec::new(),
+            can_scale: None,
         }
     }
 
