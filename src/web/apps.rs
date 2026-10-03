@@ -122,7 +122,7 @@ pub async fn create(
 
     match state.dokku.exec(&DokkuCommand::AppsCreate { app }).await {
         Ok(_) => {
-            if let Err(err) = state.snapshot.refresh().await {
+            if let Err(err) = state.snapshot.refresh_app(&name).await {
                 tracing::warn!(error = %err, "snapshot refresh after create failed");
             }
             set_flash(

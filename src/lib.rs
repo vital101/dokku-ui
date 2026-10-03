@@ -19,6 +19,7 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
     let _refresher = dokku::spawn_refresher(
         snapshot.clone(),
         std::time::Duration::from_secs(settings.snapshot_refresh_secs),
+        std::time::Duration::from_secs(settings.detail_refresh_secs),
     );
     let state = web::AppState {
         db: pool,

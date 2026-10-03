@@ -1,4 +1,6 @@
-use crate::domain::types::{AppInfo, EnvVar, LogLines, ProcessState, ProcessStatus, PsReport};
+use crate::domain::types::{
+    AppInfo, EnvVar, ImageStatus, LogLines, ProcessState, ProcessStatus, PsReport,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
@@ -57,6 +59,69 @@ fn format_created_at(raw: &str) -> String {
         datetime.hour(),
         datetime.minute()
     )
+}
+
+/// `dokku builds:report <app> --format json`. A never-built app returns every
+/// `build-*` key as an empty string; an invalid response yields `None` (unknown).
+pub fn parse_builds_report(json: &str) -> Option<ImageStatus> {
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).ok()?;
+    let status = map
+        .get("build-status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match status {
+        "" => Some(ImageStatus::None),
+        "failed" => {
+            let code = map
+                .get("build-exit-code")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let detail = if code.is_empty() {
+                "build failed".to_owned()
+            } else {
+                format!("build failed (exit {code})")
+            };
+            Some(ImageStatus::Error(detail))
+        }
+        // Dokku has no in-progress label here; any other non-empty status means a
+        // deployment image exists (or a prior good one is still serving traffic).
+        _ => Some(ImageStatus::Built),
+    }
+}
+
+/// `dokku domains:report <app> --format json` -> the app's vhost hostnames.
+pub fn parse_domains_report(json: &str) -> Vec<String> {
+    let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json) else {
+        return Vec::new();
+    };
+    map.get("app-vhosts")
+        .and_then(|value| value.as_str())
+        .map(|vhosts| vhosts.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// `dokku plugin:list` -> names of enabled plugins whose description ends in
+/// `service plugin` (the datastore plugins that can be linked to apps).
+pub fn parse_service_plugins(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 4 || fields[2] != "enabled" {
+                return None;
+            }
+            let description = fields[3..].join(" ");
+            description
+                .ends_with("service plugin")
+                .then(|| fields[0].to_owned())
+        })
+        .collect()
+}
+
+/// `<plugin>:app-links <app>` -> names of services linked to the app (one per line).
+pub fn parse_app_links(output: &str) -> Vec<String> {
+    parse_apps_list(output)
 }
 
 pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
@@ -160,6 +225,15 @@ mod tests {
     const CONFIG_SHOW: &str = include_str!("../../tests/fixtures/config_show.txt");
     const CONFIG_SHOW_EMPTY: &str = include_str!("../../tests/fixtures/config_show_empty.txt");
     const LOGS: &str = include_str!("../../tests/fixtures/logs.txt");
+    const BUILDS_REPORT: &str = include_str!("../../tests/fixtures/builds_report.json");
+    const BUILDS_REPORT_FAILED: &str =
+        include_str!("../../tests/fixtures/builds_report_failed.json");
+    const BUILDS_REPORT_EMPTY: &str = include_str!("../../tests/fixtures/builds_report_empty.json");
+    const DOMAINS_REPORT: &str = include_str!("../../tests/fixtures/domains_report.json");
+    const DOMAINS_REPORT_DEFAULT: &str =
+        include_str!("../../tests/fixtures/domains_report_default.json");
+    const PLUGIN_LIST: &str = include_str!("../../tests/fixtures/plugin_list.txt");
+    const APP_LINKS: &str = include_str!("../../tests/fixtures/app_links.txt");
 
     #[test]
     fn parses_apps_list_fixture() {
@@ -259,6 +333,87 @@ mod tests {
         assert_eq!(info.link_exists_label(), "unknown");
         assert_eq!(info.dns_record_exists_label(), "unknown");
         assert_eq!(info.locked_label(), "no");
+    }
+
+    #[test]
+    fn parses_builds_report_fixture() {
+        assert_eq!(parse_builds_report(BUILDS_REPORT), Some(ImageStatus::Built));
+    }
+
+    #[test]
+    fn parses_failed_builds_report() {
+        assert_eq!(
+            parse_builds_report(BUILDS_REPORT_FAILED),
+            Some(ImageStatus::Error("build failed (exit 1)".into()))
+        );
+    }
+
+    #[test]
+    fn never_built_builds_report_maps_to_none() {
+        assert_eq!(
+            parse_builds_report(BUILDS_REPORT_EMPTY),
+            Some(ImageStatus::None)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_builds_report() {
+        assert_eq!(parse_builds_report("not json"), None);
+        assert_eq!(parse_builds_report(""), None);
+    }
+
+    #[test]
+    fn parses_domains_report_fixture() {
+        assert_eq!(
+            parse_domains_report(DOMAINS_REPORT),
+            vec!["dokku.re-cycledair.com"]
+        );
+    }
+
+    #[test]
+    fn parses_auto_assigned_vhost() {
+        assert_eq!(
+            parse_domains_report(DOMAINS_REPORT_DEFAULT),
+            vec!["starwars.re-cycledair.com"]
+        );
+    }
+
+    #[test]
+    fn domains_report_without_vhosts_is_empty() {
+        assert_eq!(
+            parse_domains_report(r#"{"app-enabled":"true","app-vhosts":""}"#),
+            Vec::<String>::new()
+        );
+        assert_eq!(parse_domains_report("not json"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_service_plugins_from_fixture() {
+        let plugins = parse_service_plugins(PLUGIN_LIST);
+        for expected in ["mongo", "mysql", "postgres", "redis"] {
+            assert!(plugins.contains(&expected.to_owned()), "missing {expected}");
+        }
+        assert!(
+            !plugins.contains(&"apps".to_owned()),
+            "apps is not a service plugin"
+        );
+        assert!(!plugins.contains(&"letsencrypt".to_owned()));
+    }
+
+    #[test]
+    fn service_plugins_ignores_disabled_and_core_plugins() {
+        let output = "\n  postgres  1.36.4 disabled  dokku postgres service plugin\n  apps 0.38.4 enabled dokku core apps plugin\n  redis 1.42.1 enabled dokku redis service plugin\n";
+        assert_eq!(parse_service_plugins(output), vec!["redis"]);
+    }
+
+    #[test]
+    fn parses_app_links_fixture() {
+        assert_eq!(parse_app_links(APP_LINKS), vec!["roboswarm-db"]);
+        assert_eq!(parse_app_links(""), Vec::<String>::new());
+        assert_eq!(
+            parse_app_links("=====> app links\n\n  link-a  \n"),
+            vec!["link-a"]
+        );
     }
 
     #[test]

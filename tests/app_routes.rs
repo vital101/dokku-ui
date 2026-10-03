@@ -11,7 +11,9 @@ use common::{
     test_state, test_state_with_client,
 };
 
-use dokku_ui::dokku::{DokkuClient, DokkuError, DokkuOutput, MockClient, SnapshotStore};
+use dokku_ui::dokku::{
+    DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient, SnapshotStore,
+};
 use dokku_ui::domain::AppName;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::settings::Settings;
@@ -62,7 +64,10 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
     let settings = Settings::from_map(&HashMap::new()).expect("default settings");
     let client_arc = Arc::new(client);
     let dokku: Arc<dyn DokkuClient> = client_arc.clone();
-    let snapshot = Arc::new(SnapshotStore::new(dokku.clone()));
+    let snapshot = Arc::new(SnapshotStore::with_resolver(
+        dokku.clone(),
+        Arc::new(FakeResolver::all()),
+    ));
     (
         AppState {
             db: pool,
@@ -270,6 +275,56 @@ async fn show_renders_app_overview() {
     assert!(body.contains("2026-10-03 10:36 UTC"), "created at");
     assert!(body.contains("no"), "locked label");
     assert!(body.contains("Updated"), "data age chip");
+}
+
+#[tokio::test]
+async fn show_renders_populated_app_details() {
+    let client = seeded_app_client()
+        .stub(
+            DokkuCommand::BuildsReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/builds_report.json"))),
+        )
+        .stub(
+            DokkuCommand::DomainsReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!(
+                "fixtures/domains_report.json"
+            ))),
+        )
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(include_str!("fixtures/plugin_list.txt"))),
+        )
+        .stub(
+            DokkuCommand::AppLinks {
+                plugin: "postgres".into(),
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/app_links.txt"))),
+        );
+    let (state, _client, _dir) = harness(client).await;
+    state.snapshot.ensure_loaded().await.expect("load snapshot");
+    state.snapshot.refresh_details().await.expect("details");
+
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains(">built</dd>"), "image status: {body}");
+    assert!(body.contains(">yes</dd>"), "link/dns status: {body}");
 }
 
 #[tokio::test]

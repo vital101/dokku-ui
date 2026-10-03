@@ -10,6 +10,10 @@ pub enum DokkuCommand {
     PsStop { app: AppName },
     PsRestart { app: AppName },
     AppsReport { app: AppName },
+    BuildsReport { app: AppName },
+    DomainsReport { app: AppName },
+    PluginList,
+    AppLinks { plugin: String, app: AppName },
     ConfigShow { app: AppName },
     Logs { app: AppName, num_lines: u32 },
 }
@@ -46,6 +50,26 @@ impl DokkuCommand {
                     "--format".into(),
                     "json".into(),
                 ]
+            }
+            DokkuCommand::BuildsReport { app } => {
+                vec![
+                    "builds:report".into(),
+                    app.as_str().into(),
+                    "--format".into(),
+                    "json".into(),
+                ]
+            }
+            DokkuCommand::DomainsReport { app } => {
+                vec![
+                    "domains:report".into(),
+                    app.as_str().into(),
+                    "--format".into(),
+                    "json".into(),
+                ]
+            }
+            DokkuCommand::PluginList => vec!["plugin:list".into()],
+            DokkuCommand::AppLinks { plugin, app } => {
+                vec![format!("{plugin}:app-links"), app.as_str().into()]
             }
             DokkuCommand::ConfigShow { app } => {
                 vec!["config:show".into(), app.as_str().into()]
@@ -139,6 +163,39 @@ mod tests {
         ] {
             assert_eq!(command.argv(), expected);
         }
+    }
+
+    #[test]
+    fn builds_report_argv() {
+        assert_eq!(
+            DokkuCommand::BuildsReport { app: app("myapp") }.argv(),
+            vec!["builds:report", "myapp", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn domains_report_argv() {
+        assert_eq!(
+            DokkuCommand::DomainsReport { app: app("myapp") }.argv(),
+            vec!["domains:report", "myapp", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn plugin_list_argv() {
+        assert_eq!(DokkuCommand::PluginList.argv(), vec!["plugin:list"]);
+    }
+
+    #[test]
+    fn app_links_argv() {
+        assert_eq!(
+            DokkuCommand::AppLinks {
+                plugin: "postgres".into(),
+                app: app("myapp")
+            }
+            .argv(),
+            vec!["postgres:app-links", "myapp"]
+        );
     }
 
     #[test]

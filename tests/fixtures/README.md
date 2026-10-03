@@ -23,6 +23,13 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `ps_report_all.txt` | `dokku ps:report <app1> <app2> ...` | **Dashboard uses this** (JSON mode ignores extra apps). One command reports every app: `=====> <app> ps information` sections with indented `Key: value` lines; `Status web 1` maps to process `web.1`. |
 | `ps_report_not_deployed.json` | `dokku ps:report <app> --format json` | Captured from a created-but-never-deployed app: `deployed=false`, `processes=0`, no `status-*` keys. |
 | `ps_report_missing.json` | synthetic | Covers the `missing` process state for a removed container. |
+| `builds_report.json` | `dokku builds:report <app> --format json` | Latest build record for a succeeded build (`build-status: succeeded`, exit 0). Drives the "Image status" detail. |
+| `builds_report_failed.json` | synthetic | A `build-status: failed` record with exit code 1, for the error branch. |
+| `builds_report_empty.json` | `dokku builds:report <app> --format json` | Captured from a created-but-never-built app (`starwars`): every `build-*` value is an empty string. |
+| `domains_report.json` | `dokku domains:report <app> --format json` | App with a custom vhost (`app-vhosts: dokku.re-cycledair.com`). Drives the "DNS record" detail. |
+| `domains_report_default.json` | `dokku domains:report <app> --format json` | App relying on the auto-assigned `<app>.<global-vhost>` (`starwars.re-cycledair.com`). |
+| `plugin_list.txt` | `dokku plugin:list` | Full plugin listing; the parser keeps enabled plugins whose description ends in `service plugin` (mongo, mysql, postgres, redis here). |
+| `app_links.txt` | `dokku postgres:app-links <app>` | Names of services linked to the app (`roboswarm-db`). Drives the "Link exists" detail. |
 | `config_show.txt` | `dokku config:show <app>` | `=====> <app> env vars` header + `KEY:  value` lines. Values are fetched **unmasked**; the UI masks client-side with a fixed-length glyph string (deviation from plan.md §8's `--masked`, same visible result). |
 | `config_show_empty.txt` | `dokku config:show <app>` | No env vars set. |
 | `logs.txt` | `dokku logs <app> --num 200` | Docker log lines **with ANSI color codes**; the parser strips them. |

@@ -11,7 +11,7 @@ use actix_web::http::header::{CONTENT_TYPE, LOCATION};
 use actix_web::test;
 
 use dokku_ui::auth::password::hash_password;
-use dokku_ui::dokku::{DokkuClient, MockClient, SnapshotStore};
+use dokku_ui::dokku::{DokkuClient, FakeResolver, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
@@ -42,7 +42,10 @@ pub async fn test_state_with_shared_client(
     let settings = Settings::from_map(&HashMap::new()).expect("default settings");
     let client_arc = Arc::new(client);
     let dokku: Arc<dyn DokkuClient> = client_arc.clone();
-    let snapshot = Arc::new(SnapshotStore::new(dokku.clone()));
+    let snapshot = Arc::new(SnapshotStore::with_resolver(
+        dokku.clone(),
+        Arc::new(FakeResolver::none()),
+    ));
     (
         AppState {
             db: pool,

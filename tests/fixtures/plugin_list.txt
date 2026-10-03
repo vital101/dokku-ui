@@ -1,0 +1,52 @@
+  00_dokku-standard    0.38.4 enabled    dokku core standard plugin
+  20_events            0.38.4 enabled    dokku core events logging plugin
+  app-json             0.38.4 enabled    dokku core app-json plugin
+  apps                 0.38.4 enabled    dokku core apps plugin
+  builder              0.38.4 enabled    dokku core builder plugin
+  builder-dockerfile   0.38.4 enabled    dokku core builder-dockerfile plugin
+  builder-herokuish    0.38.4 enabled    dokku core builder-herokuish plugin
+  builder-lambda       0.38.4 enabled    dokku core builder-lambda plugin
+  builder-nixpacks     0.38.4 enabled    dokku core builder-nixpacks plugin
+  builder-null         0.38.4 enabled    dokku core builder-null plugin
+  builder-pack         0.38.4 enabled    dokku core builder-pack plugin
+  builder-railpack     0.38.4 enabled    dokku core builder-railpack plugin
+  buildpacks           0.38.4 enabled    dokku core buildpacks plugin
+  builds               0.34.0 enabled    dokku core builds plugin
+  caddy-vhosts         0.38.4 enabled    dokku core caddy-vhosts plugin
+  certs                0.38.4 enabled    dokku core certificate management plugin
+  checks               0.38.4 enabled    dokku core checks plugin
+  common               0.38.4 enabled    dokku core common plugin
+  config               0.38.4 enabled    dokku core config plugin
+  cron                 0.38.4 enabled    dokku core cron plugin
+  docker-options       0.38.4 enabled    dokku core docker-options plugin
+  domains              0.38.4 enabled    dokku core domains plugin
+  enter                0.38.4 enabled    dokku core enter plugin
+  git                  0.38.4 enabled    dokku core git plugin
+  haproxy-vhosts       0.38.4 enabled    dokku core haproxy-vhosts plugin
+  letsencrypt          0.20.4 enabled    Automated installation of let's encrypt TLS certificates
+  logs                 0.38.4 enabled    dokku core logs plugin
+  mongo                1.40.4 enabled    dokku mongo service plugin
+  mysql                1.44.3 enabled    dokku mysql service plugin
+  network              0.38.4 enabled    dokku core network plugin
+  nginx-vhosts         0.38.4 enabled    dokku core nginx-vhosts plugin
+  openresty-vhosts     0.38.4 enabled    dokku core openresty-vhosts plugin
+  plugin               0.38.4 enabled    dokku core plugin plugin
+  ports                0.38.4 enabled    dokku core ports plugin
+  postgres             1.36.4 enabled    dokku postgres service plugin
+  proxy                0.38.4 enabled    dokku core proxy plugin
+  ps                   0.38.4 enabled    dokku core ps plugin
+  redirect             0.9.1 enabled    Plugin for managing application redirects
+  redis                1.42.1 enabled    dokku redis service plugin
+  registry             0.38.4 enabled    dokku core registry plugin
+  repo                 0.38.4 enabled    dokku core repo plugin
+  resource             0.38.4 enabled    dokku core resource plugin
+  run                  0.38.4 enabled    dokku core run plugin
+  scheduler            0.38.4 enabled    dokku core scheduler plugin
+  scheduler-docker-local 0.38.4 enabled    dokku core scheduler-docker-local plugin
+  scheduler-k3s        0.38.4 enabled    dokku core scheduler-k3s plugin
+  scheduler-null       0.38.4 enabled    dokku core scheduler-null plugin
+  shell                0.38.4 enabled    dokku core shell plugin
+  ssh-keys             0.38.4 enabled    dokku core ssh-keys plugin
+  storage              0.38.4 enabled    dokku core storage plugin
+  trace                0.38.4 enabled    dokku core trace plugin
+  traefik-vhosts       0.38.4 enabled    dokku core traefik-vhosts plugin
