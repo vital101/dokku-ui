@@ -1,0 +1,70 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2">
+        <span class="rounded-md bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-300">{{ plugin }}</span>
+        <span class="font-mono text-sm text-white">{{ service }}</span>
+      </div>
+      <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium {{ info.status_badge_css() }}">
+        <span class="size-1.5 rounded-full bg-current"></span>
+        {{ info.status_label() }}
+      </span>
+    </div>
+    <dl class="mt-4 space-y-2 text-sm">
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Version</dt>
+        <dd class="text-white">{% if info.version.is_empty() %}—{% else %}{{ info.version }}{% endif %}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Exposed ports</dt>
+        <dd class="text-white">{% if info.exposed_ports.is_empty() %}—{% else %}{{ info.exposed_ports }}{% endif %}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Internal IP</dt>
+        <dd class="font-mono text-white">{% if info.internal_ip.is_empty() %}—{% else %}{{ info.internal_ip }}{% endif %}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Container ID</dt>
+        <dd class="font-mono text-white">{% if info.id_short.is_empty() %}—{% else %}{{ info.id_short }}{% endif %}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-slate-400">Linked apps</dt>
+        <dd class="text-white">{{ info.linked_apps_label() }}</dd>
+      </div>
+    </dl>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <h3 class="text-sm font-medium text-white">Network exposure</h3>
+    {% if info.exposed_ports.is_empty() %}
+    <p class="mt-2 text-xs text-slate-500">
+      Expose the service on the host so clients outside docker can reach it.
+    </p>
+    <form method="post" action="/services/{{ plugin }}/{{ service }}/expose"
+          hx-post="/services/{{ plugin }}/{{ service }}/expose" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form class="mt-3 flex items-end gap-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="ports" class="block text-xs font-medium text-slate-300">Host port or address:port</label>
+        <input id="ports" name="ports" type="text" required placeholder="5432"
+               class="mt-1 block w-56 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600">
+        <span class="app-action-label">Expose</span>
+      </button>
+    </form>
+    {% else %}
+    <p class="mt-2 text-sm text-slate-300">Published on <span class="font-mono text-white">{{ info.exposed_ports }}</span>.</p>
+    <form method="post" action="/services/{{ plugin }}/{{ service }}/unexpose"
+          hx-post="/services/{{ plugin }}/{{ service }}/unexpose" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form class="mt-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="app-action rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600">
+        <span class="app-action-label">Unexpose</span>
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</div>

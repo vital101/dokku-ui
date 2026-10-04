@@ -23,6 +23,14 @@ domain parsers' unit tests and the `MockClient` integration suite.
 > Service fixture DSNs contain credentials on the live host and are **redacted
 > to `XXXXXX`** here. The parser never reads the `Dsn` line and the UI never
 > renders it; a test asserts the DSN does not appear in `ServiceInfo`.
+>
+> **Synthetic fixtures:** the service-list, service-log and storage-report
+> fixtures (`*_list.txt`, `redis_logs.txt`, `storage_report*.txt`) are **not
+> live captures yet** — no host access was available when the service/volume
+> pages landed. Their formats were verified against the installed plugin
+> sources (dokku-service `service_list`/`service_logs` in dokku-redis 1.42.1;
+> `plugins/storage/report.go` + `subcommands.go` at dokku tag `v0.38.4`) and
+> should be replaced by real captures on the next host session.
 
 ## Formats
 
@@ -50,6 +58,12 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `resource_report_empty.txt` | `dokku resource:report <app>` | Real capture for an app with no limits: the header line only. |
 | `redis_info.txt` | `dokku redis:info <service>` | Plain-text report (real capture, DSN redacted): `Status`, `Version` (`redis:7.2.4`), `Exposed ports` (`-` when unset), `Internal ip` (often empty), `Id`, `Links` (apps). **No `--format json` on 1.42.1.** |
 | `postgres_info.txt` | `dokku postgres:info <service>` | Same format (real capture, DSN redacted); shows `Exposed ports: 5432->15432`. |
+| `redis_list.txt` | `dokku redis:list` | Synthetic (source-verified): `=====> Redis services` banner + one bare service name per line. The installed plugin generation prints **no status/version columns**; `parse_service_list` skips banners and `!` warnings and validates the name charset. |
+| `postgres_list.txt`, `mysql_list.txt`, `mongo_list.txt` | `dokku <plugin>:list` | Same shape for the other service plugins (synthetic). |
+| `service_list_empty.txt` | `dokku redis:list` | Synthetic empty listing: ` !     There are no Redis services` warning line only. |
+| `redis_logs.txt` | `dokku redis:logs candid '' 200` | Synthetic log tail. The installed plugin takes the follow flag as `$2` and the line count as `$3`, so the argv carries an explicit empty string that `russh_client::shell_command` quotes to preserve it. |
+| `storage_report.txt` | `dokku storage:report` (no app) | Synthetic (source-verified at `v0.38.4`): one `=====> <app> storage information` section per app with `Storage build/deploy/run mounts: -v host:container[:opts]` lines. Only these three keys exist on 0.38.4 (the dotted `attachment.N.*` keys are newer). `parse_storage_report` merges phases per mount. |
+| `storage_report_empty.txt` | `dokku storage:report` | Synthetic: an app with the three mount lines all empty. |
 
 ## Maintenance
 

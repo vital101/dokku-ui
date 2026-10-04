@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}{{ service }} — {{ plugin.display_name() }} — Dokku UI{% endblock %}
+{% block heading %}{{ plugin.display_name() }} / {{ service }}{% endblock %}
+
+{% block content %}
+<nav class="mb-6 flex gap-1 border-b border-slate-800">
+  <a href="/services/{{ plugin }}/{{ service }}"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "overview" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Overview
+  </a>
+  <a href="/services/{{ plugin }}/{{ service }}/links"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "links" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Links
+  </a>
+  <a href="/services/{{ plugin }}/{{ service }}/logs"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "logs" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Logs
+  </a>
+</nav>
+{% block service_content %}{% endblock %}
+
+{% include "partials/modal.html" %}
+{% endblock %}

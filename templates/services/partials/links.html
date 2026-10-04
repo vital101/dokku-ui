@@ -1,0 +1,55 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <h3 class="text-sm font-medium text-white">Linked apps</h3>
+    {% if links.is_empty() %}
+    <p class="mt-2 text-sm text-slate-400">No apps are linked to this service.</p>
+    {% else %}
+    <ul class="mt-3 divide-y divide-slate-800/60">
+      {% for app in links %}
+      <li class="flex items-center justify-between py-2">
+        <a href="/apps/{{ app }}" class="font-mono text-sm text-white hover:underline">{{ app }}</a>
+        <form method="post" action="/services/{{ plugin }}/{{ service }}/unlink"
+              hx-post="/services/{{ plugin }}/{{ service }}/unlink" hx-target="#modal-content" hx-swap="innerHTML"
+              data-action-form>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="app" value="{{ app }}">
+          <button type="submit"
+                  class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+            <span class="app-action-label">Unlink</span>
+          </button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <h3 class="text-sm font-medium text-white">Link an app</h3>
+    {% if available_apps.is_empty() %}
+    <p class="mt-2 text-sm text-slate-400">No unlinked apps available.</p>
+    {% else %}
+    <form method="post" action="/services/{{ plugin }}/{{ service }}/link"
+          hx-post="/services/{{ plugin }}/{{ service }}/link" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form class="mt-3 flex items-end gap-3">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="link-app" class="block text-xs font-medium text-slate-300">App</label>
+        <select id="link-app" name="app"
+                class="mt-1 block w-56 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
+          {% for app in available_apps %}
+          <option value="{{ app }}">{{ app }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+        <span class="app-action-label">Link</span>
+      </button>
+    </form>
+    <p class="mt-2 text-xs text-slate-500">
+      Linking sets the service URL on the app and restarts it.
+    </p>
+    {% endif %}
+  </div>
+</div>

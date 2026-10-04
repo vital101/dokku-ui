@@ -144,6 +144,56 @@ impl ServiceInfo {
     }
 }
 
+/// One bind mount from `storage:report`, keyed by its `host:container`
+/// locator so the same mount reported under several phases collapses into a
+/// single row. Empty options render as an em dash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    pub host: String,
+    pub container: String,
+    pub options: String,
+    pub phases: Vec<String>,
+}
+
+impl Mount {
+    pub fn locator(&self) -> String {
+        format!("{}:{}", self.host, self.container)
+    }
+
+    pub fn arg(&self) -> String {
+        if self.options.is_empty() {
+            self.locator()
+        } else {
+            format!("{}:{}", self.locator(), self.options)
+        }
+    }
+
+    pub fn phases_label(&self) -> String {
+        if self.phases.is_empty() {
+            "—".to_owned()
+        } else {
+            self.phases.join(", ")
+        }
+    }
+}
+
+/// Every mount an app declares, from the all-apps `storage:report` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppMounts {
+    pub app: String,
+    pub mounts: Vec<Mount>,
+}
+
+impl AppMounts {
+    pub fn is_empty(&self) -> bool {
+        self.mounts.is_empty()
+    }
+
+    pub fn mount_count(&self) -> usize {
+        self.mounts.len()
+    }
+}
+
 /// Summary of the most recent build for an app, from `builds:report --format json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildInfo {
@@ -353,6 +403,16 @@ impl LogLines {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Keeps only the last `max` lines. Service logs have no line-count flag on
+    /// the installed dokku plugins, so the display side re-bounds whatever the
+    /// container produced.
+    pub fn tail(&self, max: usize) -> Self {
+        if self.0.len() <= max {
+            return self.clone();
+        }
+        Self(self.0[self.0.len() - max..].to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -506,5 +566,71 @@ mod tests {
         assert!(stopped.status_badge_css().contains("red"));
         assert_eq!(ServiceInfo::display_or_dash(""), "—");
         assert_eq!(ServiceInfo::display_or_dash("5432"), "5432");
+    }
+
+    #[test]
+    fn mount_formats_locator_arg_and_phases() {
+        let mount = Mount {
+            host: "/var/lib/dokku/data/storage/alpha".into(),
+            container: "/app/storage".into(),
+            options: String::new(),
+            phases: vec!["deploy".into(), "run".into()],
+        };
+        assert_eq!(
+            mount.locator(),
+            "/var/lib/dokku/data/storage/alpha:/app/storage"
+        );
+        assert_eq!(mount.arg(), mount.locator());
+        assert_eq!(mount.phases_label(), "deploy, run");
+
+        let with_options = Mount {
+            options: "ro".into(),
+            ..mount
+        };
+        assert_eq!(
+            with_options.arg(),
+            "/var/lib/dokku/data/storage/alpha:/app/storage:ro"
+        );
+    }
+
+    #[test]
+    fn mount_without_phases_labels_as_dash() {
+        let mount = Mount {
+            host: "vol".into(),
+            container: "/data".into(),
+            options: String::new(),
+            phases: Vec::new(),
+        };
+        assert_eq!(mount.phases_label(), "—");
+    }
+
+    #[test]
+    fn app_mounts_reports_counts() {
+        let empty = AppMounts {
+            app: "alpha".into(),
+            mounts: Vec::new(),
+        };
+        assert!(empty.is_empty());
+        assert_eq!(empty.mount_count(), 0);
+
+        let populated = AppMounts {
+            app: "alpha".into(),
+            mounts: vec![Mount {
+                host: "/host".into(),
+                container: "/c".into(),
+                options: String::new(),
+                phases: vec!["deploy".into()],
+            }],
+        };
+        assert!(!populated.is_empty());
+        assert_eq!(populated.mount_count(), 1);
+    }
+
+    #[test]
+    fn log_lines_tail_keeps_the_last_lines() {
+        let lines = LogLines::new(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(lines.tail(2).as_slice(), &["b", "c"]);
+        assert_eq!(lines.tail(5).as_slice(), &["a", "b", "c"]);
+        assert!(lines.tail(0).is_empty());
     }
 }

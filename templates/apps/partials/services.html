@@ -23,7 +23,8 @@
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-center gap-2">
           <span class="rounded-md bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-300">{{ service.plugin }}</span>
-          <span class="font-mono text-sm text-white">{{ service.service }}</span>
+          <a href="/services/{{ service.plugin }}/{{ service.service }}"
+             class="font-mono text-sm text-white hover:underline">{{ service.service }}</a>
         </div>
         <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium {{ service.status_badge_css() }}">
           <span class="size-1.5 rounded-full bg-current"></span>

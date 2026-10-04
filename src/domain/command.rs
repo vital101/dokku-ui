@@ -1,4 +1,7 @@
 use crate::domain::AppName;
+use crate::domain::mount_spec::MountSpec;
+use crate::domain::service_name::ServiceName;
+use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::ScaleEntry;
 
 /// How long a command may run. See [`DokkuCommand::timeout`].
@@ -60,6 +63,67 @@ pub enum DokkuCommand {
     ServiceInfo {
         plugin: String,
         service: String,
+    },
+    ServiceList {
+        plugin: ServicePlugin,
+    },
+    ServiceCreate {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    ServiceDestroy {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        force: bool,
+    },
+    ServiceStart {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    ServiceStop {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    ServiceRestart {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    ServiceLinks {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    ServiceLink {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        app: AppName,
+    },
+    ServiceUnlink {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        app: AppName,
+    },
+    ServiceLogs {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        num_lines: u32,
+    },
+    ServiceExpose {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        ports: String,
+    },
+    ServiceUnexpose {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    StorageReport,
+    StorageMount {
+        app: AppName,
+        mount: MountSpec,
+    },
+    StorageUnmount {
+        app: AppName,
+        mount: MountSpec,
     },
     PluginList,
     AppLinks {
@@ -140,6 +204,86 @@ impl DokkuCommand {
             DokkuCommand::ServiceInfo { plugin, service } => {
                 vec![format!("{plugin}:info"), service.clone()]
             }
+            DokkuCommand::ServiceList { plugin } => vec![format!("{plugin}:list")],
+            DokkuCommand::ServiceCreate { plugin, service } => {
+                vec![format!("{plugin}:create"), service.as_str().into()]
+            }
+            DokkuCommand::ServiceDestroy {
+                plugin,
+                service,
+                force,
+            } => {
+                let mut argv = vec![format!("{plugin}:destroy"), service.as_str().into()];
+                if *force {
+                    argv.push("--force".into());
+                }
+                argv
+            }
+            DokkuCommand::ServiceStart { plugin, service } => {
+                vec![format!("{plugin}:start"), service.as_str().into()]
+            }
+            DokkuCommand::ServiceStop { plugin, service } => {
+                vec![format!("{plugin}:stop"), service.as_str().into()]
+            }
+            DokkuCommand::ServiceRestart { plugin, service } => {
+                vec![format!("{plugin}:restart"), service.as_str().into()]
+            }
+            DokkuCommand::ServiceLinks { plugin, service } => {
+                vec![format!("{plugin}:links"), service.as_str().into()]
+            }
+            DokkuCommand::ServiceLink {
+                plugin,
+                service,
+                app,
+            } => vec![
+                format!("{plugin}:link"),
+                service.as_str().into(),
+                app.as_str().into(),
+            ],
+            DokkuCommand::ServiceUnlink {
+                plugin,
+                service,
+                app,
+            } => vec![
+                format!("{plugin}:unlink"),
+                service.as_str().into(),
+                app.as_str().into(),
+            ],
+            DokkuCommand::ServiceLogs {
+                plugin,
+                service,
+                num_lines,
+            } => vec![
+                format!("{plugin}:logs"),
+                service.as_str().into(),
+                // This plugin generation takes the tail count as the third
+                // positional argument with the (optional) follow flag second,
+                // so the flag slot must be an explicit empty string:
+                // `dokku redis:logs svc '' 200` -> `docker logs --tail 200`.
+                String::new(),
+                num_lines.to_string(),
+            ],
+            DokkuCommand::ServiceExpose {
+                plugin,
+                service,
+                ports,
+            } => vec![
+                format!("{plugin}:expose"),
+                service.as_str().into(),
+                ports.clone(),
+            ],
+            DokkuCommand::ServiceUnexpose { plugin, service } => {
+                vec![format!("{plugin}:unexpose"), service.as_str().into()]
+            }
+            DokkuCommand::StorageReport => vec!["storage:report".into()],
+            DokkuCommand::StorageMount { app, mount } => {
+                vec!["storage:mount".into(), app.as_str().into(), mount.arg()]
+            }
+            DokkuCommand::StorageUnmount { app, mount } => vec![
+                "storage:unmount".into(),
+                app.as_str().into(),
+                mount.locator(),
+            ],
             DokkuCommand::PluginList => vec!["plugin:list".into()],
             DokkuCommand::AppLinks { plugin, app } => {
                 vec![format!("{plugin}:app-links"), app.as_str().into()]
@@ -170,7 +314,18 @@ impl DokkuCommand {
             | DokkuCommand::PsRestart { .. }
             | DokkuCommand::PsRebuild { .. }
             | DokkuCommand::PsScaleSet { .. }
-            | DokkuCommand::AppsDestroy { .. } => CommandTimeout::Indefinite,
+            | DokkuCommand::AppsDestroy { .. }
+            | DokkuCommand::ServiceCreate { .. }
+            | DokkuCommand::ServiceDestroy { .. }
+            | DokkuCommand::ServiceStart { .. }
+            | DokkuCommand::ServiceStop { .. }
+            | DokkuCommand::ServiceRestart { .. }
+            | DokkuCommand::ServiceLink { .. }
+            | DokkuCommand::ServiceUnlink { .. }
+            | DokkuCommand::ServiceExpose { .. }
+            | DokkuCommand::ServiceUnexpose { .. }
+            | DokkuCommand::StorageMount { .. }
+            | DokkuCommand::StorageUnmount { .. } => CommandTimeout::Indefinite,
             _ => CommandTimeout::Default,
         }
     }
@@ -182,6 +337,14 @@ mod tests {
 
     fn app(name: &str) -> AppName {
         AppName::try_from(name).expect("valid app name")
+    }
+
+    fn plugin(name: &str) -> ServicePlugin {
+        ServicePlugin::try_from(name).expect("supported plugin")
+    }
+
+    fn service(name: &str) -> ServiceName {
+        ServiceName::try_from(name).expect("valid service name")
     }
 
     #[test]
@@ -373,6 +536,54 @@ mod tests {
                 app: app("myapp"),
                 force: true,
             },
+            DokkuCommand::ServiceCreate {
+                plugin: plugin("postgres"),
+                service: service("db"),
+            },
+            DokkuCommand::ServiceDestroy {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                force: true,
+            },
+            DokkuCommand::ServiceStart {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            },
+            DokkuCommand::ServiceStop {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            },
+            DokkuCommand::ServiceRestart {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            },
+            DokkuCommand::ServiceLink {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                app: app("myapp"),
+            },
+            DokkuCommand::ServiceUnlink {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                app: app("myapp"),
+            },
+            DokkuCommand::ServiceExpose {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                ports: "5432".into(),
+            },
+            DokkuCommand::ServiceUnexpose {
+                plugin: plugin("postgres"),
+                service: service("db"),
+            },
+            DokkuCommand::StorageMount {
+                app: app("myapp"),
+                mount: MountSpec::try_from("/host:/data").expect("mount"),
+            },
+            DokkuCommand::StorageUnmount {
+                app: app("myapp"),
+                mount: MountSpec::try_from("/host:/data").expect("mount"),
+            },
         ] {
             assert_eq!(
                 command.timeout(),
@@ -403,6 +614,19 @@ mod tests {
                 plugin: "postgres".into(),
                 service: "db".into(),
             },
+            DokkuCommand::ServiceList {
+                plugin: plugin("redis"),
+            },
+            DokkuCommand::ServiceLinks {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            },
+            DokkuCommand::ServiceLogs {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                num_lines: 200,
+            },
+            DokkuCommand::StorageReport,
             DokkuCommand::PluginList,
             DokkuCommand::AppLinks {
                 plugin: "postgres".into(),
@@ -434,6 +658,181 @@ mod tests {
             }
             .argv(),
             vec!["logs", "myapp", "--num", "200"]
+        );
+    }
+
+    #[test]
+    fn service_list_argv() {
+        assert_eq!(
+            DokkuCommand::ServiceList {
+                plugin: plugin("redis")
+            }
+            .argv(),
+            vec!["redis:list"]
+        );
+    }
+
+    #[test]
+    fn service_create_argv() {
+        assert_eq!(
+            DokkuCommand::ServiceCreate {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+            }
+            .argv(),
+            vec!["postgres:create", "my-db"]
+        );
+    }
+
+    #[test]
+    fn service_destroy_argv_without_force() {
+        assert_eq!(
+            DokkuCommand::ServiceDestroy {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+                force: false,
+            }
+            .argv(),
+            vec!["postgres:destroy", "my-db"]
+        );
+    }
+
+    #[test]
+    fn service_destroy_argv_with_force() {
+        assert_eq!(
+            DokkuCommand::ServiceDestroy {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+                force: true,
+            }
+            .argv(),
+            vec!["postgres:destroy", "my-db", "--force"]
+        );
+    }
+
+    #[test]
+    fn service_lifecycle_argv() {
+        for (command, expected) in [
+            (
+                DokkuCommand::ServiceStart {
+                    plugin: plugin("redis"),
+                    service: service("cache"),
+                },
+                vec!["redis:start", "cache"],
+            ),
+            (
+                DokkuCommand::ServiceStop {
+                    plugin: plugin("redis"),
+                    service: service("cache"),
+                },
+                vec!["redis:stop", "cache"],
+            ),
+            (
+                DokkuCommand::ServiceRestart {
+                    plugin: plugin("redis"),
+                    service: service("cache"),
+                },
+                vec!["redis:restart", "cache"],
+            ),
+        ] {
+            assert_eq!(command.argv(), expected);
+        }
+    }
+
+    #[test]
+    fn service_links_argv() {
+        assert_eq!(
+            DokkuCommand::ServiceLinks {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            }
+            .argv(),
+            vec!["redis:links", "cache"]
+        );
+    }
+
+    #[test]
+    fn service_link_and_unlink_argv() {
+        assert_eq!(
+            DokkuCommand::ServiceLink {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+                app: app("myapp"),
+            }
+            .argv(),
+            vec!["postgres:link", "my-db", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::ServiceUnlink {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+                app: app("myapp"),
+            }
+            .argv(),
+            vec!["postgres:unlink", "my-db", "myapp"]
+        );
+    }
+
+    #[test]
+    fn service_logs_argv_uses_an_empty_follow_flag_slot() {
+        assert_eq!(
+            DokkuCommand::ServiceLogs {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                num_lines: 200,
+            }
+            .argv(),
+            vec!["redis:logs", "cache", "", "200"]
+        );
+    }
+
+    #[test]
+    fn service_expose_and_unexpose_argv() {
+        assert_eq!(
+            DokkuCommand::ServiceExpose {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+                ports: "5432".into(),
+            }
+            .argv(),
+            vec!["postgres:expose", "my-db", "5432"]
+        );
+        assert_eq!(
+            DokkuCommand::ServiceUnexpose {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+            }
+            .argv(),
+            vec!["postgres:unexpose", "my-db"]
+        );
+    }
+
+    #[test]
+    fn storage_report_argv() {
+        assert_eq!(DokkuCommand::StorageReport.argv(), vec!["storage:report"]);
+    }
+
+    #[test]
+    fn storage_mount_argv_uses_the_full_spec() {
+        assert_eq!(
+            DokkuCommand::StorageMount {
+                app: app("myapp"),
+                mount: MountSpec::try_from("/host:/data:ro").expect("mount"),
+            }
+            .argv(),
+            vec!["storage:mount", "myapp", "/host:/data:ro"]
+        );
+    }
+
+    #[test]
+    fn storage_unmount_argv_uses_the_locator() {
+        assert_eq!(
+            DokkuCommand::StorageUnmount {
+                app: app("myapp"),
+                mount: MountSpec::try_from("/host:/data:ro").expect("mount"),
+            }
+            .argv(),
+            vec!["storage:unmount", "myapp", "/host:/data"]
         );
     }
 }

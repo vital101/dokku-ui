@@ -7,7 +7,9 @@ pub mod mock;
 pub mod overview;
 pub mod processes;
 pub mod russh_client;
+pub mod service_pages;
 pub mod snapshot;
+pub mod storage_pages;
 
 pub use action_runs::{ActionRun, ActionRuns, RunOutcome};
 pub use app_pages::{
@@ -24,6 +26,8 @@ pub use processes::{
     format_uptime, formation_rows, parse_scale_form, scale_field_name,
 };
 pub use russh_client::RusshClient;
+pub use service_pages::{plugin_services, service_linked_apps, service_logs};
 pub use snapshot::{
     Snapshot, SnapshotError, SnapshotStore, build_snapshot, format_age, spawn_refresher,
 };
+pub use storage_pages::app_mounts;

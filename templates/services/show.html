@@ -1,17 +1,17 @@
-{% extends "apps/base_app.html" %}
+{% extends "services/base_service.html" %}
 
-{% block app_content %}
+{% block service_content %}
 <div class="space-y-6">
   <div id="app-panel"
-       hx-get="/apps/{{ name }}/partials/overview"
+       hx-get="/services/{{ plugin }}/{{ service }}/partials/overview"
        hx-trigger="load"
        hx-swap="innerHTML">
     {% include "partials/loading.html" %}
   </div>
 
-  <div class="flex gap-3">
-    <form method="post" action="/apps/{{ name }}/start"
-          hx-post="/apps/{{ name }}/start" hx-target="#modal-content" hx-swap="innerHTML"
+  <div class="flex flex-wrap gap-3">
+    <form method="post" action="/services/{{ plugin }}/{{ service }}/start"
+          hx-post="/services/{{ plugin }}/{{ service }}/start" hx-target="#modal-content" hx-swap="innerHTML"
           data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
@@ -19,8 +19,8 @@
         <span class="app-action-label">Start</span>
       </button>
     </form>
-    <form method="post" action="/apps/{{ name }}/stop"
-          hx-post="/apps/{{ name }}/stop" hx-target="#modal-content" hx-swap="innerHTML"
+    <form method="post" action="/services/{{ plugin }}/{{ service }}/stop"
+          hx-post="/services/{{ plugin }}/{{ service }}/stop" hx-target="#modal-content" hx-swap="innerHTML"
           data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
@@ -28,8 +28,8 @@
         <span class="app-action-label">Stop</span>
       </button>
     </form>
-    <form method="post" action="/apps/{{ name }}/restart"
-          hx-post="/apps/{{ name }}/restart" hx-target="#modal-content" hx-swap="innerHTML"
+    <form method="post" action="/services/{{ plugin }}/{{ service }}/restart"
+          hx-post="/services/{{ plugin }}/{{ service }}/restart" hx-target="#modal-content" hx-swap="innerHTML"
           data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
@@ -37,20 +37,11 @@
         <span class="app-action-label">Restart</span>
       </button>
     </form>
-    <form method="post" action="/apps/{{ name }}/rebuild"
-          hx-post="/apps/{{ name }}/rebuild" hx-target="#modal-content" hx-swap="innerHTML"
-          data-action-form>
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit"
-              class="app-action rounded-md bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600">
-        <span class="app-action-label">Rebuild</span>
-      </button>
-    </form>
-    <a href="/apps/{{ name }}/delete"
-       hx-get="/apps/{{ name }}/partials/delete-confirm" hx-target="#modal-content"
+    <a href="/services/{{ plugin }}/{{ service }}/delete"
+       hx-get="/services/{{ plugin }}/{{ service }}/partials/delete-confirm" hx-target="#modal-content"
        hx-swap="innerHTML"
        class="app-action rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
-      Delete app
+      Destroy service
     </a>
   </div>
 </div>

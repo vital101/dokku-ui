@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}New {{ plugin.display_name() }} service — Dokku UI{% endblock %}
+{% block heading %}New {{ plugin.display_name() }} service{% endblock %}
+
+{% block content %}
+<div class="max-w-xl">
+  <form method="post" action="/services/{{ plugin }}"
+        hx-post="/services/{{ plugin }}" hx-target="#modal-content" hx-swap="innerHTML"
+        data-action-form class="space-y-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div>
+      <label for="name" class="block text-sm font-medium text-slate-300">Service name</label>
+      <input id="name" name="name" type="text" required maxlength="64"
+             pattern="[A-Za-z0-9_-]+"
+             class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+             placeholder="my-db">
+      <p class="mt-2 text-xs text-slate-400">Letters, numbers, underscores, and hyphens only.</p>
+    </div>
+
+    <p class="text-xs text-slate-500">
+      The service is created with the plugin's default image version; pulling it can take a
+      while and streams into this page.
+    </p>
+
+    <button type="submit"
+            class="app-action rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+      <span class="app-action-label">Create service</span>
+    </button>
+  </form>
+</div>
+
+{% include "partials/modal.html" %}
+{% endblock %}

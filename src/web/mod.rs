@@ -4,10 +4,14 @@ mod auth_middleware;
 mod csrf_form;
 mod favicon;
 mod flash;
+mod fragments;
 mod pages;
 mod render;
+mod runs;
 mod security_headers;
+mod services;
 mod state;
+mod volumes;
 
 use actix_session::SessionMiddleware;
 use actix_session::config::{PersistentSession, TtlExtensionPolicy};
@@ -129,8 +133,8 @@ pub fn build_app(
             web::get().to(apps::delete_confirm_modal),
         )
         .route(
-            "/apps/{name}/actions/runs/{id}/events",
-            web::get().to(apps::action_events),
+            "/actions/runs/{id}/events",
+            web::get().to(runs::action_events),
         )
         .service(
             web::resource("/apps/{name}/delete")
@@ -141,6 +145,87 @@ pub fn build_app(
         .route("/apps/{name}/stop", web::post().to(apps::stop))
         .route("/apps/{name}/restart", web::post().to(apps::restart))
         .route("/apps/{name}/rebuild", web::post().to(apps::rebuild))
+        .service(
+            web::resource("/services/{plugin}")
+                .route(web::get().to(services::index))
+                .route(web::post().to(services::create)),
+        )
+        .route(
+            "/services/{plugin}/partials/list",
+            web::get().to(services::list_partial),
+        )
+        .route("/services/{plugin}/new", web::get().to(services::new_form))
+        .route(
+            "/services/{plugin}/{service}",
+            web::get().to(services::show),
+        )
+        .route(
+            "/services/{plugin}/{service}/links",
+            web::get().to(services::links_page),
+        )
+        .route(
+            "/services/{plugin}/{service}/logs",
+            web::get().to(services::logs_page),
+        )
+        .route(
+            "/services/{plugin}/{service}/delete",
+            web::get().to(services::delete_confirm),
+        )
+        .route(
+            "/services/{plugin}/{service}/partials/overview",
+            web::get().to(services::overview_partial),
+        )
+        .route(
+            "/services/{plugin}/{service}/partials/links",
+            web::get().to(services::links_partial),
+        )
+        .route(
+            "/services/{plugin}/{service}/partials/logs",
+            web::get().to(services::logs_partial),
+        )
+        .route(
+            "/services/{plugin}/{service}/partials/delete-confirm",
+            web::get().to(services::delete_confirm_modal),
+        )
+        .route(
+            "/services/{plugin}/{service}/start",
+            web::post().to(services::start),
+        )
+        .route(
+            "/services/{plugin}/{service}/stop",
+            web::post().to(services::stop),
+        )
+        .route(
+            "/services/{plugin}/{service}/restart",
+            web::post().to(services::restart),
+        )
+        .route(
+            "/services/{plugin}/{service}/destroy",
+            web::post().to(services::destroy),
+        )
+        .route(
+            "/services/{plugin}/{service}/expose",
+            web::post().to(services::expose),
+        )
+        .route(
+            "/services/{plugin}/{service}/unexpose",
+            web::post().to(services::unexpose),
+        )
+        .route(
+            "/services/{plugin}/{service}/link",
+            web::post().to(services::link),
+        )
+        .route(
+            "/services/{plugin}/{service}/unlink",
+            web::post().to(services::unlink),
+        )
+        .route("/volumes", web::get().to(volumes::index))
+        .route(
+            "/volumes/partials/list",
+            web::get().to(volumes::list_partial),
+        )
+        .route("/volumes/mount", web::post().to(volumes::mount))
+        .route("/volumes/unmount", web::post().to(volumes::unmount))
         .default_service(web::to(not_found))
 }
 

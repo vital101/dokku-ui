@@ -112,7 +112,20 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         "/apps/alpha/partials/config",
         "/apps/alpha/partials/logs",
         "/apps/alpha/partials/delete-confirm",
-        "/apps/alpha/actions/runs/1/events",
+        "/actions/runs/1/events",
+        "/services/postgres",
+        "/services/postgres/new",
+        "/services/postgres/partials/list",
+        "/services/postgres/cache",
+        "/services/postgres/cache/links",
+        "/services/postgres/cache/logs",
+        "/services/postgres/cache/partials/overview",
+        "/services/postgres/cache/partials/links",
+        "/services/postgres/cache/partials/logs",
+        "/services/postgres/cache/partials/delete-confirm",
+        "/services/postgres/cache/delete",
+        "/volumes",
+        "/volumes/partials/list",
     ] {
         let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -128,6 +141,17 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         ("/apps/alpha/rebuild", ""),
         ("/apps/alpha/scale", "scale_web=2"),
         ("/refresh", ""),
+        ("/services/postgres", "name=cache"),
+        ("/services/postgres/cache/start", ""),
+        ("/services/postgres/cache/stop", ""),
+        ("/services/postgres/cache/restart", ""),
+        ("/services/postgres/cache/destroy", "name=cache"),
+        ("/services/postgres/cache/expose", "ports=5432"),
+        ("/services/postgres/cache/unexpose", ""),
+        ("/services/postgres/cache/link", "app=alpha"),
+        ("/services/postgres/cache/unlink", "app=alpha"),
+        ("/volumes/mount", "app=alpha&host=/h&container=/c"),
+        ("/volumes/unmount", "app=alpha&spec=/h:/c"),
     ] {
         let resp = test::call_service(&app, form_request(path, body.to_owned()).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -713,6 +737,17 @@ async fn app_posts_without_valid_csrf_are_rejected() {
         ("/apps/alpha/restart", ""),
         ("/apps/alpha/rebuild", ""),
         ("/apps/alpha/scale", "scale_web=2"),
+        ("/services/postgres", "name=cache"),
+        ("/services/postgres/cache/start", ""),
+        ("/services/postgres/cache/stop", ""),
+        ("/services/postgres/cache/restart", ""),
+        ("/services/postgres/cache/destroy", "name=cache"),
+        ("/services/postgres/cache/expose", "ports=5432"),
+        ("/services/postgres/cache/unexpose", ""),
+        ("/services/postgres/cache/link", "app=alpha"),
+        ("/services/postgres/cache/unlink", "app=alpha"),
+        ("/volumes/mount", "app=alpha&host=/h&container=/c"),
+        ("/volumes/unmount", "app=alpha&spec=/h:/c"),
     ] {
         let resp = test::call_service(
             &app,
@@ -1926,7 +1961,7 @@ async fn hx_restart_returns_run_fragment_and_streams_output() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = get_body(resp).await;
     assert!(
-        body.contains(r#"data-run-url="/apps/alpha/actions/runs/1/events""#),
+        body.contains(r#"data-run-url="/actions/runs/1/events""#),
         "run fragment points at the SSE stream: {body}"
     );
     assert!(body.contains(r#"data-refresh="/apps/alpha/partials/overview""#));
@@ -1934,7 +1969,7 @@ async fn hx_restart_returns_run_fragment_and_streams_output() {
     assert!(body.contains("data-run-log"));
     assert!(!body.contains("<!doctype html>"), "fragment, not a page");
 
-    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         events.contains("event: line\ndata: -----> restarting\n\n"),
@@ -1979,7 +2014,7 @@ async fn hx_action_failure_streams_error_outcome() {
     let body = get_body(resp).await;
     assert!(body.contains("Starting alpha"), "{body}");
 
-    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(events.contains(r#""ok":false"#), "{events}");
     assert!(events.contains("no such app"), "{events}");
@@ -2047,7 +2082,7 @@ async fn hx_scale_returns_run_fragment_targeting_processes() {
     );
     assert!(body.contains("Scaling alpha"), "{body}");
 
-    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(events.contains(r#""ok":true"#), "{events}");
     assert!(events.contains("Scaled"), "{events}");
@@ -2119,7 +2154,7 @@ async fn hx_destroy_streams_and_redirects_home_on_done() {
         "destroy has no fragment to refresh"
     );
 
-    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(events.contains(r#""ok":true"#), "{events}");
     assert!(events.contains(r#""redirect":"/""#), "{events}");
@@ -2164,7 +2199,7 @@ async fn delete_confirm_modal_renders_form_and_404s_unknown_app() {
 }
 
 #[tokio::test]
-async fn action_events_404s_unknown_run_and_other_apps() {
+async fn action_events_404s_unknown_run() {
     let (state, _client, _dir) = harness(seeded_app_client().stub(
         DokkuCommand::PsRestart {
             app: app_name("alpha"),
@@ -2174,20 +2209,7 @@ async fn action_events_404s_unknown_run_and_other_apps() {
     .await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
-    let csrf = shell_csrf(&app, &cookie).await;
 
-    let (status, _) = sse_events(&app, "/apps/alpha/actions/runs/99/events", &cookie).await;
+    let (status, _) = sse_events(&app, "/actions/runs/99/events", &cookie).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "unknown run");
-
-    let resp = test::call_service(
-        &app,
-        hx_form_request("/apps/alpha/restart", format!("csrf_token={csrf}"))
-            .cookie(cookie.clone())
-            .to_request(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let (status, _) = sse_events(&app, "/apps/beta/actions/runs/1/events", &cookie).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "run belongs to another app");
 }

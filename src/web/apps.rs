@@ -1,30 +1,26 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 
 use actix_session::Session;
-use actix_web::web::Bytes;
 use actix_web::{HttpRequest, HttpResponse, web};
 use askama::Template;
-use futures_util::Stream;
-use futures_util::stream::unfold;
 use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::dokku::{
-    ActionRun, ContainerRow, ProcessRow, RunOutcome, SnapshotError, app_config, app_containers,
-    app_formation, app_logs, app_resources, app_service_links, container_rows, format_age,
-    formation_rows, overview_from_snapshot, parse_scale_form, service_info,
+    ContainerRow, ProcessRow, SnapshotError, app_config, app_containers, app_formation, app_logs,
+    app_resources, app_service_links, container_rows, format_age, formation_rows,
+    overview_from_snapshot, parse_scale_form, service_info,
 };
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
 use crate::domain::types::{EnvVar, ResourceReport, ServiceInfo};
 use crate::error::AppError;
-use crate::storage::users::{SqliteUsersRepo, UsersRepo};
-use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
+use crate::web::fragments::{
+    RunCompletion, RunRefresh, current_user, error_fragment, is_htmx, modal_error, start_action_run,
+};
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
 
@@ -154,28 +150,6 @@ struct LogsPartial {
 }
 
 #[derive(Template)]
-#[template(path = "apps/partials/error.html")]
-struct ErrorPartial<'a> {
-    message: &'a str,
-    retry_url: String,
-}
-
-#[derive(Template)]
-#[template(path = "apps/partials/run.html")]
-struct RunPartial<'a> {
-    name: &'a str,
-    run_id: u64,
-    title: String,
-    refresh_url: Option<String>,
-}
-
-#[derive(Template)]
-#[template(path = "apps/partials/modal_error.html")]
-struct ModalErrorPartial<'a> {
-    message: &'a str,
-}
-
-#[derive(Template)]
 #[template(path = "apps/partials/delete_confirm_modal.html")]
 struct DeleteConfirmModalPartial<'a> {
     name: &'a str,
@@ -189,17 +163,8 @@ fn partial_url(name: &str, tab: &str, query: Option<&str>) -> String {
     }
 }
 
-/// Renders the small retry card that htmx swaps in when a partial fetch fails.
-/// Always 200: htmx does not swap 4xx/5xx responses, so an error status would
-/// leave the loading skeleton spinning forever.
-fn error_fragment(retry_url: &str, message: &str) -> Result<HttpResponse, AppError> {
-    let page = ErrorPartial {
-        message,
-        retry_url: retry_url.to_owned(),
-    };
-    render(&page)
-}
-
+/// Renders the small retry card that htmx swaps in when a partial fetch fails
+/// (see [`crate::web::fragments::error_fragment`]).
 fn not_found_fragment(name: &str, retry_url: &str) -> Result<HttpResponse, AppError> {
     error_fragment(
         retry_url,
@@ -218,173 +183,6 @@ fn fragment_for_resolve_error(
     } else {
         error_fragment(retry_url, &err.to_string())
     }
-}
-
-enum RunRefresh {
-    Reports,
-    All,
-}
-
-struct RunCompletion {
-    success_message: String,
-    redirect: Option<String>,
-    refresh: RunRefresh,
-}
-
-/// Starts `command`, streaming its output into `run` line by line. On completion
-/// refreshes the snapshot and records the outcome the SSE stream delivers.
-fn spawn_run(
-    state: AppState,
-    run: Arc<ActionRun>,
-    command: DokkuCommand,
-    completion: RunCompletion,
-) {
-    tokio::spawn(async move {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
-        let line_run = run.clone();
-        let line_task = tokio::spawn(async move {
-            let mut partial = String::new();
-            while let Some(chunk) = rx.recv().await {
-                partial.push_str(&chunk);
-                while let Some(pos) = partial.find('\n') {
-                    let line: String = partial.drain(..=pos).collect();
-                    line_run
-                        .append_line(line.trim_end_matches(['\n', '\r']).to_owned())
-                        .await;
-                }
-            }
-            let rest = partial.trim_end_matches(['\n', '\r']);
-            if !rest.is_empty() {
-                line_run.append_line(rest.to_owned()).await;
-            }
-        });
-
-        let result = state.dokku.exec_streaming(&command, tx).await;
-        let _ = line_task.await;
-
-        let outcome = match result {
-            Ok(_) => {
-                match completion.refresh {
-                    RunRefresh::Reports => {
-                        if let Err(err) = state.snapshot.refresh_app_reports(&run.app).await {
-                            tracing::warn!(error = %err, "snapshot refresh after action failed");
-                        }
-                    }
-                    RunRefresh::All => {
-                        if let Err(err) = state.snapshot.refresh().await {
-                            tracing::warn!(error = %err, "snapshot refresh after destroy failed");
-                        }
-                    }
-                }
-                RunOutcome {
-                    ok: true,
-                    message: completion.success_message,
-                    redirect: completion.redirect,
-                }
-            }
-            Err(err) => RunOutcome {
-                ok: false,
-                message: err.to_string(),
-                redirect: None,
-            },
-        };
-        run.finish(outcome).await;
-    });
-}
-
-fn is_htmx(req: &HttpRequest) -> bool {
-    req.headers().contains_key("HX-Request")
-}
-
-fn modal_error(message: impl Into<String>) -> Result<HttpResponse, AppError> {
-    let message = message.into();
-    let page = ModalErrorPartial { message: &message };
-    render(&page)
-}
-
-/// Registers a run, spawns the command, and returns the streaming modal fragment.
-async fn start_action_run(
-    state: &AppState,
-    name: &str,
-    title: String,
-    command: DokkuCommand,
-    completion: RunCompletion,
-    refresh_url: Option<String>,
-) -> Result<HttpResponse, AppError> {
-    let run = state.action_runs.insert(name).await;
-    spawn_run(state.clone(), run.clone(), command, completion);
-    render(&RunPartial {
-        name,
-        run_id: run.id,
-        title,
-        refresh_url,
-    })
-}
-
-const SSE_KEEPALIVE: Duration = Duration::from_secs(10);
-
-/// Replays buffered output, then follows the run until it finishes. Emits
-/// `line` events for output and one `done` event carrying the JSON outcome.
-fn action_stream(run: Arc<ActionRun>) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
-    let follower = run.subscribe();
-    unfold(
-        (run, 0usize, follower, false),
-        |(run, mut cursor, mut follower, done_sent)| async move {
-            if done_sent {
-                return None;
-            }
-            loop {
-                let (lines, outcome) = run.poll(&mut cursor).await;
-                if !lines.is_empty() {
-                    return Some((Ok(line_events(&lines)), (run, cursor, follower, false)));
-                }
-                if let Some(outcome) = outcome {
-                    return Some((Ok(done_event(&outcome)), (run, cursor, follower, true)));
-                }
-                match tokio::time::timeout(SSE_KEEPALIVE, follower.changed()).await {
-                    Ok(Ok(())) => continue,
-                    Ok(Err(_)) => return None,
-                    Err(_) => {
-                        return Some((
-                            Ok(Bytes::from_static(b": keepalive\n\n")),
-                            (run, cursor, follower, false),
-                        ));
-                    }
-                }
-            }
-        },
-    )
-}
-
-fn line_events(lines: &[String]) -> Bytes {
-    let mut body = String::new();
-    for line in lines {
-        body.push_str("event: line\ndata: ");
-        body.push_str(line);
-        body.push_str("\n\n");
-    }
-    Bytes::from(body)
-}
-
-fn done_event(outcome: &RunOutcome) -> Bytes {
-    let data = serde_json::to_string(outcome).unwrap_or_else(|_| {
-        r#"{"ok":false,"message":"failed to serialize outcome","redirect":null}"#.to_owned()
-    });
-    Bytes::from(format!("event: done\ndata: {data}\n\n"))
-}
-
-async fn current_user(
-    state: &AppState,
-    session: &Session,
-) -> Result<crate::storage::users::User, AppError> {
-    let user_id = session
-        .get::<i64>(SESSION_USER_ID)
-        .map_err(|err| AppError::Internal(err.to_string()))?
-        .ok_or_else(|| AppError::Internal("session has no user id".into()))?;
-    let repo = SqliteUsersRepo::new(state.db.clone());
-    repo.find_by_id(user_id)
-        .await?
-        .ok_or_else(|| AppError::Internal("session user no longer exists".into()))
 }
 
 pub async fn new_form(
@@ -952,26 +750,6 @@ pub async fn delete_confirm_modal(
         name: &name,
         csrf_token: &csrf_token,
     })
-}
-
-pub async fn action_events(
-    state: web::Data<AppState>,
-    session: Session,
-    path: web::Path<(String, u64)>,
-) -> Result<HttpResponse, AppError> {
-    let (name, id) = path.into_inner();
-    current_user(&state, &session).await?;
-
-    let run = state.action_runs.get(id).await.ok_or(AppError::NotFound)?;
-    if run.app != name {
-        return Err(AppError::NotFound);
-    }
-
-    Ok(HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .insert_header(("Cache-Control", "no-store"))
-        .insert_header(("X-Accel-Buffering", "no"))
-        .streaming(action_stream(run)))
 }
 
 #[derive(Deserialize)]

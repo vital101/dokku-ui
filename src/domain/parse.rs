@@ -1,6 +1,7 @@
+use crate::domain::mount_spec::MountSpec;
 use crate::domain::types::{
-    AppInfo, BuildInfo, ContainerDetails, EnvVar, ImageStatus, LogLines, ProcessState,
-    ProcessStatus, PsReport, ResourceReport, ScaleEntry, ServiceInfo,
+    AppInfo, AppMounts, BuildInfo, ContainerDetails, EnvVar, ImageStatus, LogLines, Mount,
+    ProcessState, ProcessStatus, PsReport, ResourceReport, ScaleEntry, ServiceInfo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -121,6 +122,128 @@ pub fn parse_service_plugins(output: &str) -> Vec<String> {
 /// `<plugin>:app-links <app>` -> names of services linked to the app (one per line).
 pub fn parse_app_links(output: &str) -> Vec<String> {
     parse_apps_list(output)
+}
+
+/// `<plugin>:list` -> service names. The installed plugin generation prints
+/// only a `=====> <Name> services` banner and one name per line; an empty
+/// listing prints a `!` warning instead. Lines that do not look like service
+/// names (headers, warnings, prose) are skipped so future format additions do
+/// not break the parser.
+pub fn parse_service_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .map(|line| line.trim().to_owned())
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("=====")
+                && !line.starts_with('!')
+                && line
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .collect()
+}
+
+/// `storage:report` (no app argument) plain text -> per-app bind mounts. Each
+/// app gets a `=====> <app> storage information` section with
+/// `Storage build/deploy/run mounts:` lines holding `-v host:container[:opts]`
+/// entries. The same mount reported under several phases collapses into one
+/// [`Mount`] carrying every phase, in build/deploy/run order.
+pub fn parse_storage_report(output: &str) -> Vec<AppMounts> {
+    let mut apps: Vec<AppMounts> = Vec::new();
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("=====> ") {
+            let app = header
+                .strip_suffix(" storage information")
+                .unwrap_or(header)
+                .trim()
+                .to_owned();
+            apps.push(AppMounts {
+                app,
+                mounts: Vec::new(),
+            });
+            continue;
+        }
+        let Some(current) = apps.last_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let phase = match key.trim().to_lowercase().as_str() {
+            "storage build mounts" => "build",
+            "storage deploy mounts" => "deploy",
+            "storage run mounts" => "run",
+            _ => continue,
+        };
+        for spec in mount_flags(value) {
+            merge_mount(current, &spec, phase);
+        }
+    }
+    apps
+}
+
+/// Extracts the `host:container[:opts]` operands of the `-v` flags in a mount
+/// list value like `-v /a:/b -v /c:/d:ro`.
+fn mount_flags(value: &str) -> Vec<String> {
+    let mut specs = Vec::new();
+    let mut words = value.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "-v" {
+            if let Some(spec) = words.next() {
+                specs.push(spec.to_owned());
+            }
+        }
+    }
+    specs
+}
+
+fn merge_mount(app: &mut AppMounts, spec: &str, phase: &str) {
+    let Ok(parsed) = MountSpec::try_from(spec) else {
+        return;
+    };
+    let host = parsed.host().to_owned();
+    let container = parsed.container().to_owned();
+    let options = parsed.options().unwrap_or_default().to_owned();
+    let locator = format!("{host}:{container}");
+
+    if let Some(existing) = app
+        .mounts
+        .iter_mut()
+        .find(|mount| mount.locator() == locator)
+    {
+        if !existing.phases.iter().any(|seen| seen == phase) {
+            existing.phases.push(phase.to_owned());
+            existing
+                .phases
+                .sort_by_key(|phase| phase_rank(phase.as_str()));
+        }
+        if existing.options.is_empty() {
+            existing.options = options;
+        }
+        return;
+    }
+    app.mounts.push(Mount {
+        host,
+        container,
+        options,
+        phases: vec![phase.to_owned()],
+    });
+}
+
+fn phase_rank(phase: &str) -> u8 {
+    match phase {
+        "build" => 0,
+        "deploy" => 1,
+        "run" => 2,
+        _ => 3,
+    }
 }
 
 pub fn parse_ps_report(json: &str) -> Result<PsReport, ParseError> {
@@ -434,6 +557,12 @@ mod tests {
         include_str!("../../tests/fixtures/resource_report_empty.txt");
     const REDIS_INFO: &str = include_str!("../../tests/fixtures/redis_info.txt");
     const POSTGRES_INFO: &str = include_str!("../../tests/fixtures/postgres_info.txt");
+    const POSTGRES_LIST: &str = include_str!("../../tests/fixtures/postgres_list.txt");
+    const REDIS_LIST: &str = include_str!("../../tests/fixtures/redis_list.txt");
+    const SERVICE_LIST_EMPTY: &str = include_str!("../../tests/fixtures/service_list_empty.txt");
+    const STORAGE_REPORT: &str = include_str!("../../tests/fixtures/storage_report.txt");
+    const STORAGE_REPORT_EMPTY: &str =
+        include_str!("../../tests/fixtures/storage_report_empty.txt");
 
     #[test]
     fn parses_apps_list_fixture() {
@@ -990,6 +1119,84 @@ mod tests {
                 .expect("parse")
                 .can_scale,
             None
+        );
+    }
+
+    #[test]
+    fn parses_service_list_fixtures() {
+        assert_eq!(parse_service_list(POSTGRES_LIST), vec!["roboswarm-db"]);
+        assert_eq!(parse_service_list(REDIS_LIST), vec!["candid"]);
+    }
+
+    #[test]
+    fn service_list_empty_warning_yields_no_names() {
+        assert_eq!(parse_service_list(SERVICE_LIST_EMPTY), Vec::<String>::new());
+        assert_eq!(parse_service_list(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn service_list_strips_ansi_and_skips_headers_and_prose() {
+        let output = "\u{1b}[36m=====> Redis services\u{1b}[0m\n\n  candid \n !     something happened\nnot a service name\nWithCaps_ok\n";
+        assert_eq!(parse_service_list(output), vec!["candid", "WithCaps_ok"]);
+    }
+
+    #[test]
+    fn parses_storage_report_fixture() {
+        let apps = parse_storage_report(STORAGE_REPORT);
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].app, "dokku-ui");
+        assert_eq!(apps[0].mount_count(), 1);
+        let mount = &apps[0].mounts[0];
+        assert_eq!(mount.host, "/var/lib/dokku/data/storage/dokku-ui");
+        assert_eq!(mount.container, "/app/data");
+        assert_eq!(mount.options, "");
+        assert_eq!(mount.phases, vec!["deploy", "run"]);
+        assert_eq!(apps[1].app, "starwars");
+        assert!(apps[1].is_empty());
+    }
+
+    #[test]
+    fn storage_report_empty_fixture_yields_app_without_mounts() {
+        let apps = parse_storage_report(STORAGE_REPORT_EMPTY);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].app, "starwars");
+        assert!(apps[0].is_empty());
+    }
+
+    #[test]
+    fn storage_report_merges_phases_into_one_mount() {
+        let output = "=====> alpha storage information\n       Storage build mounts: -v /same:/data -v /only-build:/build\n       Storage deploy mounts: -v /same:/data:ro -v /only-deploy:/deploy\n       Storage run mounts:  -v /same:/data\n";
+        let apps = parse_storage_report(output);
+        assert_eq!(apps.len(), 1);
+        let mounts = &apps[0].mounts;
+        assert_eq!(mounts.len(), 3);
+
+        let same = &mounts[0];
+        assert_eq!(same.phases, vec!["build", "deploy", "run"]);
+        assert_eq!(same.options, "ro");
+        assert_eq!(same.arg(), "/same:/data:ro");
+
+        assert_eq!(mounts[1].locator(), "/only-build:/build");
+        assert_eq!(mounts[1].phases, vec!["build"]);
+        assert_eq!(mounts[2].locator(), "/only-deploy:/deploy");
+        assert_eq!(mounts[2].phases, vec!["deploy"]);
+    }
+
+    #[test]
+    fn storage_report_ignores_malformed_entries() {
+        let output = "=====> alpha storage information\n       Storage deploy mounts: -v broke -v /ok:/yes -v /host:relative\nnoise\n";
+        let apps = parse_storage_report(output);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].mount_count(), 1);
+        assert_eq!(apps[0].mounts[0].locator(), "/ok:/yes");
+    }
+
+    #[test]
+    fn storage_report_without_sections_is_empty() {
+        assert_eq!(parse_storage_report(""), Vec::<AppMounts>::new());
+        assert_eq!(
+            parse_storage_report("Storage deploy mounts: -v /a:/b\n"),
+            Vec::<AppMounts>::new()
         );
     }
 }

@@ -1,0 +1,41 @@
+{% if services.is_empty() %}
+<div class="rounded-lg border border-dashed border-slate-800 p-10 text-center">
+  <p class="text-sm text-slate-400">No {{ plugin.display_name() }} services yet.</p>
+  <p class="mt-2 text-xs text-slate-500">
+    <a href="/services/{{ plugin }}/new" class="text-blue-400 hover:underline">Create one</a>
+    to get started.
+  </p>
+</div>
+{% else %}
+<div class="overflow-hidden rounded-lg border border-slate-800 bg-slate-900/50">
+  <table class="w-full text-sm">
+    <thead class="border-b border-slate-800 text-left text-xs uppercase tracking-wide text-slate-400">
+      <tr>
+        <th class="px-4 py-3">Service</th>
+        <th class="px-4 py-3">Status</th>
+        <th class="px-4 py-3">Version</th>
+        <th class="px-4 py-3">Exposed ports</th>
+        <th class="px-4 py-3">Linked apps</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for service in services %}
+      <tr class="border-b border-slate-800/50 last:border-0">
+        <td class="px-4 py-3 font-medium text-white">
+          <a href="/services/{{ plugin }}/{{ service.service }}" class="hover:underline">{{ service.service }}</a>
+        </td>
+        <td class="px-4 py-3">
+          <span class="inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 text-xs font-medium {{ service.status_badge_css() }}">
+            <span class="size-1.5 rounded-full bg-current"></span>
+            {{ service.status_label() }}
+          </span>
+        </td>
+        <td class="px-4 py-3 text-slate-300">{% if service.version.is_empty() %}—{% else %}{{ service.version }}{% endif %}</td>
+        <td class="px-4 py-3 text-slate-300">{% if service.exposed_ports.is_empty() %}—{% else %}{{ service.exposed_ports }}{% endif %}</td>
+        <td class="px-4 py-3 text-slate-300">{{ service.linked_apps_label() }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

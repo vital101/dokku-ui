@@ -195,7 +195,7 @@ DB opened with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreig
 | `/apps/{name}/logs` | GET | yes | → app/logs.html | `?lines=N` (200 default, 1000 max, min 10); fragment renders lines |
 | `/apps/{name}/partials/{tab}` | GET | yes | `apps::*_partial` | HTMX fragments (overview/processes/services/config/logs) |
 | `/apps/{name}/partials/delete-confirm` | GET | yes | `apps::delete_confirm_modal` | delete-confirmation modal fragment |
-| `/apps/{name}/actions/runs/{id}/events` | GET | yes | `apps::action_events` | SSE stream of a run's output + `done` outcome |
+| `/actions/runs/{id}/events` | GET | yes | `runs::action_events` | generic SSE stream of any run's output + `done` outcome (app, service, or volume) |
 | `/refresh` | POST | yes | `pages::refresh_now` | manual full snapshot refresh from the dashboard |
 | `/apps/{name}/delete` | GET | yes | → app/delete.html | confirmation page (no-JS fallback) |
 | `/apps/{name}/delete` | POST | yes | `apps::delete` | confirm form input must echo app name |
@@ -204,6 +204,19 @@ DB opened with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreig
 | `/apps/{name}/restart` | POST | yes | `apps::action` | |
 | `/apps/{name}/rebuild` | POST | yes | `apps::action` | |
 | `/apps/{name}/scale` | POST | yes | `apps::scale` | HX: streamed run modal; plain: flash + redirect |
+| `/services/{plugin}` | GET/POST | yes | `services::index`/`services::create` | `{plugin}` validated against the supported set (postgres/mysql/redis/mongo); POST creates the service (HX: run modal; plain: flash) |
+| `/services/{plugin}/new` | GET | yes | → services/new.html | no-JS create form |
+| `/services/{plugin}/partials/list` | GET | yes | `services::list_partial` | HTMX fragment: `<plugin>:list` + per-service `<plugin>:info` |
+| `/services/{plugin}/{service}` | GET | yes | `services::show` → services/show.html | detail shell, Overview tab + lifecycle/expose/destroy actions; unknown service 404s |
+| `/services/{plugin}/{service}/links` | GET | yes | → services/links.html | Links tab shell |
+| `/services/{plugin}/{service}/logs` | GET | yes | → services/logs.html | `?lines=N`, same clamp as app logs |
+| `/services/{plugin}/{service}/partials/{overview,links,logs,delete-confirm}` | GET | yes | `services::*_partial` | HTMX fragments; failures stay 200 retry cards |
+| `/services/{plugin}/{service}/delete` | GET | yes | → services/delete_confirm.html | confirmation page (no-JS fallback) |
+| `/services/{plugin}/{service}/{start,stop,restart,destroy,expose,unexpose,link,unlink}` | POST | yes | `services::*` | HX: streamed run modal; plain: flash + redirect. destroy echoes the typed service name; link/unlink take `app` |
+| `/volumes` | GET | yes | `volumes::index` → volumes/list.html | shell; data via partial |
+| `/volumes/partials/list` | GET | yes | `volumes::list_partial` | all-apps `storage:report` in one command + mount form |
+| `/volumes/mount` | POST | yes | `volumes::mount` | `MountSpec`-validated before any SSH; HX: run modal; plain: flash |
+| `/volumes/unmount` | POST | yes | `volumes::unmount` | takes `app` + `host:container` locator |
 | `/static/*` | GET | no | actix-files | immutable cache headers, content-hash names |
 | `404/500` | — | — | error.html | via `AppError: ResponseError` |
 
@@ -229,7 +242,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS th
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.
 - A background refresher (`SnapshotStore` + `spawn_refresher`) keeps a cheap in-memory snapshot of the whole host (app list + `ps:report` + `apps:report`, fetched concurrently with 4 permits over the persistent SSH session) on a **30-minute** cadence (`SNAPSHOT_REFRESH_SECS`, default 1800). The heavier per-app details (builds, domains, service links, DNS) are **not** fetched in the background. The dashboard serves from the snapshot (`Arc` clone, no IO), the first request after boot falls back to one synchronous refresh, and a **"Refresh data"** button (`POST /refresh`) forces a fresh pass on demand. After start/stop/restart/scale/create only that app's cheap ps/apps reports are re-fetched (`refresh_app_reports`) before redirecting; the overview fragment then fetches the app's details on demand, so an action click no longer pays for two full detail passes. Destroy triggers a full refresh. A miss (app not listed) triggers a live `apps:list` fallback before 404ing, covering apps created via the CLI within the staleness window. Refresh failures keep the last good snapshot and log a warning. dokku boots its plugin system per command (~750ms), so keeping the background pass small is what keeps host load down. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
 - **App pages load on demand**: every `/apps/{name}/*` route renders an instant shell (nav, action buttons, skeleton) and each tab's data is fetched by an HTMX fragment request to `/apps/{name}/partials/{tab}`. The overview fragment calls `SnapshotStore::refresh_app` (ps/apps report + builds/domains/links/DNS for that one app); processes/config/logs query dokku directly; services fetches links live (`plugin:list` + `app links`). Failed fragments render a small retry card (HTTP 200) instead of a full-page error.
-- **Streamed action runs**: start/stop/restart/rebuild/scale/destroy execute as an `ActionRuns` job. The handler responds instantly with a run fragment; `static/js/actions.js` opens an `EventSource` on `/apps/{name}/actions/runs/{id}/events`, which replays buffered output and follows the run until a `done` event (`{ok, message, redirect}`). Output is line-buffered server-side; `DokkuClient::exec_streaming` forwards SSH chunks as they arrive (`RusshClient`, same timeout semantics as `exec`; the trait default emits stdout as one chunk so mocks need no changes). Finished runs are retained 5 minutes so a page reload mid-run replays the log; the SSE response sets `X-Accel-Buffering: no` so nginx does not buffer it. On success the run task refreshes the snapshot (`refresh_app_reports`, or a full refresh after destroy) while the browser swaps in the outcome banner and refreshes the current tab fragment.
+- **Streamed action runs**: start/stop/restart/rebuild/scale/destroy execute as an `ActionRuns` job. The handler responds instantly with a run fragment; `static/js/actions.js` opens an `EventSource` on the generic `/actions/runs/{id}/events` route (one endpoint serves app, service, and volume runs), which replays buffered output and follows the run until a `done` event (`{ok, message, redirect}`). Output is line-buffered server-side; `DokkuClient::exec_streaming` forwards SSH chunks as they arrive (`RusshClient`, same timeout semantics as `exec`; the trait default emits stdout as one chunk so mocks need no changes). Finished runs are retained 5 minutes so a page reload mid-run replays the log; the SSE response sets `X-Accel-Buffering: no` so nginx does not buffer it. On success the run task refreshes the snapshot (`refresh_app_reports`, a full refresh after destroy, or nothing for service/volume runs whose `data-refresh` re-pulls the affected partial) while the browser swaps in the outcome banner and refreshes the current tab fragment.
 
 ## 9. Templates & UI
 
@@ -420,3 +433,34 @@ host (service DSNs redacted); see `tests/fixtures/README.md`.
 ---
 
 **Definition of done (v1)**: every route behind auth (except healthz/login/setup/static); CSRF on all POSTs; deployable via `git push dokku main` with healthcheck; `make coverage` ≥ 90% lines; `cargo clippy -D warnings` and `cargo fmt --check` clean; all dokku parsing covered by golden fixtures validated against the target host.
+
+---
+
+## 18. Service & storage pages (implemented)
+
+Sidebar sections for the four installed service plugins (PostgreSQL, MySQL,
+Redis, MongoDB) plus app bind mounts.
+
+- **Routes.** Generic `/services/{plugin}` (validated against
+  `ServicePlugin::all()`), `/services/{plugin}/new`, and
+  `/services/{plugin}/{service}` with Overview/Links/Logs tabs and matching
+  `partials/*` fragments. Actions: create, start/stop/restart, destroy (typed
+  name), expose/unexpose, link/unlink. Volumes: `/volumes`, mount and unmount
+  forms. Unknown plugin/service names 404 on full pages; partial failures stay
+  HTTP 200 retry cards.
+- **Data.** `plugin_services` runs `<plugin>:list` then a live `<plugin>:info`
+  per service (unknown on failure, DSN never parsed); `service_logs` bounds
+  output via the positional empty follow-flag slot (`<plugin>:logs svc '' N`),
+  which required `russh_client::shell_command` to quote argv; `app_mounts`
+  parses the all-apps `storage:report` in one command. Nothing new is cached in
+  the snapshot — these pages are live-on-load, like app tabs.
+- **Runs.** All actions stream through the existing `ActionRuns` SSE modal. The
+  run route is now generic (`/actions/runs/{id}/events`), the shared pieces
+  live in `src/web/fragments.rs`/`src/web/runs.rs`, and `RunRefresh::None`
+  handles subjects that are not in the app snapshot (the modal's `data-refresh`
+  re-pulls the affected partial instead).
+- **Fixtures.** Service-list/log and storage-report fixtures are synthetic but
+  source-verified against dokku-redis 1.42.1 and dokku `v0.38.4`; re-capture
+  from the live host next session (see `tests/fixtures/README.md`).
+- **Deferred:** named storage entries (`storage:create/destroy/info`), service
+  clone/promote/backups, pause, per-app storage tab.

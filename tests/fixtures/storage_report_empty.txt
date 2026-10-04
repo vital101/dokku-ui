@@ -1,0 +1,4 @@
+=====> starwars storage information
+       Storage build mounts:
+       Storage deploy mounts:
+       Storage run mounts:

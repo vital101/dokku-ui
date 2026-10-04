@@ -1,0 +1,8 @@
+=====> dokku-ui storage information
+       Storage build mounts:
+       Storage deploy mounts: -v /var/lib/dokku/data/storage/dokku-ui:/app/data
+       Storage run mounts:  -v /var/lib/dokku/data/storage/dokku-ui:/app/data
+=====> starwars storage information
+       Storage build mounts:
+       Storage deploy mounts:
+       Storage run mounts:

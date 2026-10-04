@@ -195,7 +195,7 @@ impl RusshClient {
         command: &DokkuCommand,
         sink: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<DokkuOutput, DokkuError> {
-        let remote_command = command.argv().join(" ");
+        let remote_command = shell_command(&command.argv());
         let timeout = self.command_timeout(command);
         let fut = self.run_command(&remote_command, sink);
         match timeout {
@@ -231,6 +231,28 @@ fn finalize(output: DokkuOutput) -> Result<DokkuOutput, DokkuError> {
             stderr: output.stderr,
         }),
     }
+}
+
+/// Joins argv into the string the remote login shell executes. Arguments made
+/// of shell-safe characters are passed through bare; anything else — including
+/// the empty string `<plugin>:logs` uses as its follow-flag placeholder — is
+/// single-quoted so it reaches dokku verbatim.
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_arg(arg: &str) -> String {
+    let bare = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@=+,".contains(c));
+    if bare {
+        return arg.to_owned();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 #[async_trait]
@@ -284,9 +306,53 @@ impl client::Handler for HostKeyHandler {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn handle_is_sync() {
         fn assert_sync<T: Sync>() {}
         assert_sync::<russh::client::Handle<super::HostKeyHandler>>();
+    }
+
+    #[test]
+    fn shell_command_leaves_plain_arguments_bare() {
+        let argv = vec![
+            "ps:report".to_owned(),
+            "myapp".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ];
+        assert_eq!(shell_command(&argv), "ps:report myapp --format json");
+    }
+
+    #[test]
+    fn shell_command_quotes_the_empty_follow_flag_slot() {
+        let argv = vec![
+            "redis:logs".to_owned(),
+            "candid".to_owned(),
+            String::new(),
+            "200".to_owned(),
+        ];
+        assert_eq!(shell_command(&argv), "redis:logs candid '' 200");
+    }
+
+    #[test]
+    fn shell_command_keeps_mount_specs_bare() {
+        let argv = vec![
+            "storage:mount".to_owned(),
+            "myapp".to_owned(),
+            "/var/lib/dokku/data/storage/myapp:/app/storage:ro,Z".to_owned(),
+        ];
+        assert_eq!(
+            shell_command(&argv),
+            "storage:mount myapp /var/lib/dokku/data/storage/myapp:/app/storage:ro,Z"
+        );
+    }
+
+    #[test]
+    fn shell_command_quotes_and_escapes_unsafe_arguments() {
+        assert_eq!(quote_arg("two words"), "'two words'");
+        assert_eq!(quote_arg("it's"), r#"'it'\''s'"#);
+        assert_eq!(quote_arg("$HOME"), "'$HOME'");
     }
 }

@@ -1,0 +1,984 @@
+use std::collections::HashMap;
+
+use actix_session::Session;
+use actix_web::{HttpRequest, HttpResponse, web};
+use askama::Template;
+use serde::Deserialize;
+
+use crate::dokku::{plugin_services, service_linked_apps, service_logs};
+use crate::domain::AppName;
+use crate::domain::command::DokkuCommand;
+use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_service_list};
+use crate::domain::service_name::ServiceName;
+use crate::domain::service_plugin::ServicePlugin;
+use crate::domain::types::ServiceInfo;
+use crate::error::AppError;
+use crate::web::csrf_form::{CsrfForm, ensure_csrf};
+use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
+use crate::web::fragments::{
+    RunCompletion, RunRefresh, current_user, error_fragment, is_htmx, modal_error, start_action_run,
+};
+use crate::web::render::{render, see_other};
+use crate::web::state::AppState;
+
+#[derive(Template)]
+#[template(path = "services/list.html")]
+struct ListPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/list.html")]
+struct ListPartial {
+    plugin: ServicePlugin,
+    services: Vec<ServiceInfo>,
+}
+
+#[derive(Template)]
+#[template(path = "services/new.html")]
+struct NewFormPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+}
+
+#[derive(Template)]
+#[template(path = "services/show.html")]
+struct ShowPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+    service: &'a str,
+    active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "services/links.html")]
+struct LinksPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+    service: &'a str,
+    active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "services/logs.html")]
+struct LogsPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+    service: &'a str,
+    active_tab: &'static str,
+    line_count: u32,
+    min_lines: u32,
+    max_lines: u32,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/overview.html")]
+struct OverviewPartial<'a> {
+    plugin: ServicePlugin,
+    service: &'a str,
+    csrf_token: &'a str,
+    info: ServiceInfo,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/links.html")]
+struct LinksPartial<'a> {
+    plugin: ServicePlugin,
+    service: &'a str,
+    csrf_token: &'a str,
+    links: Vec<String>,
+    available_apps: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/logs.html")]
+struct LogsPartial {
+    lines: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "services/delete_confirm.html")]
+struct DeleteConfirmPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+    service: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/delete_confirm_modal.html")]
+struct DeleteConfirmModalPartial<'a> {
+    plugin: ServicePlugin,
+    service: &'a str,
+    csrf_token: &'a str,
+}
+
+/// Rejects `{plugin}` URL segments that are not supported service plugins.
+fn plugin_from_slug(raw: &str) -> Result<ServicePlugin, AppError> {
+    ServicePlugin::try_from(raw).map_err(|_| AppError::NotFound)
+}
+
+/// Rejects `{service}` URL segments that cannot be service names.
+fn service_from_slug(raw: &str) -> Result<ServiceName, AppError> {
+    ServiceName::try_from(raw).map_err(|_| AppError::NotFound)
+}
+
+fn detail_url(plugin: ServicePlugin, service: &ServiceName) -> String {
+    format!("/services/{plugin}/{service}")
+}
+
+/// 404s a service the plugin does not list, so full detail pages mirror the
+/// unknown-app behavior.
+async fn ensure_service_exists(
+    state: &AppState,
+    plugin: ServicePlugin,
+    service: &ServiceName,
+) -> Result<(), AppError> {
+    let output = state
+        .dokku
+        .exec(&DokkuCommand::ServiceList { plugin })
+        .await?;
+    if parse_service_list(&output.stdout)
+        .iter()
+        .any(|name| name == service.as_str())
+    {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+/// Everything the service detail shells need: validated plugin/service, the
+/// session user, and a CSRF token.
+struct DetailContext {
+    plugin: ServicePlugin,
+    service: ServiceName,
+    email: String,
+    csrf_token: String,
+    flash: Option<FlashMessage>,
+}
+
+async fn detail_context(
+    state: &AppState,
+    session: &Session,
+    raw_plugin: &str,
+    raw_service: &str,
+) -> Result<DetailContext, AppError> {
+    let plugin = plugin_from_slug(raw_plugin)?;
+    let service = service_from_slug(raw_service)?;
+    let user = current_user(state, session).await?;
+    ensure_service_exists(state, plugin, &service).await?;
+    let csrf_token = ensure_csrf(session).await?;
+    let flash = take_flash(session);
+    Ok(DetailContext {
+        plugin,
+        service,
+        email: user.email,
+        csrf_token,
+        flash,
+    })
+}
+
+pub async fn index(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let plugin = plugin_from_slug(&path.into_inner())?;
+    let user = current_user(&state, &session).await?;
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+
+    render(&ListPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        plugin,
+    })
+}
+
+pub async fn list_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let plugin = plugin_from_slug(&path.into_inner())?;
+    current_user(&state, &session).await?;
+
+    let retry_url = format!("/services/{plugin}/partials/list");
+    match plugin_services(&*state.dokku, plugin).await {
+        Ok(services) => render(&ListPartial { plugin, services }),
+        Err(err) => error_fragment(&retry_url, &err.to_string()),
+    }
+}
+
+pub async fn new_form(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let plugin = plugin_from_slug(&path.into_inner())?;
+    let user = current_user(&state, &session).await?;
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+
+    render(&NewFormPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        plugin,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct CreateForm {
+    name: String,
+}
+
+pub async fn create(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<CreateForm>,
+) -> Result<HttpResponse, AppError> {
+    let plugin = plugin_from_slug(&path.into_inner())?;
+    let name = form.0.name.trim().to_owned();
+
+    let service = match ServiceName::try_from(name.as_str()) {
+        Ok(service) => service,
+        Err(err) => {
+            let message = format!("Invalid service name: {err}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/services/{plugin}/new")));
+        }
+    };
+    let redirect_to = detail_url(plugin, &service);
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &format!("{plugin}/{service}"),
+            format!("Creating {service}…"),
+            DokkuCommand::ServiceCreate { plugin, service },
+            RunCompletion {
+                success_message: format!("Service '{name}' created."),
+                redirect: Some(redirect_to),
+                refresh: RunRefresh::None,
+            },
+            None,
+        )
+        .await;
+    }
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::ServiceCreate { plugin, service })
+        .await
+    {
+        Ok(_) => {
+            set_flash(
+                &session,
+                FlashLevel::Success,
+                format!("Service '{name}' created."),
+            );
+            Ok(see_other(&redirect_to))
+        }
+        Err(err) => {
+            set_flash(
+                &session,
+                FlashLevel::Error,
+                format!("Failed to create service: {err}"),
+            );
+            Ok(see_other(&format!("/services/{plugin}/new")))
+        }
+    }
+}
+
+pub async fn show(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let ctx = detail_context(&state, &session, &raw_plugin, &raw_service).await?;
+
+    render(&ShowPage {
+        email: &ctx.email,
+        csrf_token: &ctx.csrf_token,
+        flash: ctx.flash.as_ref(),
+        plugin: ctx.plugin,
+        service: ctx.service.as_str(),
+        active_tab: "overview",
+    })
+}
+
+pub async fn links_page(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let ctx = detail_context(&state, &session, &raw_plugin, &raw_service).await?;
+
+    render(&LinksPage {
+        email: &ctx.email,
+        csrf_token: &ctx.csrf_token,
+        flash: ctx.flash.as_ref(),
+        plugin: ctx.plugin,
+        service: ctx.service.as_str(),
+        active_tab: "links",
+    })
+}
+
+pub async fn logs_page(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+    query: web::Query<HashMap<String, String>>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let ctx = detail_context(&state, &session, &raw_plugin, &raw_service).await?;
+    let line_count = clamp_log_lines(query.get("lines").map(String::as_str));
+
+    render(&LogsPage {
+        email: &ctx.email,
+        csrf_token: &ctx.csrf_token,
+        flash: ctx.flash.as_ref(),
+        plugin: ctx.plugin,
+        service: ctx.service.as_str(),
+        active_tab: "logs",
+        line_count,
+        min_lines: LOG_LINES_MIN,
+        max_lines: LOG_LINES_MAX,
+    })
+}
+
+pub async fn overview_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+
+    let retry_url = format!("/services/{plugin}/{service}/partials/overview");
+    match crate::dokku::service_info(&*state.dokku, plugin.as_str(), service.as_str()).await {
+        Ok(Some(info)) => {
+            let csrf_token = ensure_csrf(&session).await?;
+            render(&OverviewPartial {
+                plugin,
+                service: service.as_str(),
+                csrf_token: &csrf_token,
+                info,
+            })
+        }
+        Ok(None) => error_fragment(
+            &retry_url,
+            &format!("Service '{service}' was not found — it may have been destroyed."),
+        ),
+        Err(err) => error_fragment(&retry_url, &err.to_string()),
+    }
+}
+
+pub async fn links_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+
+    let retry_url = format!("/services/{plugin}/{service}/partials/links");
+    let links = match service_linked_apps(&*state.dokku, plugin, &service).await {
+        Ok(links) => links,
+        Err(err) => return error_fragment(&retry_url, &err.to_string()),
+    };
+
+    // The link form picks from the app snapshot; a snapshot failure degrades
+    // to "no apps available" rather than taking the whole panel down.
+    let mut available_apps = state
+        .snapshot
+        .ensure_loaded()
+        .await
+        .map(|snapshot| snapshot.apps.clone())
+        .unwrap_or_default();
+    available_apps.retain(|app| !links.iter().any(|linked| linked == app));
+
+    let csrf_token = ensure_csrf(&session).await?;
+    render(&LinksPartial {
+        plugin,
+        service: service.as_str(),
+        csrf_token: &csrf_token,
+        links,
+        available_apps,
+    })
+}
+
+pub async fn logs_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+    query: web::Query<HashMap<String, String>>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+
+    let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
+    let retry_url = format!("/services/{plugin}/{service}/partials/logs?lines={num_lines}");
+    match service_logs(&*state.dokku, plugin, &service, num_lines).await {
+        Ok(logs) => render(&LogsPartial {
+            lines: logs.as_slice().to_vec(),
+        }),
+        Err(err) => error_fragment(&retry_url, &err.to_string()),
+    }
+}
+
+/// No-JS confirmation page, mirroring the app delete flow. The modal fragment
+/// (`delete_confirm_modal`) serves the same purpose when htmx is available.
+pub async fn delete_confirm(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    let user = current_user(&state, &session).await?;
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+
+    render(&DeleteConfirmPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        plugin,
+        service: service.as_str(),
+    })
+}
+
+pub async fn delete_confirm_modal(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+    let csrf_token = ensure_csrf(&session).await?;
+
+    render(&DeleteConfirmModalPartial {
+        plugin,
+        service: service.as_str(),
+        csrf_token: &csrf_token,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ActionForm {}
+
+#[derive(Clone, Copy)]
+enum ServiceAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ServiceAction {
+    fn verb(self) -> &'static str {
+        match self {
+            ServiceAction::Start => "start",
+            ServiceAction::Stop => "stop",
+            ServiceAction::Restart => "restart",
+        }
+    }
+
+    fn past_tense(self) -> &'static str {
+        match self {
+            ServiceAction::Start => "started",
+            ServiceAction::Stop => "stopped",
+            ServiceAction::Restart => "restarted",
+        }
+    }
+
+    fn present_participle(self) -> &'static str {
+        match self {
+            ServiceAction::Start => "Starting",
+            ServiceAction::Stop => "Stopping",
+            ServiceAction::Restart => "Restarting",
+        }
+    }
+
+    fn command(self, plugin: ServicePlugin, service: &ServiceName) -> DokkuCommand {
+        match self {
+            ServiceAction::Start => DokkuCommand::ServiceStart {
+                plugin,
+                service: service.clone(),
+            },
+            ServiceAction::Stop => DokkuCommand::ServiceStop {
+                plugin,
+                service: service.clone(),
+            },
+            ServiceAction::Restart => DokkuCommand::ServiceRestart {
+                plugin,
+                service: service.clone(),
+            },
+        }
+    }
+}
+
+pub async fn start(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    process_action(
+        &state,
+        &session,
+        &req,
+        &raw_plugin,
+        &raw_service,
+        ServiceAction::Start,
+    )
+    .await
+}
+
+pub async fn stop(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    process_action(
+        &state,
+        &session,
+        &req,
+        &raw_plugin,
+        &raw_service,
+        ServiceAction::Stop,
+    )
+    .await
+}
+
+pub async fn restart(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    process_action(
+        &state,
+        &session,
+        &req,
+        &raw_plugin,
+        &raw_service,
+        ServiceAction::Restart,
+    )
+    .await
+}
+
+async fn process_action(
+    state: &AppState,
+    session: &Session,
+    req: &HttpRequest,
+    raw_plugin: &str,
+    raw_service: &str,
+    action: ServiceAction,
+) -> Result<HttpResponse, AppError> {
+    let plugin = plugin_from_slug(raw_plugin)?;
+    let service = service_from_slug(raw_service)?;
+    let redirect_to = detail_url(plugin, &service);
+
+    if is_htmx(req) {
+        return start_action_run(
+            state,
+            &format!("{plugin}/{service}"),
+            format!("{} {service}…", action.present_participle()),
+            action.command(plugin, &service),
+            RunCompletion {
+                success_message: format!("Service '{service}' {}.", action.past_tense()),
+                redirect: None,
+                refresh: RunRefresh::None,
+            },
+            Some(format!("/services/{plugin}/{service}/partials/overview")),
+        )
+        .await;
+    }
+
+    match state.dokku.exec(&action.command(plugin, &service)).await {
+        Ok(_) => set_flash(
+            session,
+            FlashLevel::Success,
+            format!("Service '{service}' {}.", action.past_tense()),
+        ),
+        Err(err) => set_flash(
+            session,
+            FlashLevel::Error,
+            format!("Failed to {} service: {err}", action.verb()),
+        ),
+    }
+    Ok(see_other(&redirect_to))
+}
+
+#[derive(Deserialize)]
+pub struct DestroyForm {
+    name: String,
+}
+
+pub async fn destroy(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<DestroyForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+
+    if form.0.name.trim() != service.as_str() {
+        let message = format!("Type `{service}` to confirm destruction.");
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/services/{plugin}/{service}/delete")));
+    }
+
+    let list_url = format!("/services/{plugin}");
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &format!("{plugin}/{service}"),
+            format!("Destroying {service}…"),
+            DokkuCommand::ServiceDestroy {
+                plugin,
+                service: service.clone(),
+                force: true,
+            },
+            RunCompletion {
+                success_message: format!("Service '{service}' destroyed."),
+                redirect: Some(list_url),
+                refresh: RunRefresh::None,
+            },
+            None,
+        )
+        .await;
+    }
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::ServiceDestroy {
+            plugin,
+            service: service.clone(),
+            force: true,
+        })
+        .await
+    {
+        Ok(_) => set_flash(
+            &session,
+            FlashLevel::Success,
+            format!("Service '{service}' destroyed."),
+        ),
+        Err(err) => set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Failed to destroy service: {err}"),
+        ),
+    }
+    Ok(see_other(&list_url))
+}
+
+#[derive(Deserialize)]
+pub struct ExposeForm {
+    ports: String,
+}
+
+pub async fn expose(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<ExposeForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    let ports = form.0.ports.trim().to_owned();
+
+    if ports.is_empty()
+        || ports
+            .chars()
+            .any(|c| !(c.is_ascii_digit() || c == '.' || c == ':'))
+    {
+        let message = "Enter a port, or an address and port (e.g. `127.0.0.1:5432`).".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&detail_url(plugin, &service)));
+    }
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &format!("{plugin}/{service}"),
+            format!("Exposing {service}…"),
+            DokkuCommand::ServiceExpose {
+                plugin,
+                service: service.clone(),
+                ports: ports.clone(),
+            },
+            RunCompletion {
+                success_message: format!("Service '{service}' exposed on {ports}."),
+                redirect: None,
+                refresh: RunRefresh::None,
+            },
+            Some(format!("/services/{plugin}/{service}/partials/overview")),
+        )
+        .await;
+    }
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::ServiceExpose {
+            plugin,
+            service: service.clone(),
+            ports,
+        })
+        .await
+    {
+        Ok(_) => set_flash(
+            &session,
+            FlashLevel::Success,
+            format!("Service '{service}' exposed."),
+        ),
+        Err(err) => set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Failed to expose service: {err}"),
+        ),
+    }
+    Ok(see_other(&detail_url(plugin, &service)))
+}
+
+pub async fn unexpose(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    let redirect_to = detail_url(plugin, &service);
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &format!("{plugin}/{service}"),
+            format!("Unexposing {service}…"),
+            DokkuCommand::ServiceUnexpose {
+                plugin,
+                service: service.clone(),
+            },
+            RunCompletion {
+                success_message: format!("Service '{service}' unexposed."),
+                redirect: None,
+                refresh: RunRefresh::None,
+            },
+            Some(format!("/services/{plugin}/{service}/partials/overview")),
+        )
+        .await;
+    }
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::ServiceUnexpose {
+            plugin,
+            service: service.clone(),
+        })
+        .await
+    {
+        Ok(_) => set_flash(
+            &session,
+            FlashLevel::Success,
+            format!("Service '{service}' unexposed."),
+        ),
+        Err(err) => set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Failed to unexpose service: {err}"),
+        ),
+    }
+    Ok(see_other(&redirect_to))
+}
+
+#[derive(Deserialize)]
+pub struct LinkForm {
+    app: String,
+}
+
+pub async fn link(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<LinkForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+
+    let app = match AppName::try_from(form.0.app.trim()) {
+        Ok(app) => app,
+        Err(err) => {
+            let message = format!("Invalid app name: {err}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/services/{plugin}/{service}/links")));
+        }
+    };
+    let links_url = format!("/services/{plugin}/{service}/links");
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &format!("{plugin}/{service}"),
+            format!("Linking {service} to {app}…"),
+            DokkuCommand::ServiceLink {
+                plugin,
+                service: service.clone(),
+                app: app.clone(),
+            },
+            RunCompletion {
+                success_message: format!("Linked '{service}' to '{app}'."),
+                redirect: None,
+                refresh: RunRefresh::None,
+            },
+            Some(format!("/services/{plugin}/{service}/partials/links")),
+        )
+        .await;
+    }
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::ServiceLink {
+            plugin,
+            service: service.clone(),
+            app: app.clone(),
+        })
+        .await
+    {
+        Ok(_) => set_flash(
+            &session,
+            FlashLevel::Success,
+            format!("Linked '{service}' to '{app}'."),
+        ),
+        Err(err) => set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Failed to link service: {err}"),
+        ),
+    }
+    Ok(see_other(&links_url))
+}
+
+pub async fn unlink(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<LinkForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+
+    let app = match AppName::try_from(form.0.app.trim()) {
+        Ok(app) => app,
+        Err(err) => {
+            let message = format!("Invalid app name: {err}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/services/{plugin}/{service}/links")));
+        }
+    };
+    let links_url = format!("/services/{plugin}/{service}/links");
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &format!("{plugin}/{service}"),
+            format!("Unlinking {service} from {app}…"),
+            DokkuCommand::ServiceUnlink {
+                plugin,
+                service: service.clone(),
+                app: app.clone(),
+            },
+            RunCompletion {
+                success_message: format!("Unlinked '{service}' from '{app}'."),
+                redirect: None,
+                refresh: RunRefresh::None,
+            },
+            Some(format!("/services/{plugin}/{service}/partials/links")),
+        )
+        .await;
+    }
+
+    match state
+        .dokku
+        .exec(&DokkuCommand::ServiceUnlink {
+            plugin,
+            service: service.clone(),
+            app: app.clone(),
+        })
+        .await
+    {
+        Ok(_) => set_flash(
+            &session,
+            FlashLevel::Success,
+            format!("Unlinked '{service}' from '{app}'."),
+        ),
+        Err(err) => set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Failed to unlink service: {err}"),
+        ),
+    }
+    Ok(see_other(&links_url))
+}

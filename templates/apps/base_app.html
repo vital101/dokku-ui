@@ -28,11 +28,5 @@
 </nav>
 {% block app_content %}{% endblock %}
 
-<div data-modal-overlay class="fixed inset-0 z-50 items-center justify-center bg-slate-950/70 p-4">
-  <div data-modal-card
-       class="w-full max-w-2xl overflow-hidden rounded-lg border border-slate-700 bg-slate-900 shadow-xl">
-    <div id="modal-content" data-modal-body></div>
-  </div>
-</div>
-<script src="/static/js/actions.js" defer></script>
+{% include "partials/modal.html" %}
 {% endblock %}

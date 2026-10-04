@@ -65,6 +65,12 @@ impl server::Handler for FakeDokku {
                 )?;
                 session.exit_status_request(channel, 0)?;
             }
+            // The empty string in the middle is the follow-flag placeholder;
+            // quoting must preserve it so docker gets `--tail 200`.
+            "redis:logs candid '' 200" => {
+                session.data(channel, "1:M ready\n")?;
+                session.exit_status_request(channel, 0)?;
+            }
             "ps:restart myapp" => {
                 session.data(channel, "-----> restarting\n")?;
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -337,6 +343,29 @@ async fn mutating_actions_run_without_a_timeout() {
         .expect("actions are not timed out");
     assert_eq!(output.exit_code, 0);
     assert_eq!(output.stdout, "-----> stopped\n");
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn service_logs_preserves_the_empty_positional_flag() {
+    let (addr, server, _connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+    let output = client
+        .exec(&DokkuCommand::ServiceLogs {
+            plugin: dokku_ui::domain::ServicePlugin::try_from("redis").expect("plugin"),
+            service: dokku_ui::domain::ServiceName::try_from("candid").expect("service"),
+            num_lines: 200,
+        })
+        .await
+        .expect("service logs succeed");
+
+    assert_eq!(output.stdout, "1:M ready\n");
 
     server.abort();
 }

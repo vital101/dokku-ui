@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Volumes — Dokku UI{% endblock %}
+{% block heading %}Volumes{% endblock %}
+
+{% block content %}
+<p class="text-sm text-slate-400">
+  Persistent host directories and docker volumes mounted into apps via <span class="font-mono">storage:mount</span>.
+</p>
+
+<div id="app-panel" class="mt-6"
+     hx-get="/volumes/partials/list"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  {% include "partials/loading.html" %}
+</div>
+
+{% include "partials/modal.html" %}
+{% endblock %}

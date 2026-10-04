@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}{{ plugin.display_name() }} services — Dokku UI{% endblock %}
+{% block heading %}{{ plugin.display_name() }} services{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between">
+  <p class="text-sm text-slate-400">Datastore services provided by the {{ plugin }} plugin.</p>
+  <a href="/services/{{ plugin }}/new"
+     class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+    New service
+  </a>
+</div>
+
+<div id="app-panel" class="mt-6"
+     hx-get="/services/{{ plugin }}/partials/list"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  {% include "partials/loading.html" %}
+</div>
+{% endblock %}
