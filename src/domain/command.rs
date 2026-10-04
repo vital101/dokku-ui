@@ -1,6 +1,15 @@
 use crate::domain::AppName;
 use crate::domain::types::ScaleEntry;
 
+/// How long a command may run. See [`DokkuCommand::timeout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandTimeout {
+    /// Bounded by the client default (`COMMAND_TIMEOUT_SECS`).
+    Default,
+    /// No timeout: the run ends when the command (or the connection) does.
+    Indefinite,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DokkuCommand {
     AppsList,
@@ -147,13 +156,22 @@ impl DokkuCommand {
         }
     }
 
-    /// Commands that trigger a deploy/rebuild can outlast the global command
-    /// timeout; this returns a longer per-command ceiling where needed.
-    pub fn timeout_override_secs(&self) -> Option<u64> {
+    /// Timeout policy for this command.
+    ///
+    /// Mutating actions the user watches stream in the run modal have **no
+    /// timeout**: builds can take many minutes, and the SSH keepalive
+    /// surfaces dead connections instead of a timer. Everything else (reports,
+    /// config, logs, lists) is bounded by the client default
+    /// (`COMMAND_TIMEOUT_SECS`) so panel fetches can never hang.
+    pub fn timeout(&self) -> CommandTimeout {
         match self {
-            DokkuCommand::PsScaleSet { .. } => Some(120),
-            DokkuCommand::PsRebuild { .. } => Some(300),
-            _ => None,
+            DokkuCommand::PsStart { .. }
+            | DokkuCommand::PsStop { .. }
+            | DokkuCommand::PsRestart { .. }
+            | DokkuCommand::PsRebuild { .. }
+            | DokkuCommand::PsScaleSet { .. }
+            | DokkuCommand::AppsDestroy { .. } => CommandTimeout::Indefinite,
+            _ => CommandTimeout::Default,
         }
     }
 }
@@ -341,26 +359,61 @@ mod tests {
     }
 
     #[test]
-    fn timeout_override_only_for_long_commands() {
-        assert_eq!(
-            DokkuCommand::PsRebuild { app: app("myapp") }.timeout_override_secs(),
-            Some(300)
-        );
-        assert_eq!(
+    fn mutating_actions_run_without_a_timeout() {
+        for command in [
+            DokkuCommand::PsStart { app: app("myapp") },
+            DokkuCommand::PsStop { app: app("myapp") },
+            DokkuCommand::PsRestart { app: app("myapp") },
+            DokkuCommand::PsRebuild { app: app("myapp") },
             DokkuCommand::PsScaleSet {
                 app: app("myapp"),
                 scales: vec![ScaleEntry::new("web", 1)],
-            }
-            .timeout_override_secs(),
-            Some(120)
-        );
+            },
+            DokkuCommand::AppsDestroy {
+                app: app("myapp"),
+                force: true,
+            },
+        ] {
+            assert_eq!(
+                command.timeout(),
+                CommandTimeout::Indefinite,
+                "{command:?} streams in the run modal"
+            );
+        }
+    }
+
+    #[test]
+    fn read_commands_use_the_default_timeout() {
         for command in [
             DokkuCommand::AppsList,
+            DokkuCommand::AppsCreate { app: app("myapp") },
+            DokkuCommand::AppsReport { app: app("myapp") },
             DokkuCommand::PsReport { app: app("myapp") },
             DokkuCommand::PsScaleGet { app: app("myapp") },
             DokkuCommand::PsInspect { app: app("myapp") },
+            DokkuCommand::ConfigShow { app: app("myapp") },
+            DokkuCommand::Logs {
+                app: app("myapp"),
+                num_lines: 200,
+            },
+            DokkuCommand::BuildsReport { app: app("myapp") },
+            DokkuCommand::DomainsReport { app: app("myapp") },
+            DokkuCommand::ResourceReport { app: app("myapp") },
+            DokkuCommand::ServiceInfo {
+                plugin: "postgres".into(),
+                service: "db".into(),
+            },
+            DokkuCommand::PluginList,
+            DokkuCommand::AppLinks {
+                plugin: "postgres".into(),
+                app: app("myapp"),
+            },
         ] {
-            assert_eq!(command.timeout_override_secs(), None, "{command:?}");
+            assert_eq!(
+                command.timeout(),
+                CommandTimeout::Default,
+                "{command:?} stays bounded"
+            );
         }
     }
 

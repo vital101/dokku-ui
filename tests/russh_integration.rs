@@ -72,6 +72,17 @@ impl server::Handler for FakeDokku {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 session.exit_status_request(channel, 0)?;
             }
+            // Slow commands used by the timeout tests: both outlast a 1s
+            // default timeout, but only the read command is expected to die.
+            "ps:stop myapp" => {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                session.data(channel, "-----> stopped\n")?;
+                session.exit_status_request(channel, 0)?;
+            }
+            "apps:report myapp --format json" => {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                session.exit_status_request(channel, 0)?;
+            }
             _ => {
                 session.extended_data(channel, 1, "unknown command\n")?;
                 session.exit_status_request(channel, 1)?;
@@ -83,6 +94,14 @@ impl server::Handler for FakeDokku {
 }
 
 async fn client(addr: std::net::SocketAddr, key_path: &std::path::Path) -> RusshClient {
+    client_with_timeout(addr, key_path, 30).await
+}
+
+async fn client_with_timeout(
+    addr: std::net::SocketAddr,
+    key_path: &std::path::Path,
+    timeout_secs: u64,
+) -> RusshClient {
     let mut vars = HashMap::new();
     vars.insert("DOKKU_HOST".to_owned(), addr.ip().to_string());
     vars.insert("DOKKU_SSH_PORT".to_owned(), addr.port().to_string());
@@ -91,6 +110,7 @@ async fn client(addr: std::net::SocketAddr, key_path: &std::path::Path) -> Russh
         "DOKKU_SSH_KEY_PATH".to_owned(),
         key_path.display().to_string(),
     );
+    vars.insert("COMMAND_TIMEOUT_SECS".to_owned(), timeout_secs.to_string());
     let settings = Settings::from_map(&vars).expect("settings");
     RusshClient::new(&settings)
 }
@@ -285,6 +305,38 @@ async fn exec_streaming_forwards_output_as_it_arrives() {
         chunks.len() >= 2,
         "output forwarded in separate chunks: {chunks:?}"
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn mutating_actions_run_without_a_timeout() {
+    let (addr, server, _connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client_with_timeout(addr, &key_path, 1).await;
+    let app = dokku_ui::domain::AppName::try_from("myapp").expect("app name");
+
+    // A read command slower than the 1s default still times out.
+    let err = client
+        .exec(&DokkuCommand::AppsReport { app: app.clone() })
+        .await
+        .expect_err("read commands keep the default timeout");
+    assert!(matches!(
+        err,
+        dokku_ui::dokku::DokkuError::Timeout { secs: 1 }
+    ));
+
+    // An action command slower than the default runs to completion.
+    let output = client
+        .exec(&DokkuCommand::PsStop { app })
+        .await
+        .expect("actions are not timed out");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, "-----> stopped\n");
 
     server.abort();
 }

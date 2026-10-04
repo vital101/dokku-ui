@@ -8,7 +8,7 @@ use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
 use russh::keys::{PublicKeyOrCertificate, decode_secret_key, key::PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
 
-use crate::domain::command::DokkuCommand;
+use crate::domain::command::{CommandTimeout, DokkuCommand};
 use crate::settings::Settings;
 
 use super::client::{DokkuClient, DokkuError, DokkuOutput};
@@ -181,11 +181,35 @@ impl RusshClient {
         }
     }
 
-    fn command_timeout(&self, command: &DokkuCommand) -> Duration {
-        command
-            .timeout_override_secs()
-            .map(Duration::from_secs)
-            .unwrap_or(self.timeout)
+    fn command_timeout(&self, command: &DokkuCommand) -> Option<Duration> {
+        match command.timeout() {
+            CommandTimeout::Default => Some(self.timeout),
+            CommandTimeout::Indefinite => None,
+        }
+    }
+
+    /// Runs `command`, optionally streaming output chunks to `sink`. Action
+    /// commands have no timeout; the rest are bounded by `COMMAND_TIMEOUT_SECS`.
+    async fn execute(
+        &self,
+        command: &DokkuCommand,
+        sink: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<DokkuOutput, DokkuError> {
+        let remote_command = command.argv().join(" ");
+        let timeout = self.command_timeout(command);
+        let fut = self.run_command(&remote_command, sink);
+        match timeout {
+            Some(secs) => match tokio::time::timeout(secs, fut).await {
+                Ok(result) => result,
+                Err(_) => {
+                    self.invalidate_session().await;
+                    Err(DokkuError::Timeout {
+                        secs: secs.as_secs(),
+                    })
+                }
+            },
+            None => fut.await,
+        }
     }
 
     fn load_key(path: &Path) -> Result<PrivateKeyWithHashAlg, DokkuError> {
@@ -212,17 +236,7 @@ fn finalize(output: DokkuOutput) -> Result<DokkuOutput, DokkuError> {
 #[async_trait]
 impl DokkuClient for RusshClient {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError> {
-        let remote_command = command.argv().join(" ");
-        let timeout = self.command_timeout(command);
-        match tokio::time::timeout(timeout, self.run_command(&remote_command, None)).await {
-            Ok(result) => result,
-            Err(_) => {
-                self.invalidate_session().await;
-                Err(DokkuError::Timeout {
-                    secs: timeout.as_secs(),
-                })
-            }
-        }
+        self.execute(command, None).await
     }
 
     async fn exec_streaming(
@@ -230,17 +244,7 @@ impl DokkuClient for RusshClient {
         command: &DokkuCommand,
         sink: tokio::sync::mpsc::Sender<String>,
     ) -> Result<DokkuOutput, DokkuError> {
-        let remote_command = command.argv().join(" ");
-        let timeout = self.command_timeout(command);
-        match tokio::time::timeout(timeout, self.run_command(&remote_command, Some(sink))).await {
-            Ok(result) => result,
-            Err(_) => {
-                self.invalidate_session().await;
-                Err(DokkuError::Timeout {
-                    secs: timeout.as_secs(),
-                })
-            }
-        }
+        self.execute(command, Some(sink)).await
     }
 }
 

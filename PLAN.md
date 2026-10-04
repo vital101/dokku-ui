@@ -224,7 +224,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS th
 ### russh client (isolated)
 - Connect: `DOKKU_SSH_USER@DOKKU_HOST:DOKKU_SSH_PORT`, ed25519 key from `DOKKU_SSH_KEY_PATH` (OpenSSH/PEM formats accepted).
 - **Persistent SSH session**: the client keeps one authenticated connection alive (keepalive 30s) and opens one channel per command; stale sessions are detected (`is_closed`/transport errors) and reconnected transparently. (v1 shipped one session per command; bursts of ~15 connections per dashboard load tripped the host's ufw rate limit on port 22, so pooling was pulled forward.)
-- Collect stdout/stderr, read exit status, 30s timeout via `tokio::time::timeout` (`COMMAND_TIMEOUT_SECS`).
+- Collect stdout/stderr, read exit status. Read commands (reports, config, logs, lists) are bounded by `tokio::time::timeout` at `COMMAND_TIMEOUT_SECS`; mutating actions (`ps:start/stop/restart/rebuild`, `ps:scale`, `apps:destroy`) have **no timeout** (`CommandTimeout::Indefinite`) — long builds stream to completion and the SSH keepalive surfaces dead connections instead of a timer.
 - Host key policy: accept-on-first-use into `known_hosts`-style file at `DOKKU_SSH_HOST_KEYS_PATH`; optional pre-pinned file works read-only.
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.
 - A background refresher (`SnapshotStore` + `spawn_refresher`) keeps a cheap in-memory snapshot of the whole host (app list + `ps:report` + `apps:report`, fetched concurrently with 4 permits over the persistent SSH session) on a **30-minute** cadence (`SNAPSHOT_REFRESH_SECS`, default 1800). The heavier per-app details (builds, domains, service links, DNS) are **not** fetched in the background. The dashboard serves from the snapshot (`Arc` clone, no IO), the first request after boot falls back to one synchronous refresh, and a **"Refresh data"** button (`POST /refresh`) forces a fresh pass on demand. After start/stop/restart/scale/create only that app's cheap ps/apps reports are re-fetched (`refresh_app_reports`) before redirecting; the overview fragment then fetches the app's details on demand, so an action click no longer pays for two full detail passes. Destroy triggers a full refresh. A miss (app not listed) triggers a live `apps:list` fallback before 404ing, covering apps created via the CLI within the staleness window. Refresh failures keep the last good snapshot and log a warning. dokku boots its plugin system per command (~750ms), so keeping the background pass small is what keeps host load down. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
@@ -252,7 +252,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS th
 | `DATABASE_URL` | `sqlite://dev-data/dokku-ui.db` | `sqlite:///app/data/dokku-ui.db` | sqlx SQLite |
 | `SECRET_KEY` | dev value committed | Dokku config secret | actix-session cookie signing (≥32 bytes hex) |
 | `SESSION_TTL_SECS` | 604800 | — | |
-| `COMMAND_TIMEOUT_SECS` | 30 | — | SSH exec timeout |
+| `COMMAND_TIMEOUT_SECS` | 30 | — | SSH exec timeout for read commands; mutating actions are unbounded |
 | `SNAPSHOT_REFRESH_SECS` | 1800 | — | background snapshot refresh interval (positive; 30 min) |
 | `COOKIE_SECURE` | false | true | Secure flag |
 | `RUST_LOG` | `dokku_ui=debug,tower? n/a` | `info` | tracing filter |
@@ -398,8 +398,8 @@ Extends the per-app UI with deep runtime detail, read from the same
   (plain-text report). DSNs are never parsed or rendered; the card shows status,
   version, exposed ports, internal IP, container ID, and linked apps.
 - **Rebuild action** (`POST /apps/{name}/rebuild`): reuses the start/stop/
-  restart action path; long commands get a per-command timeout override
-  (`PsRebuild` 300s, `PsScaleSet` 120s). All actions stream their output into
+  restart action path. Mutating actions run without a timeout so long builds
+  stream to completion. All actions stream their output into
   the modal (see §8), and scale validation failures render a modal error card
   instead of a redirect.
 - **Overview enrichment**: last build (`builds:report`), vhost list
