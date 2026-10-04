@@ -11,6 +11,21 @@
   display: flex;
 }
 
+/* Run mode: a near-fullscreen output window with a scrolling log that fills
+   the remaining space (set by actions.js when the swapped content has a run). */
+[data-modal-overlay][data-run-open] [data-modal-card] {
+  display: flex;
+  flex-direction: column;
+  max-width: 72rem;
+  height: calc(100vh - 2rem);
+}
+[data-modal-overlay][data-run-open] [data-modal-body] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0%;
+  min-height: 0;
+}
+
 .app-action {
   position: relative;
 }

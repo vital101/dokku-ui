@@ -307,6 +307,8 @@ async fn show_shell_renders_htmx_panel_tabs_and_actions() {
     assert!(body.contains(r##"hx-target="#modal-content""##));
     assert!(body.contains("data-action-form"));
     assert!(body.contains("data-modal-overlay"));
+    assert!(body.contains("data-modal-card"));
+    assert!(body.contains("data-modal-body"));
     assert!(body.contains(r#"id="modal-content""#));
     assert!(
         body.contains(r#"hx-get="/apps/alpha/partials/delete-confirm""#),

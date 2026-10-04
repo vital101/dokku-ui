@@ -30,7 +30,10 @@
 
   function closeModal() {
     var o = overlay();
-    if (o) o.removeAttribute("data-open");
+    if (o) {
+      o.removeAttribute("data-open");
+      o.removeAttribute("data-run-open");
+    }
     var c = modalContent();
     if (c) c.innerHTML = "";
   }
@@ -120,18 +123,30 @@
     };
   }
 
-  document.body.addEventListener("htmx:beforeRequest", function (event) {
-    var elt = event.detail.elt;
-    if (elt && elt.matches && elt.matches("[data-action-form]")) {
-      setBusy(pendingButton);
-    }
-  });
+  // Native submit (captured before htmx's own handler): fires for every
+  // data-action-form submission — button click or Enter key — regardless of
+  // how htmx shapes its event details.
+  document.addEventListener(
+    "submit",
+    function (event) {
+      var form = event.target;
+      if (form && form.matches && form.matches("[data-action-form]")) {
+        setBusy(pendingButton);
+      }
+    },
+    true
+  );
 
   document.body.addEventListener("htmx:afterSwap", function (event) {
     var target = event.detail.target;
     if (!target || target.id !== "modal-content") return;
-    openModal();
+    var o = overlay();
     var run = target.querySelector("[data-run]");
+    if (o) {
+      if (run) o.setAttribute("data-run-open", "");
+      else o.removeAttribute("data-run-open");
+    }
+    openModal();
     if (run) {
       startRun(run);
     } else {
