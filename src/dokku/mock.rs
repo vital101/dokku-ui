@@ -147,4 +147,33 @@ mod tests {
         let output = client.exec(&DokkuCommand::AppsList).await.expect("default");
         assert_eq!(output.exit_code, 0);
     }
+
+    #[tokio::test]
+    async fn default_exec_streaming_emits_stdout_in_one_chunk() {
+        let client = MockClient::new().stub(DokkuCommand::AppsList, Ok(DokkuOutput::ok("hello\n")));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+        let output = client
+            .exec_streaming(&DokkuCommand::AppsList, tx)
+            .await
+            .expect("streamed");
+
+        assert_eq!(output.stdout, "hello\n");
+        assert_eq!(rx.recv().await.as_deref(), Some("hello\n"));
+        assert!(rx.recv().await.is_none(), "channel closed after exec");
+    }
+
+    #[tokio::test]
+    async fn default_exec_streaming_propagates_errors_without_emitting() {
+        let client = MockClient::new().stub(DokkuCommand::AppsList, Err(exit_error(1, "boom")));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+        assert!(
+            client
+                .exec_streaming(&DokkuCommand::AppsList, tx)
+                .await
+                .is_err()
+        );
+        assert!(rx.recv().await.is_none());
+    }
 }

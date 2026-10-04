@@ -25,6 +25,7 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
         settings: settings.clone(),
         dokku: client,
         snapshot,
+        action_runs: Arc::new(dokku::ActionRuns::new()),
     };
     actix_web::HttpServer::new(move || web::build_app(state.clone()))
         .bind(("0.0.0.0", settings.port))?

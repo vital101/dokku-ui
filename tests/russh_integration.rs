@@ -65,6 +65,13 @@ impl server::Handler for FakeDokku {
                 )?;
                 session.exit_status_request(channel, 0)?;
             }
+            "ps:restart myapp" => {
+                session.data(channel, "-----> restarting\n")?;
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                session.data(channel, "-----> done\n")?;
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                session.exit_status_request(channel, 0)?;
+            }
             _ => {
                 session.extended_data(channel, 1, "unknown command\n")?;
                 session.exit_status_request(channel, 1)?;
@@ -246,6 +253,37 @@ async fn concurrent_commands_share_one_connection() {
         connections.load(Ordering::SeqCst),
         1,
         "all concurrent commands multiplex over one connection"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn exec_streaming_forwards_output_as_it_arrives() {
+    let (addr, server, _connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+    let app = dokku_ui::domain::AppName::try_from("myapp").expect("app name");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+    let output = client
+        .exec_streaming(&DokkuCommand::PsRestart { app }, tx)
+        .await
+        .expect("restart succeeds");
+
+    let mut chunks = Vec::new();
+    while let Some(chunk) = rx.recv().await {
+        chunks.push(chunk);
+    }
+    assert_eq!(chunks.concat(), "-----> restarting\n-----> done\n");
+    assert_eq!(output.stdout, "-----> restarting\n-----> done\n");
+    assert!(
+        chunks.len() >= 2,
+        "output forwarded in separate chunks: {chunks:?}"
     );
 
     server.abort();

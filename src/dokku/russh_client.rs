@@ -98,7 +98,11 @@ impl RusshClient {
         }
     }
 
-    async fn run_command(&self, command: &str) -> Result<DokkuOutput, DokkuError> {
+    async fn run_command(
+        &self,
+        command: &str,
+        sink: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<DokkuOutput, DokkuError> {
         let session = self.session_handle().await?;
         let channel = match session.channel_open_session().await {
             Ok(channel) => channel,
@@ -112,7 +116,7 @@ impl RusshClient {
             }
         };
 
-        let output = match Self::exec_on_channel(channel, command).await {
+        let output = match Self::exec_on_channel(channel, command, sink).await {
             Ok(output) => output,
             Err(err) => {
                 self.invalidate_if_current(&session).await;
@@ -125,6 +129,7 @@ impl RusshClient {
     async fn exec_on_channel(
         mut channel: russh::Channel<russh::client::Msg>,
         command: &str,
+        sink: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<DokkuOutput, DokkuError> {
         channel
             .exec(true, command)
@@ -137,10 +142,18 @@ impl RusshClient {
         while let Some(msg) = channel.wait().await {
             match msg {
                 ChannelMsg::Data { data } => {
-                    stdout.push_str(&String::from_utf8_lossy(&data));
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    stdout.push_str(&text);
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(text).await;
+                    }
                 }
                 ChannelMsg::ExtendedData { data, .. } => {
-                    stderr.push_str(&String::from_utf8_lossy(&data));
+                    let text = String::from_utf8_lossy(&data).into_owned();
+                    stderr.push_str(&text);
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(text).await;
+                    }
                 }
                 ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
                 _ => {}
@@ -168,6 +181,13 @@ impl RusshClient {
         }
     }
 
+    fn command_timeout(&self, command: &DokkuCommand) -> Duration {
+        command
+            .timeout_override_secs()
+            .map(Duration::from_secs)
+            .unwrap_or(self.timeout)
+    }
+
     fn load_key(path: &Path) -> Result<PrivateKeyWithHashAlg, DokkuError> {
         let secret = std::fs::read_to_string(path).map_err(|err| DokkuError::KeyLoad {
             path: path.to_path_buf(),
@@ -193,11 +213,26 @@ fn finalize(output: DokkuOutput) -> Result<DokkuOutput, DokkuError> {
 impl DokkuClient for RusshClient {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError> {
         let remote_command = command.argv().join(" ");
-        let timeout = command
-            .timeout_override_secs()
-            .map(Duration::from_secs)
-            .unwrap_or(self.timeout);
-        match tokio::time::timeout(timeout, self.run_command(&remote_command)).await {
+        let timeout = self.command_timeout(command);
+        match tokio::time::timeout(timeout, self.run_command(&remote_command, None)).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.invalidate_session().await;
+                Err(DokkuError::Timeout {
+                    secs: timeout.as_secs(),
+                })
+            }
+        }
+    }
+
+    async fn exec_streaming(
+        &self,
+        command: &DokkuCommand,
+        sink: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<DokkuOutput, DokkuError> {
+        let remote_command = command.argv().join(" ");
+        let timeout = self.command_timeout(command);
+        match tokio::time::timeout(timeout, self.run_command(&remote_command, Some(sink))).await {
             Ok(result) => result,
             Err(_) => {
                 self.invalidate_session().await;

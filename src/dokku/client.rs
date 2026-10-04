@@ -40,4 +40,21 @@ pub enum DokkuError {
 #[async_trait]
 pub trait DokkuClient: Send + Sync {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError>;
+
+    /// Executes `command`, forwarding output chunks to `sink` as they arrive.
+    ///
+    /// The default implementation falls back to `exec` and emits the complete
+    /// stdout as a single chunk, so mock and test clients inherit it unchanged.
+    /// `RusshClient` overrides this with true chunk-by-chunk streaming.
+    async fn exec_streaming(
+        &self,
+        command: &DokkuCommand,
+        sink: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<DokkuOutput, DokkuError> {
+        let output = self.exec(command).await?;
+        if !output.stdout.is_empty() {
+            let _ = sink.send(output.stdout.clone()).await;
+        }
+        Ok(output)
+    }
 }

@@ -124,6 +124,14 @@ pub fn build_app(
             "/apps/{name}/partials/logs",
             web::get().to(apps::logs_partial),
         )
+        .route(
+            "/apps/{name}/partials/delete-confirm",
+            web::get().to(apps::delete_confirm_modal),
+        )
+        .route(
+            "/apps/{name}/actions/runs/{id}/events",
+            web::get().to(apps::action_events),
+        )
         .service(
             web::resource("/apps/{name}/delete")
                 .route(web::get().to(apps::delete_confirm))

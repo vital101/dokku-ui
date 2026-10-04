@@ -2,3 +2,59 @@
 
 @source "../templates";
 @source "../src";
+
+/* App action modal + run streaming (see static/js/actions.js) */
+[data-modal-overlay] {
+  display: none;
+}
+[data-modal-overlay][data-open] {
+  display: flex;
+}
+
+.app-action {
+  position: relative;
+}
+.app-action[data-disabled] {
+  pointer-events: none;
+  opacity: 0.5;
+}
+.app-action[data-busy] > .app-action-label {
+  visibility: hidden;
+}
+.app-action[data-busy]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 1rem;
+  height: 1rem;
+  margin: -0.5rem 0 0 -0.5rem;
+  border: 2px solid rgb(148 163 184 / 0.5);
+  border-top-color: currentColor;
+  border-radius: 9999px;
+  animation: app-action-spin 0.8s linear infinite;
+}
+@keyframes app-action-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+[data-run-outcome][data-state="ok"] {
+  background: rgb(16 185 129 / 0.1);
+  border-color: rgb(16 185 129 / 0.3);
+  color: #6ee7b7;
+}
+[data-run-outcome][data-state="error"] {
+  background: rgb(239 68 68 / 0.1);
+  border-color: rgb(239 68 68 / 0.3);
+  color: #fca5a5;
+}
+[data-run-outcome][data-state="ok"]::before {
+  content: "✓ ";
+  font-weight: 600;
+}
+[data-run-outcome][data-state="error"]::before {
+  content: "✗ ";
+  font-weight: 600;
+}

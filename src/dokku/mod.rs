@@ -1,3 +1,4 @@
+pub mod action_runs;
 pub mod app_pages;
 pub mod client;
 pub mod dashboard;
@@ -8,6 +9,7 @@ pub mod processes;
 pub mod russh_client;
 pub mod snapshot;
 
+pub use action_runs::{ActionRun, ActionRuns, RunOutcome};
 pub use app_pages::{
     app_config, app_containers, app_formation, app_logs, app_resources, app_service_links,
     service_info,

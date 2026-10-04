@@ -11,7 +11,7 @@ use actix_web::http::header::{CONTENT_TYPE, LOCATION};
 use actix_web::test;
 
 use dokku_ui::auth::password::hash_password;
-use dokku_ui::dokku::{DokkuClient, FakeResolver, MockClient, SnapshotStore};
+use dokku_ui::dokku::{ActionRuns, DokkuClient, FakeResolver, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
@@ -52,6 +52,7 @@ pub async fn test_state_with_shared_client(
             settings,
             dokku,
             snapshot,
+            action_runs: Arc::new(ActionRuns::new()),
         },
         client_arc,
         dir,

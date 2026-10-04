@@ -10,36 +10,46 @@
   </div>
 
   <div class="flex gap-3">
-    <form method="post" action="/apps/{{ name }}/start">
+    <form method="post" action="/apps/{{ name }}/start"
+          hx-post="/apps/{{ name }}/start" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
-              class="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-        Start
+              class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+        <span class="app-action-label">Start</span>
       </button>
     </form>
-    <form method="post" action="/apps/{{ name }}/stop">
+    <form method="post" action="/apps/{{ name }}/stop"
+          hx-post="/apps/{{ name }}/stop" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
-              class="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700">
-        Stop
+              class="app-action rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700">
+        <span class="app-action-label">Stop</span>
       </button>
     </form>
-    <form method="post" action="/apps/{{ name }}/restart">
+    <form method="post" action="/apps/{{ name }}/restart"
+          hx-post="/apps/{{ name }}/restart" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
-              class="rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600">
-        Restart
+              class="app-action rounded-md bg-slate-700 px-4 py-2 text-sm font-medium text-white hover:bg-slate-600">
+        <span class="app-action-label">Restart</span>
       </button>
     </form>
-    <form method="post" action="/apps/{{ name }}/rebuild">
+    <form method="post" action="/apps/{{ name }}/rebuild"
+          hx-post="/apps/{{ name }}/rebuild" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit"
-              class="rounded-md bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600">
-        Rebuild
+              class="app-action rounded-md bg-sky-700 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600">
+        <span class="app-action-label">Rebuild</span>
       </button>
     </form>
     <a href="/apps/{{ name }}/delete"
-       class="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+       hx-get="/apps/{{ name }}/partials/delete-confirm" hx-target="#modal-content"
+       hx-swap="innerHTML"
+       class="app-action rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
       Delete app
     </a>
   </div>

@@ -8,7 +8,9 @@
     <h3 class="text-sm font-medium text-white">Formation</h3>
 
     {% if scale_note.is_none() %}
-    <form method="post" action="/apps/{{ name }}/scale">
+    <form method="post" action="/apps/{{ name }}/scale"
+          hx-post="/apps/{{ name }}/scale" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     {% endif %}
 
@@ -52,8 +54,8 @@
 
     {% if scale_note.is_none() %}
       <button type="submit"
-              class="mt-4 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-        Apply scale
+              class="app-action mt-4 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+        <span class="app-action-label">Apply scale</span>
       </button>
     </form>
     {% endif %}

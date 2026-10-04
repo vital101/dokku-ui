@@ -194,16 +194,20 @@ DB opened with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreig
 | `/apps/{name}/config` | GET | yes | → app/config.html | `config:show --masked` |
 | `/apps/{name}/logs` | GET | yes | → app/logs.html | `?lines=N` (200 default, 1000 max, min 10); fragment renders lines |
 | `/apps/{name}/partials/{tab}` | GET | yes | `apps::*_partial` | HTMX fragments (overview/processes/services/config/logs) |
+| `/apps/{name}/partials/delete-confirm` | GET | yes | `apps::delete_confirm_modal` | delete-confirmation modal fragment |
+| `/apps/{name}/actions/runs/{id}/events` | GET | yes | `apps::action_events` | SSE stream of a run's output + `done` outcome |
 | `/refresh` | POST | yes | `pages::refresh_now` | manual full snapshot refresh from the dashboard |
-| `/apps/{name}/delete` | GET | yes | → app/delete.html | confirmation page |
+| `/apps/{name}/delete` | GET | yes | → app/delete.html | confirmation page (no-JS fallback) |
 | `/apps/{name}/delete` | POST | yes | `apps::delete` | confirm form input must echo app name |
-| `/apps/{name}/start` | POST | yes | `apps::action` | flash success/error |
+| `/apps/{name}/start` | POST | yes | `apps::action` | HX: streamed run modal; plain: flash + redirect |
 | `/apps/{name}/stop` | POST | yes | `apps::action` | |
 | `/apps/{name}/restart` | POST | yes | `apps::action` | |
+| `/apps/{name}/rebuild` | POST | yes | `apps::action` | |
+| `/apps/{name}/scale` | POST | yes | `apps::scale` | HX: streamed run modal; plain: flash + redirect |
 | `/static/*` | GET | no | actix-files | immutable cache headers, content-hash names |
 | `404/500` | — | — | error.html | via `AppError: ResponseError` |
 
-All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: every action is a plain form + server redirect; confirmations are pages, not JS dialogs. App-tab data loading is HTMX (shell renders first, fragments fill in); without JS the shells still show nav and actions, just no data.
+All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS the forms POST and redirect with a flash, and delete uses the standalone confirmation page. With JS, action forms post via htmx into a modal that streams the command's output over SSE (buttons disable while a run is in flight), and delete opens a confirmation dialog first. App-tab data loading is HTMX (shell renders first, fragments fill in); without JS the shells still show nav and actions, just no data.
 
 ## 8. Dokku integration
 
@@ -225,13 +229,14 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: every action 
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.
 - A background refresher (`SnapshotStore` + `spawn_refresher`) keeps a cheap in-memory snapshot of the whole host (app list + `ps:report` + `apps:report`, fetched concurrently with 4 permits over the persistent SSH session) on a **30-minute** cadence (`SNAPSHOT_REFRESH_SECS`, default 1800). The heavier per-app details (builds, domains, service links, DNS) are **not** fetched in the background. The dashboard serves from the snapshot (`Arc` clone, no IO), the first request after boot falls back to one synchronous refresh, and a **"Refresh data"** button (`POST /refresh`) forces a fresh pass on demand. After start/stop/restart/scale/create only that app's cheap ps/apps reports are re-fetched (`refresh_app_reports`) before redirecting; the overview fragment then fetches the app's details on demand, so an action click no longer pays for two full detail passes. Destroy triggers a full refresh. A miss (app not listed) triggers a live `apps:list` fallback before 404ing, covering apps created via the CLI within the staleness window. Refresh failures keep the last good snapshot and log a warning. dokku boots its plugin system per command (~750ms), so keeping the background pass small is what keeps host load down. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
 - **App pages load on demand**: every `/apps/{name}/*` route renders an instant shell (nav, action buttons, skeleton) and each tab's data is fetched by an HTMX fragment request to `/apps/{name}/partials/{tab}`. The overview fragment calls `SnapshotStore::refresh_app` (ps/apps report + builds/domains/links/DNS for that one app); processes/config/logs query dokku directly; services fetches links live (`plugin:list` + `app links`). Failed fragments render a small retry card (HTTP 200) instead of a full-page error.
+- **Streamed action runs**: start/stop/restart/rebuild/scale/destroy execute as an `ActionRuns` job. The handler responds instantly with a run fragment; `static/js/actions.js` opens an `EventSource` on `/apps/{name}/actions/runs/{id}/events`, which replays buffered output and follows the run until a `done` event (`{ok, message, redirect}`). Output is line-buffered server-side; `DokkuClient::exec_streaming` forwards SSH chunks as they arrive (`RusshClient`, same timeout semantics as `exec`; the trait default emits stdout as one chunk so mocks need no changes). Finished runs are retained 5 minutes so a page reload mid-run replays the log; the SSE response sets `X-Accel-Buffering: no` so nginx does not buffer it. On success the run task refreshes the snapshot (`refresh_app_reports`, or a full refresh after destroy) while the browser swaps in the outcome banner and refreshes the current tab fragment.
 
 ## 9. Templates & UI
 
 - `base.html`: fixed sidebar (Dashboard; App list; per-app nav: Overview, Config, Logs) + topbar (user email, logout) + flash partial (success/error banners).
 - Pages listed in §7. Askama derive structs (`#[derive(Template)] #[template(path = "app/show.html")]`) hold plain domain types — templates can't do logic beyond simple display, which keeps HTML pure.
 - Tailwind: `assets/input.css` → `static/css/app.css` (watch in dev via css service, minified in prod build). Content scan covers `templates/**` and `src/**/*.rs` (badge classes built in Rust).
-- HTMX 2.0.4 (vendored at `static/js/htmx.min.js`, `defer` in `base.html`): app-tab pages are shells with `hx-get`/`hx-trigger="load"` skeletons, and the logs line-count form re-fetches the fragment via `hx-include`. No inline scripts, so the existing CSP keeps working; htmx's auto-injected indicator `<style>` tag is disabled via a `htmx-config` meta tag because `style-src 'self'` (no `unsafe-inline`) would block it. Fragments always answer 200 — failures (including "app was deleted") swap in a retry card, since htmx does not swap 4xx/5xx responses and the skeleton would spin forever. Vendored rather than CDN so the UI works offline/self-hosted; the prod Dockerfile copies the whole `static/` tree. Dark palette, clean tables, status badges (green/red/gray) — Dokku Pro-like.
+- HTMX 2.0.4 (vendored at `static/js/htmx.min.js`, `defer` in `base.html`): app-tab pages are shells with `hx-get`/`hx-trigger="load"` skeletons, and the logs line-count form re-fetches the fragment via `hx-include`. No inline scripts, so the existing CSP keeps working; htmx's auto-injected indicator `<style>` tag is disabled via a `htmx-config` meta tag because `style-src 'self'` (no `unsafe-inline`) would block it. Fragments always answer 200 — failures (including "app was deleted") swap in a retry card, since htmx does not swap 4xx/5xx responses and the skeleton would spin forever. Actions post into `#modal-content` (overlay lives in `apps/base_app.html`): all `.app-action` controls disable during a run and the clicked one spins (CSS in `assets/input.css`); `static/js/actions.js` (external, CSP-safe) consumes the SSE stream, shows the green/red outcome banner, refreshes the current fragment via `htmx.ajax`, and navigates home when the `done` payload carries a redirect (destroy). Vendored rather than CDN so the UI works offline/self-hosted; the prod Dockerfile copies the whole `static/` tree. Dark palette, clean tables, status badges (green/red/gray) — Dokku Pro-like.
 - Security headers middleware: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self' data:`.
 
 ## 10. Configuration (env)
@@ -394,7 +399,9 @@ Extends the per-app UI with deep runtime detail, read from the same
   version, exposed ports, internal IP, container ID, and linked apps.
 - **Rebuild action** (`POST /apps/{name}/rebuild`): reuses the start/stop/
   restart action path; long commands get a per-command timeout override
-  (`PsRebuild` 300s, `PsScaleSet` 120s).
+  (`PsRebuild` 300s, `PsScaleSet` 120s). All actions stream their output into
+  the modal (see §8), and scale validation failures render a modal error card
+  instead of a redirect.
 - **Overview enrichment**: last build (`builds:report`), vhost list
   (`domains:report`), and full linked-service list — fetched live for that app
   when the overview fragment loads (`SnapshotStore::refresh_app`), never by the

@@ -1,15 +1,20 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use actix_session::Session;
-use actix_web::{HttpResponse, web};
+use actix_web::web::Bytes;
+use actix_web::{HttpRequest, HttpResponse, web};
 use askama::Template;
+use futures_util::Stream;
+use futures_util::stream::unfold;
 use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::dokku::{
-    ContainerRow, ProcessRow, SnapshotError, app_config, app_containers, app_formation, app_logs,
-    app_resources, app_service_links, container_rows, format_age, formation_rows,
-    overview_from_snapshot, parse_scale_form, service_info,
+    ActionRun, ContainerRow, ProcessRow, RunOutcome, SnapshotError, app_config, app_containers,
+    app_formation, app_logs, app_resources, app_service_links, container_rows, format_age,
+    formation_rows, overview_from_snapshot, parse_scale_form, service_info,
 };
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
@@ -155,6 +160,28 @@ struct ErrorPartial<'a> {
     retry_url: String,
 }
 
+#[derive(Template)]
+#[template(path = "apps/partials/run.html")]
+struct RunPartial<'a> {
+    name: &'a str,
+    run_id: u64,
+    title: String,
+    refresh_url: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/modal_error.html")]
+struct ModalErrorPartial<'a> {
+    message: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/delete_confirm_modal.html")]
+struct DeleteConfirmModalPartial<'a> {
+    name: &'a str,
+    csrf_token: &'a str,
+}
+
 fn partial_url(name: &str, tab: &str, query: Option<&str>) -> String {
     match query {
         Some(query) => format!("/apps/{name}/partials/{tab}?{query}"),
@@ -191,6 +218,159 @@ fn fragment_for_resolve_error(
     } else {
         error_fragment(retry_url, &err.to_string())
     }
+}
+
+enum RunRefresh {
+    Reports,
+    All,
+}
+
+struct RunCompletion {
+    success_message: String,
+    redirect: Option<String>,
+    refresh: RunRefresh,
+}
+
+/// Starts `command`, streaming its output into `run` line by line. On completion
+/// refreshes the snapshot and records the outcome the SSE stream delivers.
+fn spawn_run(
+    state: AppState,
+    run: Arc<ActionRun>,
+    command: DokkuCommand,
+    completion: RunCompletion,
+) {
+    tokio::spawn(async move {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+        let line_run = run.clone();
+        let line_task = tokio::spawn(async move {
+            let mut partial = String::new();
+            while let Some(chunk) = rx.recv().await {
+                partial.push_str(&chunk);
+                while let Some(pos) = partial.find('\n') {
+                    let line: String = partial.drain(..=pos).collect();
+                    line_run
+                        .append_line(line.trim_end_matches(['\n', '\r']).to_owned())
+                        .await;
+                }
+            }
+            let rest = partial.trim_end_matches(['\n', '\r']);
+            if !rest.is_empty() {
+                line_run.append_line(rest.to_owned()).await;
+            }
+        });
+
+        let result = state.dokku.exec_streaming(&command, tx).await;
+        let _ = line_task.await;
+
+        let outcome = match result {
+            Ok(_) => {
+                match completion.refresh {
+                    RunRefresh::Reports => {
+                        if let Err(err) = state.snapshot.refresh_app_reports(&run.app).await {
+                            tracing::warn!(error = %err, "snapshot refresh after action failed");
+                        }
+                    }
+                    RunRefresh::All => {
+                        if let Err(err) = state.snapshot.refresh().await {
+                            tracing::warn!(error = %err, "snapshot refresh after destroy failed");
+                        }
+                    }
+                }
+                RunOutcome {
+                    ok: true,
+                    message: completion.success_message,
+                    redirect: completion.redirect,
+                }
+            }
+            Err(err) => RunOutcome {
+                ok: false,
+                message: err.to_string(),
+                redirect: None,
+            },
+        };
+        run.finish(outcome).await;
+    });
+}
+
+fn is_htmx(req: &HttpRequest) -> bool {
+    req.headers().contains_key("HX-Request")
+}
+
+fn modal_error(message: impl Into<String>) -> Result<HttpResponse, AppError> {
+    let message = message.into();
+    let page = ModalErrorPartial { message: &message };
+    render(&page)
+}
+
+/// Registers a run, spawns the command, and returns the streaming modal fragment.
+async fn start_action_run(
+    state: &AppState,
+    name: &str,
+    title: String,
+    command: DokkuCommand,
+    completion: RunCompletion,
+    refresh_url: Option<String>,
+) -> Result<HttpResponse, AppError> {
+    let run = state.action_runs.insert(name).await;
+    spawn_run(state.clone(), run.clone(), command, completion);
+    render(&RunPartial {
+        name,
+        run_id: run.id,
+        title,
+        refresh_url,
+    })
+}
+
+const SSE_KEEPALIVE: Duration = Duration::from_secs(10);
+
+/// Replays buffered output, then follows the run until it finishes. Emits
+/// `line` events for output and one `done` event carrying the JSON outcome.
+fn action_stream(run: Arc<ActionRun>) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
+    let follower = run.subscribe();
+    unfold(
+        (run, 0usize, follower, false),
+        |(run, mut cursor, mut follower, done_sent)| async move {
+            if done_sent {
+                return None;
+            }
+            loop {
+                let (lines, outcome) = run.poll(&mut cursor).await;
+                if !lines.is_empty() {
+                    return Some((Ok(line_events(&lines)), (run, cursor, follower, false)));
+                }
+                if let Some(outcome) = outcome {
+                    return Some((Ok(done_event(&outcome)), (run, cursor, follower, true)));
+                }
+                match tokio::time::timeout(SSE_KEEPALIVE, follower.changed()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(_)) => return None,
+                    Err(_) => {
+                        return Some((
+                            Ok(Bytes::from_static(b": keepalive\n\n")),
+                            (run, cursor, follower, false),
+                        ));
+                    }
+                }
+            }
+        },
+    )
+}
+
+fn line_events(lines: &[String]) -> Bytes {
+    let mut body = String::new();
+    for line in lines {
+        body.push_str("event: line\ndata: ");
+        body.push_str(line);
+        body.push_str("\n\n");
+    }
+    Bytes::from(body)
+}
+
+fn done_event(outcome: &RunOutcome) -> Bytes {
+    let data = serde_json::to_string(outcome).unwrap_or_else(|_| {
+        r#"{"ok":false,"message":"failed to serialize outcome","redirect":null}"#.to_owned()
+    });
+    Bytes::from(format!("event: done\ndata: {data}\n\n"))
 }
 
 async fn current_user(
@@ -515,16 +695,28 @@ fn scale_note(
 pub async fn scale(
     state: web::Data<AppState>,
     session: Session,
+    req: HttpRequest,
     path: web::Path<String>,
     form: CsrfForm<std::collections::HashMap<String, String>>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
+    let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            if is_htmx(&req) {
+                return modal_error(err.to_string());
+            }
+            return Err(err.into());
+        }
+    };
     let redirect_to = format!("/apps/{name}/processes");
 
     let formation = match app_formation(&*state.dokku, app.clone()).await {
         Ok(formation) => formation,
         Err(err) => {
+            if is_htmx(&req) {
+                return modal_error(format!("Failed to read current scale: {err}"));
+            }
             set_flash(
                 &session,
                 FlashLevel::Error,
@@ -537,10 +729,32 @@ pub async fn scale(
     let entries = match parse_scale_form(&formation, &form.0) {
         Ok(entries) => entries,
         Err(err) => {
+            if is_htmx(&req) {
+                return modal_error(err.to_string());
+            }
             set_flash(&session, FlashLevel::Error, err.to_string());
             return Ok(see_other(&redirect_to));
         }
     };
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &name,
+            format!("Scaling {name}…"),
+            DokkuCommand::PsScaleSet {
+                app,
+                scales: entries,
+            },
+            RunCompletion {
+                success_message: format!("Scaled '{name}'."),
+                redirect: None,
+                refresh: RunRefresh::Reports,
+            },
+            Some(format!("/apps/{name}/partials/processes")),
+        )
+        .await;
+    }
 
     match state
         .dokku
@@ -648,6 +862,7 @@ pub async fn delete_confirm(
 pub async fn destroy(
     state: web::Data<AppState>,
     session: Session,
+    req: HttpRequest,
     form: CsrfForm<DestroyForm>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
@@ -656,6 +871,9 @@ pub async fn destroy(
     let app = match AppName::try_from(name.clone()) {
         Ok(app) => app,
         Err(err) => {
+            if is_htmx(&req) {
+                return modal_error(format!("Invalid app name: {err}"));
+            }
             set_flash(
                 &session,
                 FlashLevel::Error,
@@ -666,12 +884,31 @@ pub async fn destroy(
     };
 
     if form.0.name.trim() != name {
+        if is_htmx(&req) {
+            return modal_error(format!("Type `{name}` to confirm deletion."));
+        }
         set_flash(
             &session,
             FlashLevel::Error,
             format!("Type `{name}` to confirm deletion."),
         );
         return Ok(see_other(&format!("/apps/{}/delete", name)));
+    }
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &name,
+            format!("Deleting {name}…"),
+            DokkuCommand::AppsDestroy { app, force: true },
+            RunCompletion {
+                success_message: format!("App '{name}' destroyed."),
+                redirect: Some("/".to_owned()),
+                refresh: RunRefresh::All,
+            },
+            None,
+        )
+        .await;
     }
 
     match state
@@ -699,6 +936,42 @@ pub async fn destroy(
             Ok(see_other(&format!("/apps/{}/delete", name)))
         }
     }
+}
+
+pub async fn delete_confirm_modal(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+    state.snapshot.resolve_app(&name).await?;
+    let csrf_token = ensure_csrf(&session).await?;
+
+    render(&DeleteConfirmModalPartial {
+        name: &name,
+        csrf_token: &csrf_token,
+    })
+}
+
+pub async fn action_events(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, u64)>,
+) -> Result<HttpResponse, AppError> {
+    let (name, id) = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let run = state.action_runs.get(id).await.ok_or(AppError::NotFound)?;
+    if run.app != name {
+        return Err(AppError::NotFound);
+    }
+
+    Ok(HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-store"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(action_stream(run)))
 }
 
 #[derive(Deserialize)]
@@ -736,6 +1009,15 @@ impl AppAction {
         }
     }
 
+    fn present_participle(self) -> &'static str {
+        match self {
+            AppAction::Start => "Starting",
+            AppAction::Stop => "Stopping",
+            AppAction::Restart => "Restarting",
+            AppAction::Rebuild => "Rebuilding",
+        }
+    }
+
     fn command(self, app: AppName) -> DokkuCommand {
         match self {
             AppAction::Start => DokkuCommand::PsStart { app },
@@ -749,48 +1031,70 @@ impl AppAction {
 pub async fn start(
     state: web::Data<AppState>,
     session: Session,
+    req: HttpRequest,
     path: web::Path<String>,
     _form: CsrfForm<ActionForm>,
 ) -> Result<HttpResponse, AppError> {
-    process_action(&state, &session, path.into_inner(), AppAction::Start).await
+    process_action(&state, &session, &req, path.into_inner(), AppAction::Start).await
 }
 
 pub async fn stop(
     state: web::Data<AppState>,
     session: Session,
+    req: HttpRequest,
     path: web::Path<String>,
     _form: CsrfForm<ActionForm>,
 ) -> Result<HttpResponse, AppError> {
-    process_action(&state, &session, path.into_inner(), AppAction::Stop).await
+    process_action(&state, &session, &req, path.into_inner(), AppAction::Stop).await
 }
 
 pub async fn restart(
     state: web::Data<AppState>,
     session: Session,
+    req: HttpRequest,
     path: web::Path<String>,
     _form: CsrfForm<ActionForm>,
 ) -> Result<HttpResponse, AppError> {
-    process_action(&state, &session, path.into_inner(), AppAction::Restart).await
+    process_action(
+        &state,
+        &session,
+        &req,
+        path.into_inner(),
+        AppAction::Restart,
+    )
+    .await
 }
 
 pub async fn rebuild(
     state: web::Data<AppState>,
     session: Session,
+    req: HttpRequest,
     path: web::Path<String>,
     _form: CsrfForm<ActionForm>,
 ) -> Result<HttpResponse, AppError> {
-    process_action(&state, &session, path.into_inner(), AppAction::Rebuild).await
+    process_action(
+        &state,
+        &session,
+        &req,
+        path.into_inner(),
+        AppAction::Rebuild,
+    )
+    .await
 }
 
 async fn process_action(
     state: &AppState,
     session: &Session,
+    req: &HttpRequest,
     name: String,
     action: AppAction,
 ) -> Result<HttpResponse, AppError> {
     let app = match AppName::try_from(name.clone()) {
         Ok(app) => app,
         Err(err) => {
+            if is_htmx(req) {
+                return modal_error(format!("Invalid app name: {err}"));
+            }
             set_flash(
                 session,
                 FlashLevel::Error,
@@ -799,6 +1103,22 @@ async fn process_action(
             return Ok(see_other("/"));
         }
     };
+
+    if is_htmx(req) {
+        return start_action_run(
+            state,
+            &name,
+            format!("{} {}…", action.present_participle(), name),
+            action.command(app),
+            RunCompletion {
+                success_message: format!("App '{name}' {}.", action.past_tense()),
+                redirect: None,
+                refresh: RunRefresh::Reports,
+            },
+            Some(format!("/apps/{name}/partials/overview")),
+        )
+        .await;
+    }
 
     match state.dokku.exec(&action.command(app.clone())).await {
         Ok(_) => {

@@ -12,7 +12,7 @@ use common::{
 };
 
 use dokku_ui::dokku::{
-    DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient, SnapshotStore,
+    ActionRuns, DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient, SnapshotStore,
 };
 use dokku_ui::domain::AppName;
 use dokku_ui::domain::command::DokkuCommand;
@@ -78,6 +78,7 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
             settings,
             dokku,
             snapshot,
+            action_runs: Arc::new(ActionRuns::new()),
         },
         client_arc,
         dir,
@@ -110,6 +111,8 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         "/apps/alpha/partials/services",
         "/apps/alpha/partials/config",
         "/apps/alpha/partials/logs",
+        "/apps/alpha/partials/delete-confirm",
+        "/apps/alpha/actions/runs/1/events",
     ] {
         let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -297,6 +300,19 @@ async fn show_shell_renders_htmx_panel_tabs_and_actions() {
         body.contains("border-emerald-500"),
         "active tab highlighted"
     );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/restart""#),
+        "actions post via htmx"
+    );
+    assert!(body.contains(r##"hx-target="#modal-content""##));
+    assert!(body.contains("data-action-form"));
+    assert!(body.contains("data-modal-overlay"));
+    assert!(body.contains(r#"id="modal-content""#));
+    assert!(
+        body.contains(r#"hx-get="/apps/alpha/partials/delete-confirm""#),
+        "delete opens the confirmation modal"
+    );
+    assert!(body.contains("/static/js/actions.js"));
 }
 
 #[tokio::test]
@@ -1831,4 +1847,345 @@ async fn partials_render_not_found_fragment_for_unknown_app() {
         }),
         "no per-tab detail commands for unknown app"
     );
+}
+
+fn hx_form_request(path: &str, body: String) -> actix_web::test::TestRequest {
+    form_request(path, body).insert_header(("HX-Request", "true"))
+}
+
+async fn shell_csrf<B, E>(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse<B>,
+        Error = E,
+    >,
+    cookie: &actix_web::cookie::Cookie<'static>,
+) -> String
+where
+    B: actix_web::body::MessageBody,
+    E: std::fmt::Debug,
+{
+    let resp = test::call_service(
+        app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    extract_csrf(&get_body(resp).await)
+}
+
+async fn sse_events<B, E>(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse<B>,
+        Error = E,
+    >,
+    uri: &str,
+    cookie: &actix_web::cookie::Cookie<'static>,
+) -> (StatusCode, String)
+where
+    B: actix_web::body::MessageBody,
+    E: std::fmt::Debug,
+{
+    let resp = test::call_service(
+        app,
+        test::TestRequest::get()
+            .uri(uri)
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let status = resp.status();
+    (status, get_body(resp).await)
+}
+
+#[tokio::test]
+async fn hx_restart_returns_run_fragment_and_streams_output() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::PsRestart {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("-----> restarting\n-----> done\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/restart", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains(r#"data-run-url="/apps/alpha/actions/runs/1/events""#),
+        "run fragment points at the SSE stream: {body}"
+    );
+    assert!(body.contains(r#"data-refresh="/apps/alpha/partials/overview""#));
+    assert!(body.contains("Restarting alpha"));
+    assert!(body.contains("data-run-log"));
+    assert!(!body.contains("<!doctype html>"), "fragment, not a page");
+
+    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        events.contains("event: line\ndata: -----> restarting\n\n"),
+        "{events}"
+    );
+    assert!(
+        events.contains("event: line\ndata: -----> done\n\n"),
+        "{events}"
+    );
+    assert!(events.contains("event: done\n"), "{events}");
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(events.contains("restarted"), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::PsRestart {
+            app: app_name("alpha")
+        }),
+        "the action ran"
+    );
+}
+
+#[tokio::test]
+async fn hx_action_failure_streams_error_outcome() {
+    let (state, _client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::PsStart {
+            app: app_name("alpha"),
+        },
+        Err(exit_error(1, "no such app")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/start", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Starting alpha"), "{body}");
+
+    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.contains(r#""ok":false"#), "{events}");
+    assert!(events.contains("no such app"), "{events}");
+}
+
+#[tokio::test]
+async fn hx_scale_validation_error_returns_modal_error() {
+    let (state, client, _dir) = harness(processes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/scale",
+            format!("csrf_token={csrf}&scale_web=999"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+    assert!(body.contains("between 0 and 100"), "{body}");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::PsScaleSet { .. })),
+        "no scale command for out-of-range value"
+    );
+}
+
+#[tokio::test]
+async fn hx_scale_returns_run_fragment_targeting_processes() {
+    let (state, client, _dir) = harness(processes_client().stub(
+        DokkuCommand::PsScaleSet {
+            app: app_name("alpha"),
+            scales: vec![dokku_ui::domain::types::ScaleEntry::new("web", 2)],
+        },
+        Ok(DokkuOutput::ok("-----> scaling web\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/scale",
+            format!("csrf_token={csrf}&scale_web=2"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains(r#"data-refresh="/apps/alpha/partials/processes""#),
+        "{body}"
+    );
+    assert!(body.contains("Scaling alpha"), "{body}");
+
+    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(events.contains("Scaled"), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::PsScaleSet {
+            app: app_name("alpha"),
+            scales: vec![dokku_ui::domain::types::ScaleEntry::new("web", 2)],
+        }),
+        "scale ran"
+    );
+}
+
+#[tokio::test]
+async fn hx_destroy_requires_name_echo_before_starting_a_run() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/delete", format!("csrf_token={csrf}&name=beta"))
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+    assert!(body.contains("Type `alpha` to confirm deletion."), "{body}");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, DokkuCommand::AppsDestroy { .. })),
+        "no destroy before the name is echoed"
+    );
+}
+
+#[tokio::test]
+async fn hx_destroy_streams_and_redirects_home_on_done() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::AppsDestroy {
+            app: app_name("alpha"),
+            force: true,
+        },
+        Ok(DokkuOutput::ok("-----> deleting alpha\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/delete",
+            format!("csrf_token={csrf}&name=alpha"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Deleting alpha"), "{body}");
+    assert!(
+        !body.contains("data-refresh"),
+        "destroy has no fragment to refresh"
+    );
+
+    let (status, events) = sse_events(&app, "/apps/alpha/actions/runs/1/events", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(events.contains(r#""redirect":"/""#), "{events}");
+    assert!(events.contains("destroyed"), "{events}");
+    assert!(client.calls().contains(&DokkuCommand::AppsDestroy {
+        app: app_name("alpha"),
+        force: true,
+    }));
+}
+
+#[tokio::test]
+async fn delete_confirm_modal_renders_form_and_404s_unknown_app() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/delete-confirm")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains(r#"hx-post="/apps/alpha/delete""#), "{body}");
+    assert!(body.contains("data-action-form"), "{body}");
+    assert!(body.contains(r#"name="name""#), "{body}");
+    assert!(body.contains(r#"name="csrf_token""#), "{body}");
+    assert!(!body.contains("<!doctype html>"), "fragment, not a page");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/nope/partials/delete-confirm")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn action_events_404s_unknown_run_and_other_apps() {
+    let (state, _client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::PsRestart {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let (status, _) = sse_events(&app, "/apps/alpha/actions/runs/99/events", &cookie).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown run");
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/restart", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, _) = sse_events(&app, "/apps/beta/actions/runs/1/events", &cookie).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "run belongs to another app");
 }
