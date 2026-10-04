@@ -57,6 +57,10 @@
     </span>
   </div>
 
+  <div hx-get="/volumes/partials/disk-summary"
+       hx-trigger="load"
+       hx-swap="innerHTML"></div>
+
   {% if mounted_apps.is_empty() %}
   <div class="rounded-lg border border-dashed border-slate-800 p-10 text-center">
     <p class="text-sm text-slate-400">No volumes are mounted to any app.</p>
@@ -75,6 +79,7 @@
           <th class="px-4 py-3">Container path</th>
           <th class="px-4 py-3">Options</th>
           <th class="px-4 py-3">Phases</th>
+          <th class="px-4 py-3">Usage</th>
           <th class="px-4 py-3"></th>
         </tr>
       </thead>
@@ -84,14 +89,24 @@
           <td class="px-4 py-3 font-mono text-xs text-white">{{ mount.host }}</td>
           <td class="px-4 py-3 font-mono text-xs text-slate-300">{{ mount.container }}</td>
           <td class="px-4 py-3 text-xs text-slate-300">{% if mount.options.is_empty() %}—{% else %}{{ mount.options }}{% endif %}</td>
-          <td class="px-4 py-3 text-xs text-slate-300">{{ mount.phases_label() }}</td>
+          <td class="px-4 py-3 text-xs text-slate-300">{{ mount.phases_label }}</td>
+          <td class="px-4 py-3 text-xs text-slate-300">
+            {% if let Some(entry) = mount.entry %}
+            <span hx-get="/volumes/partials/usage?entry={{ entry }}"
+                  hx-trigger="load" hx-swap="innerHTML">
+              <span class="inline-block h-3 w-12 animate-pulse rounded bg-slate-800"></span>
+            </span>
+            {% else %}
+            —
+            {% endif %}
+          </td>
           <td class="px-4 py-3 text-right">
             <form method="post" action="/volumes/unmount"
                   hx-post="/volumes/unmount" hx-target="#modal-content" hx-swap="innerHTML"
                   data-action-form>
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="app" value="{{ app.app }}">
-              <input type="hidden" name="spec" value="{{ mount.locator() }}">
+              <input type="hidden" name="spec" value="{{ mount.locator }}">
               <button type="submit"
                       class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
                 <span class="app-action-label">Unmount</span>

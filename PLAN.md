@@ -462,5 +462,16 @@ Redis, MongoDB) plus app bind mounts.
 - **Fixtures.** Service-list/log and storage-report fixtures are synthetic but
   source-verified against dokku-redis 1.42.1 and dokku `v0.38.4`; re-capture
   from the live host next session (see `tests/fixtures/README.md`).
+- **Stats (no native dokku command).** The service Overview tab lazily loads a
+  Resources card (`/services/{plugin}/{service}/partials/stats`): memory
+  working set (`memory.current − inactive_file`, docker-stats parity) against
+  the container limit or host total, sampled CPU % (~1s, normalized by cores)
+  plus cumulative CPU time, data-dir `du` and host-filesystem `df`. The fixed
+  read-only script runs through `<plugin>:enter`; a stopped container renders a
+  "not running" state. The Volumes page maps each mount to its
+  `legacy-<hash>` entry via `storage:list-entries --format json` and lazy-loads
+  per-row usage via `storage:exec` (throwaway `alpine:3`, entry at `/data`),
+  plus a host-disk summary card. Everything degrades to `—`; failures never
+  block the page.
 - **Deferred:** named storage entries (`storage:create/destroy/info`), service
   clone/promote/backups, pause, per-app storage tab.

@@ -1,7 +1,8 @@
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::types::{
     AppInfo, AppMounts, BuildInfo, ContainerDetails, EnvVar, ImageStatus, LogLines, Mount,
-    ProcessState, ProcessStatus, PsReport, ResourceReport, ScaleEntry, ServiceInfo,
+    ProcessState, ProcessStatus, PsReport, ResourceReport, ScaleEntry, ServiceInfo, ServiceStats,
+    StorageEntry, VolumeUsage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -476,6 +477,91 @@ fn normalize_report_value(raw: &str) -> String {
     }
 }
 
+/// The fixed stats scripts emit `key=value` lines. Service plugins print a
+/// `-----> Filesystem changes…` banner first and `storage:exec` may carry
+/// docker pull noise on stderr; anything that is not a bare `key=value` line
+/// is skipped.
+fn parse_key_values(output: &str) -> std::collections::HashMap<String, String> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .filter_map(|line| {
+            let line = line.trim();
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() || key.contains(char::is_whitespace) {
+                return None;
+            }
+            Some((key.to_owned(), value.trim().to_owned()))
+        })
+        .collect()
+}
+
+/// `<plugin>:enter <service> sh -c '<stats script>'` -> live container
+/// stats. `None` when nothing recognisable was emitted (e.g. an error
+/// banner only); missing individual keys stay `None`.
+pub fn parse_service_stats(output: &str) -> Option<ServiceStats> {
+    let kv = parse_key_values(output);
+    let num = |key: &str| kv.get(key).and_then(|value| value.parse::<u64>().ok());
+    let float = |key: &str| kv.get(key).and_then(|value| value.parse::<f64>().ok());
+
+    let stats = ServiceStats {
+        host_memory_total_kb: num("host_mem_total_kb"),
+        host_memory_available_kb: num("host_mem_avail_kb"),
+        memory_current_bytes: num("mem_current"),
+        // `memory.max` prints `max` for an unlimited container.
+        memory_limit_bytes: num("mem_limit"),
+        inactive_file_bytes: num("inactive_file"),
+        cpu_delta_usec: num("cpu_delta_usec"),
+        cpu_total_usec: num("cpu_total_usec"),
+        elapsed_secs: float("elapsed_s"),
+        cpus: num("cpus"),
+        data_kb: num("data_kb"),
+        fs_total_kb: num("fs_total_kb"),
+        fs_used_kb: num("fs_used_kb"),
+        fs_avail_kb: num("fs_avail_kb"),
+    };
+    (!stats.is_empty()).then_some(stats)
+}
+
+/// `storage:exec <entry> -- sh -c '<usage script>'` -> disk usage for the
+/// entry mounted at `/data`.
+pub fn parse_volume_usage(output: &str) -> Option<VolumeUsage> {
+    let kv = parse_key_values(output);
+    let num = |key: &str| kv.get(key).and_then(|value| value.parse::<u64>().ok());
+
+    let usage = VolumeUsage {
+        used_kb: num("used_kb"),
+        fs_total_kb: num("fs_total_kb"),
+        fs_used_kb: num("fs_used_kb"),
+        fs_avail_kb: num("fs_avail_kb"),
+    };
+    (!usage.is_empty()).then_some(usage)
+}
+
+/// `storage:list-entries --format json` -> registered entries, used to map a
+/// mount's host path onto the entry name `storage:exec` needs. Unknown fields
+/// are ignored; malformed JSON yields an empty list.
+pub fn parse_storage_entries(json: &str) -> Vec<StorageEntry> {
+    #[derive(serde::Deserialize)]
+    struct RawEntry {
+        name: String,
+        host_path: String,
+    }
+
+    serde_json::from_str::<Vec<RawEntry>>(json)
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| StorageEntry {
+                    name: entry.name,
+                    host_path: entry.host_path,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn parse_config_show(output: &str) -> Vec<EnvVar> {
     output
         .lines()
@@ -563,6 +649,9 @@ mod tests {
     const STORAGE_REPORT: &str = include_str!("../../tests/fixtures/storage_report.txt");
     const STORAGE_REPORT_EMPTY: &str =
         include_str!("../../tests/fixtures/storage_report_empty.txt");
+    const REDIS_STATS: &str = include_str!("../../tests/fixtures/redis_stats.txt");
+    const VOLUME_USAGE: &str = include_str!("../../tests/fixtures/volume_usage.txt");
+    const LIST_ENTRIES: &str = include_str!("../../tests/fixtures/list_entries.json");
 
     #[test]
     fn parses_apps_list_fixture() {
@@ -1143,16 +1232,24 @@ mod tests {
     #[test]
     fn parses_storage_report_fixture() {
         let apps = parse_storage_report(STORAGE_REPORT);
-        assert_eq!(apps.len(), 2);
-        assert_eq!(apps[0].app, "dokku-ui");
-        assert_eq!(apps[0].mount_count(), 1);
-        let mount = &apps[0].mounts[0];
-        assert_eq!(mount.host, "/var/lib/dokku/data/storage/dokku-ui");
+        assert_eq!(apps.len(), 14);
+
+        let dokku_ui = apps
+            .iter()
+            .find(|app| app.app == "dokku-ui")
+            .expect("dokku-ui");
+        assert_eq!(dokku_ui.mount_count(), 1);
+        let mount = &dokku_ui.mounts[0];
+        assert_eq!(mount.host, "/var/lib/dokku/data/services/dokku-ui");
         assert_eq!(mount.container, "/app/data");
         assert_eq!(mount.options, "");
         assert_eq!(mount.phases, vec!["deploy", "run"]);
-        assert_eq!(apps[1].app, "starwars");
-        assert!(apps[1].is_empty());
+
+        let starwars = apps
+            .iter()
+            .find(|app| app.app == "starwars")
+            .expect("starwars");
+        assert!(starwars.is_empty());
     }
 
     #[test]
@@ -1198,5 +1295,119 @@ mod tests {
             parse_storage_report("Storage deploy mounts: -v /a:/b\n"),
             Vec::<AppMounts>::new()
         );
+    }
+
+    #[test]
+    fn parses_service_stats_fixture() {
+        let stats = parse_service_stats(REDIS_STATS).expect("stats");
+        assert_eq!(stats.host_memory_total_kb, Some(8_131_800));
+        assert_eq!(stats.memory_current_bytes, Some(9_748_480));
+        assert_eq!(stats.memory_limit_bytes, None, "`max` means unlimited");
+        assert_eq!(stats.inactive_file_bytes, Some(2_715_648));
+        assert_eq!(stats.cpu_delta_usec, Some(5_122));
+        assert_eq!(stats.cpu_total_usec, Some(23_949_388_167));
+        assert_eq!(stats.elapsed_secs, Some(1.01));
+        assert_eq!(stats.cpus, Some(4));
+        assert_eq!(stats.data_kb, Some(12));
+        assert_eq!(stats.fs_total_kb, Some(162_406_320));
+        assert_eq!(stats.memory_used_label(), "6.7 MiB");
+    }
+
+    #[test]
+    fn service_stats_skips_banner_and_missing_keys() {
+        let output = "-----> Filesystem changes may not persist after container restarts\nnot a kv line\nmem_current=1024\nmem_limit=2048\n";
+        let stats = parse_service_stats(output).expect("stats");
+        assert_eq!(stats.memory_current_bytes, Some(1024));
+        assert_eq!(stats.memory_limit_bytes, Some(2048));
+        assert_eq!(stats.cpus, None);
+        assert_eq!(stats.data_kb, None);
+    }
+
+    #[test]
+    fn service_stats_empty_values_degrade_to_none() {
+        // A cgroup v1 host: the cgroup files are absent, so the script's
+        // command substitutions come back empty rather than 0.
+        let output = "-----> Filesystem changes may not persist after container restarts\nhost_mem_total_kb=8131800\ncpu_delta_usec=\ncpu_total_usec=\n";
+        let stats = parse_service_stats(output).expect("stats");
+        assert_eq!(stats.host_memory_total_kb, Some(8_131_800));
+        assert_eq!(stats.cpu_delta_usec, None, "not a misleading Some(0)");
+        assert_eq!(stats.cpu_total_usec, None);
+        assert_eq!(stats.cpu_percent_label(), "—");
+        assert_eq!(stats.cpu_total_label(), "—");
+    }
+
+    #[test]
+    fn service_stats_garbage_is_none() {
+        assert_eq!(parse_service_stats(""), None);
+        assert_eq!(
+            parse_service_stats("-----> Service container is not running\n"),
+            None
+        );
+        assert_eq!(parse_service_stats("mem_current=not-a-number\n"), None);
+    }
+
+    #[test]
+    fn parses_volume_usage_fixture() {
+        let usage = parse_volume_usage(VOLUME_USAGE).expect("usage");
+        assert_eq!(usage.used_kb, Some(164));
+        assert_eq!(usage.fs_total_kb, Some(162_406_320));
+        assert_eq!(usage.fs_used_kb, Some(132_287_668));
+        assert_eq!(usage.fs_avail_kb, Some(30_102_164));
+    }
+
+    #[test]
+    fn volume_usage_skips_docker_pull_noise() {
+        let output = "Unable to find image 'alpine:3' locally\n3: Pulling from library/alpine\nDigest: sha256:abc\nStatus: Downloaded newer image for alpine:3\nused_kb=10\nfs_total_kb=100\n";
+        let usage = parse_volume_usage(output).expect("usage");
+        assert_eq!(usage.used_kb, Some(10));
+        assert_eq!(usage.fs_total_kb, Some(100));
+        assert_eq!(usage.fs_used_kb, None);
+    }
+
+    #[test]
+    fn volume_usage_garbage_is_none() {
+        assert_eq!(parse_volume_usage(""), None);
+        assert_eq!(
+            parse_volume_usage("docker: Error response from daemon\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_storage_entries_fixture() {
+        let entries = parse_storage_entries(LIST_ENTRIES);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].name, "legacy-151e4f1a23");
+        assert_eq!(
+            entries[0].host_path,
+            "/var/lib/dokku/data/storage/candid/uploads"
+        );
+        assert_eq!(entries[2].name, "legacy-90db719326");
+        assert_eq!(
+            entries[2].host_path,
+            "/var/lib/dokku/data/services/dokku-ui"
+        );
+    }
+
+    #[test]
+    fn storage_entries_ignores_unknown_fields_and_malformed_json() {
+        let entries = parse_storage_entries(
+            r#"[{"name":"e1","host_path":"/h","scheduler":"docker-local","schema_version":1}]"#,
+        );
+        assert_eq!(
+            entries,
+            vec![StorageEntry {
+                name: "e1".into(),
+                host_path: "/h".into()
+            }]
+        );
+        assert_eq!(
+            parse_storage_entries("not json"),
+            Vec::<StorageEntry>::new()
+        );
+        assert_eq!(parse_storage_entries(""), Vec::<StorageEntry>::new());
+        // A row missing a required field fails the whole parse (serde), so
+        // the caller falls back to "no entries".
+        assert!(parse_storage_entries(r#"[{"name":"e1"}]"#).is_empty());
     }
 }

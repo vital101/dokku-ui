@@ -1,0 +1,14 @@
+-----> Filesystem changes may not persist after container restarts
+host_mem_total_kb=8131800
+host_mem_avail_kb=3872192
+mem_current=9748480
+mem_limit=max
+inactive_file=2715648
+elapsed_s=1.01
+cpu_delta_usec=5122
+cpu_total_usec=23949388167
+cpus=4
+data_kb=12
+fs_total_kb=162406320
+fs_used_kb=132162720
+fs_avail_kb=30227216

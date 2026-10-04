@@ -300,6 +300,10 @@ async fn service_overview_partial_renders_details_and_expose_form() {
     assert!(body.contains("candid"), "linked apps");
     assert!(body.contains(r#"hx-post="/services/redis/candid/expose""#));
     assert!(body.contains("Expose"));
+    assert!(
+        body.contains(r#"hx-get="/services/redis/candid/partials/stats""#),
+        "stats card loads lazily: {body}"
+    );
     assert!(!body.contains("redis://"), "dsn never rendered: {body}");
 }
 
@@ -1219,4 +1223,132 @@ async fn destroy_service_non_htmx_flashes_and_redirects_to_list() {
         body.contains("Service &#39;candid&#39; destroyed."),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn service_stats_partial_renders_resource_labels() {
+    let client = MockClient::new().stub(
+        DokkuCommand::ServiceStats {
+            plugin: redis(),
+            service: candid(),
+        },
+        Ok(DokkuOutput::ok(include_str!("fixtures/redis_stats.txt"))),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/stats")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        !body.contains("<!doctype html>"),
+        "fragment, not a full page"
+    );
+    assert!(body.contains("Resources"), "{body}");
+    assert!(body.contains("6.7 MiB"), "{body}");
+    assert!(
+        body.contains("of 7.8 GiB host (3.7 GiB available)"),
+        "{body}"
+    );
+    assert!(body.contains("0.1%"), "{body}");
+    assert!(body.contains("6h 39m total"), "{body}");
+    assert!(body.contains("12 KiB"), "{body}");
+    assert!(body.contains("126.0 GiB used of 154.9 GiB"), "{body}");
+    assert!(body.contains("(28.8 GiB free)"), "{body}");
+    assert!(body.contains("<progress"), "{body}");
+}
+
+#[tokio::test]
+async fn service_stats_partial_not_running_is_a_state() {
+    let client = MockClient::new().stub(
+        DokkuCommand::ServiceStats {
+            plugin: redis(),
+            service: candid(),
+        },
+        Err(exit_error(1, "Service container is not running")),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/stats")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("Service is not running"), "{body}");
+    assert!(!body.contains("Could not load"), "{body}");
+}
+
+#[tokio::test]
+async fn service_stats_partial_failure_returns_retry_card() {
+    let client = MockClient::new().stub(
+        DokkuCommand::ServiceStats {
+            plugin: redis(),
+            service: candid(),
+        },
+        Err(DokkuError::Connect("refused".into())),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/stats")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("Could not load this section."), "{body}");
+    assert!(
+        body.contains(r#"hx-get="/services/redis/candid/partials/stats""#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn service_stats_partial_unrecognised_output_returns_retry_card() {
+    let client = MockClient::new().stub(
+        DokkuCommand::ServiceStats {
+            plugin: redis(),
+            service: candid(),
+        },
+        Ok(DokkuOutput::ok("-----> nothing useful here\n")),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/stats")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("No stats were reported"), "{body}");
 }

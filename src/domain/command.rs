@@ -4,6 +4,43 @@ use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::ScaleEntry;
 
+/// Fixed, read-only stats script executed inside a service container via
+/// `<plugin>:enter <service> sh -c <script>`. Emits `key=value` lines only;
+/// `__DATA_DIR__` is replaced with the plugin's in-container data directory.
+/// Validated against the live host (cgroup v2, host kernel via /proc).
+const SERVICE_STATS_SCRIPT: &str = r#"DD=__DATA_DIR__
+echo "host_mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+echo "host_mem_avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"
+echo "mem_current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"
+echo "mem_limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"
+echo "inactive_file=$(awk '$1=="inactive_file"{print $2}' /sys/fs/cgroup/memory.stat 2>/dev/null)"
+read up1 _ < /proc/uptime
+c1=$(awk '/^usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null)
+sleep 1
+read up2 _ < /proc/uptime
+c2=$(awk '/^usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null)
+echo "elapsed_s=$(awk "BEGIN{print $up2-$up1}")"
+echo "cpu_delta_usec=$( [ -n "$c2" ] && [ -n "$c1" ] && echo $((c2-c1)) )"
+echo "cpu_total_usec=$c2"
+echo "cpus=$(nproc 2>/dev/null)"
+echo "data_kb=$(du -sk $DD 2>/dev/null | cut -f1)"
+echo "fs_total_kb=$(df -Pk $DD | awk 'NR==2{print $2}')"
+echo "fs_used_kb=$(df -Pk $DD | awk 'NR==2{print $3}')"
+echo "fs_avail_kb=$(df -Pk $DD | awk 'NR==2{print $4}')"
+"#;
+
+/// Fixed disk-usage script run via `storage:exec <entry> -- sh -c <script>`
+/// in a throwaway container with the entry mounted at `/data`.
+const VOLUME_USAGE_SCRIPT: &str = r#"echo "used_kb=$(du -sk /data 2>/dev/null | cut -f1)"
+echo "fs_total_kb=$(df -Pk /data | awk 'NR==2{print $2}')"
+echo "fs_used_kb=$(df -Pk /data | awk 'NR==2{print $3}')"
+echo "fs_avail_kb=$(df -Pk /data | awk 'NR==2{print $4}')"
+"#;
+
+fn service_stats_script(data_dir: &str) -> String {
+    SERVICE_STATS_SCRIPT.replace("__DATA_DIR__", data_dir)
+}
+
 /// How long a command may run. See [`DokkuCommand::timeout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandTimeout {
@@ -116,7 +153,15 @@ pub enum DokkuCommand {
         plugin: ServicePlugin,
         service: ServiceName,
     },
+    ServiceStats {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
     StorageReport,
+    StorageListEntries,
+    StorageUsage {
+        entry: String,
+    },
     StorageMount {
         app: AppName,
         mount: MountSpec,
@@ -275,7 +320,27 @@ impl DokkuCommand {
             DokkuCommand::ServiceUnexpose { plugin, service } => {
                 vec![format!("{plugin}:unexpose"), service.as_str().into()]
             }
+            DokkuCommand::ServiceStats { plugin, service } => vec![
+                format!("{plugin}:enter"),
+                service.as_str().into(),
+                "sh".into(),
+                "-c".into(),
+                service_stats_script(plugin.data_dir()),
+            ],
             DokkuCommand::StorageReport => vec!["storage:report".into()],
+            DokkuCommand::StorageListEntries => vec![
+                "storage:list-entries".into(),
+                "--format".into(),
+                "json".into(),
+            ],
+            DokkuCommand::StorageUsage { entry } => vec![
+                "storage:exec".into(),
+                entry.clone(),
+                "--".into(),
+                "sh".into(),
+                "-c".into(),
+                VOLUME_USAGE_SCRIPT.into(),
+            ],
             DokkuCommand::StorageMount { app, mount } => {
                 vec!["storage:mount".into(), app.as_str().into(), mount.arg()]
             }
@@ -626,7 +691,15 @@ mod tests {
                 service: service("cache"),
                 num_lines: 200,
             },
+            DokkuCommand::ServiceStats {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            },
             DokkuCommand::StorageReport,
+            DokkuCommand::StorageListEntries,
+            DokkuCommand::StorageUsage {
+                entry: "legacy-90db719326".into(),
+            },
             DokkuCommand::PluginList,
             DokkuCommand::AppLinks {
                 plugin: "postgres".into(),
@@ -834,5 +907,67 @@ mod tests {
             .argv(),
             vec!["storage:unmount", "myapp", "/host:/data"]
         );
+    }
+
+    #[test]
+    fn service_stats_argv_runs_the_fixed_script() {
+        let argv = DokkuCommand::ServiceStats {
+            plugin: plugin("postgres"),
+            service: service("my-db"),
+        }
+        .argv();
+        assert_eq!(argv[0], "postgres:enter");
+        assert_eq!(argv[1], "my-db");
+        assert_eq!(argv[2], "sh");
+        assert_eq!(argv[3], "-c");
+        assert!(
+            argv[4].contains("DD=/var/lib/postgresql/data"),
+            "{}",
+            argv[4]
+        );
+        assert!(argv[4].contains("memory.current"));
+        assert!(argv[4].contains("cpu.stat"));
+        assert!(argv[4].contains("du -sk $DD"));
+        assert!(argv[4].contains("df -Pk $DD"));
+    }
+
+    #[test]
+    fn service_stats_script_uses_each_plugins_data_dir() {
+        for (plugin_name, expected) in [
+            ("postgres", "DD=/var/lib/postgresql/data"),
+            ("mysql", "DD=/var/lib/mysql"),
+            ("redis", "DD=/data"),
+            ("mongo", "DD=/data/db"),
+        ] {
+            let argv = DokkuCommand::ServiceStats {
+                plugin: plugin(plugin_name),
+                service: service("svc"),
+            }
+            .argv();
+            assert!(argv[4].contains(expected), "{plugin_name}: {}", argv[4]);
+        }
+    }
+
+    #[test]
+    fn storage_list_entries_argv_requests_json() {
+        assert_eq!(
+            DokkuCommand::StorageListEntries.argv(),
+            vec!["storage:list-entries", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn storage_usage_argv_runs_the_fixed_script_in_a_throwaway_container() {
+        let argv = DokkuCommand::StorageUsage {
+            entry: "legacy-90db719326".into(),
+        }
+        .argv();
+        assert_eq!(argv[0], "storage:exec");
+        assert_eq!(argv[1], "legacy-90db719326");
+        assert_eq!(argv[2], "--");
+        assert_eq!(argv[3], "sh");
+        assert_eq!(argv[4], "-c");
+        assert!(argv[5].contains("du -sk /data"));
+        assert!(argv[5].contains("df -Pk /data"));
     }
 }

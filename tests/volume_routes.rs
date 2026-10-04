@@ -133,16 +133,17 @@ async fn volumes_partial_lists_mounts_per_app() {
         "fragment, not a full page"
     );
     assert!(body.contains(r#"href="/apps/dokku-ui""#), "{body}");
-    assert!(body.contains("/var/lib/dokku/data/storage/dokku-ui"));
+    assert!(body.contains("/var/lib/dokku/data/services/dokku-ui"));
     assert!(body.contains("/app/data"));
     assert!(body.contains("deploy, run"));
-    assert!(body.contains("1 app with mounts"));
-    assert!(body.contains("1 mount"));
+    assert!(body.contains("4 apps with mounts"));
+    assert!(body.contains("4 mounts"));
     assert!(body.contains(r#"hx-post="/volumes/unmount""#));
     assert!(
-        body.contains(r#"value="/var/lib/dokku/data/storage/dokku-ui:/app/data""#),
+        body.contains(r#"value="/var/lib/dokku/data/services/dokku-ui:/app/data""#),
         "unmount carries the locator: {body}"
     );
+    assert!(body.contains(r#"href="/apps/candid""#), "{body}");
     assert!(
         !body.contains(r#"href="/apps/starwars""#),
         "apps without mounts are not listed: {body}"
@@ -307,7 +308,7 @@ async fn hx_volume_unmount_streams_with_the_locator() {
     let client = mounts_client().stub(
         DokkuCommand::StorageUnmount {
             app: app_name("dokku-ui"),
-            mount: mount("/var/lib/dokku/data/storage/dokku-ui:/app/data:ro"),
+            mount: mount("/var/lib/dokku/data/services/dokku-ui:/app/data:ro"),
         },
         Ok(DokkuOutput::ok("-----> unmounted\n")),
     );
@@ -321,7 +322,7 @@ async fn hx_volume_unmount_streams_with_the_locator() {
         hx_form_request(
             "/volumes/unmount",
             format!(
-                "csrf_token={csrf}&app=dokku-ui&spec=%2Fvar%2Flib%2Fdokku%2Fdata%2Fstorage%2Fdokku-ui%3A%2Fapp%2Fdata%3Aro"
+                "csrf_token={csrf}&app=dokku-ui&spec=%2Fvar%2Flib%2Fdokku%2Fdata%2Fservices%2Fdokku-ui%3A%2Fapp%2Fdata%3Aro"
             ),
         )
         .cookie(cookie.clone())
@@ -335,7 +336,7 @@ async fn hx_volume_unmount_streams_with_the_locator() {
     assert!(events.contains(r#""ok":true"#), "{events}");
     assert!(client.calls().contains(&DokkuCommand::StorageUnmount {
         app: app_name("dokku-ui"),
-        mount: mount("/var/lib/dokku/data/storage/dokku-ui:/app/data:ro"),
+        mount: mount("/var/lib/dokku/data/services/dokku-ui:/app/data:ro"),
     }));
 }
 
@@ -448,4 +449,180 @@ async fn volume_mount_non_htmx_invalid_spec_flashes_without_dokku() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("must be absolute"), "{body}");
+}
+
+const LIST_ENTRIES: &str = include_str!("fixtures/list_entries.json");
+const VOLUME_USAGE: &str = include_str!("fixtures/volume_usage.txt");
+
+#[tokio::test]
+async fn volumes_partial_maps_mounts_to_storage_entries() {
+    let client = mounts_client().stub(
+        DokkuCommand::StorageListEntries,
+        Ok(DokkuOutput::ok(LIST_ENTRIES)),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/volumes/partials/list")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        body.contains(r#"hx-get="/volumes/partials/usage?entry=legacy-90db719326""#),
+        "dokku-ui mount maps to its entry: {body}"
+    );
+    assert!(
+        body.contains(r#"hx-get="/volumes/partials/usage?entry=legacy-151e4f1a23""#),
+        "candid mount maps to its entry: {body}"
+    );
+}
+
+#[tokio::test]
+async fn usage_partial_renders_used_label_and_fs_tooltip() {
+    let client = mounts_client().stub(
+        DokkuCommand::StorageUsage {
+            entry: "legacy-90db719326".into(),
+        },
+        Ok(DokkuOutput::ok(VOLUME_USAGE)),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/volumes/partials/usage?entry=legacy-90db719326")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        !body.contains("<!doctype html>"),
+        "fragment, not a full page"
+    );
+    assert!(body.contains("164 KiB"), "{body}");
+    assert!(body.contains(r#"title="81% of 154.9 GiB used""#), "{body}");
+}
+
+#[tokio::test]
+async fn usage_partial_rejects_unknown_entry_without_calling_dokku() {
+    let (state, client, _dir) = test_state_with_shared_client(mounts_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/volumes/partials/usage?entry=../evil")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("Unknown storage entry."), "{body}");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::StorageUsage { .. })),
+        "no storage:exec for a tampered entry name"
+    );
+}
+
+#[tokio::test]
+async fn usage_partial_failure_degrades_to_a_dash() {
+    let client = mounts_client().stub(
+        DokkuCommand::StorageUsage {
+            entry: "legacy-90db719326".into(),
+        },
+        Err(DokkuError::Exit {
+            code: 1,
+            stderr: "docker: not found".into(),
+        }),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/volumes/partials/usage?entry=legacy-90db719326")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("—"), "{body}");
+    assert!(!body.contains("Could not load"), "{body}");
+}
+
+#[tokio::test]
+async fn disk_summary_renders_host_filesystem_card() {
+    let client = mounts_client()
+        .stub(
+            DokkuCommand::StorageListEntries,
+            Ok(DokkuOutput::ok(LIST_ENTRIES)),
+        )
+        .stub(
+            DokkuCommand::StorageUsage {
+                entry: "legacy-151e4f1a23".into(),
+            },
+            Ok(DokkuOutput::ok(VOLUME_USAGE)),
+        );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/volumes/partials/disk-summary")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("Host disk"), "{body}");
+    assert!(body.contains("126.2 GiB used of 154.9 GiB"), "{body}");
+    assert!(body.contains("(28.7 GiB free)"), "{body}");
+    assert!(body.contains("<progress"), "{body}");
+}
+
+#[tokio::test]
+async fn disk_summary_hidden_without_storage_entries() {
+    let (state, _client, _dir) = test_state_with_shared_client(mounts_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/volumes/partials/disk-summary")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.trim().is_empty(), "no entries, no card: {body:?}");
 }

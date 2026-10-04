@@ -1,8 +1,56 @@
+=====> alethos-mcp storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> alethos-worker storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> candid storage information
+       Storage build mounts:          
+       Storage deploy mounts:         -v /var/lib/dokku/data/storage/candid/uploads:/app/uploads
+       Storage run mounts:            -v /var/lib/dokku/data/storage/candid/uploads:/app/uploads
+=====> docs-kernl storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
 =====> dokku-ui storage information
-       Storage build mounts:
-       Storage deploy mounts: -v /var/lib/dokku/data/storage/dokku-ui:/app/data
-       Storage run mounts:  -v /var/lib/dokku/data/storage/dokku-ui:/app/data
+       Storage build mounts:          
+       Storage deploy mounts:         -v /var/lib/dokku/data/services/dokku-ui:/app/data
+       Storage run mounts:            -v /var/lib/dokku/data/services/dokku-ui:/app/data
+=====> kernl-analytics storage information
+       Storage build mounts:          
+       Storage deploy mounts:         -v /var/lib/dokku/data/storage/kernl-analytics/uploads:/app/uploads
+       Storage run mounts:            -v /var/lib/dokku/data/storage/kernl-analytics/uploads:/app/uploads
+=====> lesson-bot storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> nannymud storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> oneiric storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> openrouter-logs storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> recycledair storage information
+       Storage build mounts:          
+       Storage deploy mounts:         -v /var/lib/dokku/data/storage/recycledair-wp-content:/var/www/html/wp-content
+       Storage run mounts:            -v /var/lib/dokku/data/storage/recycledair-wp-content:/var/www/html/wp-content
+=====> roboswarm-client storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
+=====> roboswarm-server storage information
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            
 =====> starwars storage information
-       Storage build mounts:
-       Storage deploy mounts:
-       Storage run mounts:
+       Storage build mounts:          
+       Storage deploy mounts:         
+       Storage run mounts:            

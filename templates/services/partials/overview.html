@@ -67,4 +67,15 @@
     </form>
     {% endif %}
   </div>
+
+  <div hx-get="/services/{{ plugin }}/{{ service }}/partials/stats"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5" aria-busy="true">
+      <div class="flex items-center gap-2 text-sm text-slate-400">
+        <span class="size-4 animate-spin rounded-full border-2 border-slate-700 border-t-emerald-400"></span>
+        Loading resource usage…
+      </div>
+    </div>
+  </div>
 </div>

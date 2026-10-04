@@ -194,6 +194,265 @@ impl AppMounts {
     }
 }
 
+/// Human-readable binary byte size for stat labels.
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    const TIB: u64 = GIB * 1024;
+    if bytes >= TIB {
+        format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    } else if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Compact duration for cumulative CPU-time labels: `6h 39m`, `5m 12s`, `12s`.
+pub fn format_duration(secs: u64) -> String {
+    const DAY: u64 = 86_400;
+    const HOUR: u64 = 3_600;
+    const MINUTE: u64 = 60;
+    if secs >= DAY {
+        format!("{}d {}h", secs / DAY, (secs % DAY) / HOUR)
+    } else if secs >= HOUR {
+        format!("{}h {}m", secs / HOUR, (secs % HOUR) / MINUTE)
+    } else if secs >= MINUTE {
+        format!("{}m {}s", secs / MINUTE, secs % MINUTE)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Live resource usage for a service container, parsed from the fixed
+/// `<plugin>:enter` stats script. Every field is optional: missing cgroup
+/// values (older kernels, stopped containers) render as an em dash.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServiceStats {
+    pub host_memory_total_kb: Option<u64>,
+    pub host_memory_available_kb: Option<u64>,
+    pub memory_current_bytes: Option<u64>,
+    /// `None` means the container has no memory limit (`memory.max` = `max`).
+    pub memory_limit_bytes: Option<u64>,
+    pub inactive_file_bytes: Option<u64>,
+    pub cpu_delta_usec: Option<u64>,
+    pub cpu_total_usec: Option<u64>,
+    pub elapsed_secs: Option<f64>,
+    pub cpus: Option<u64>,
+    pub data_kb: Option<u64>,
+    pub fs_total_kb: Option<u64>,
+    pub fs_used_kb: Option<u64>,
+    pub fs_avail_kb: Option<u64>,
+}
+
+impl ServiceStats {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// docker-stats parity: current memory minus reclaimable page cache.
+    pub fn memory_working_set_bytes(&self) -> Option<u64> {
+        let current = self.memory_current_bytes?;
+        Some(current.saturating_sub(self.inactive_file_bytes.unwrap_or(0)))
+    }
+
+    /// The percentage base: the container limit, or the host total when the
+    /// container is unlimited.
+    pub fn memory_base_bytes(&self) -> Option<u64> {
+        self.memory_limit_bytes
+            .or_else(|| self.host_memory_total_kb.map(|kb| kb * 1024))
+    }
+
+    pub fn memory_percent(&self) -> Option<f64> {
+        let used = self.memory_working_set_bytes()?;
+        let base = self.memory_base_bytes()?;
+        (base > 0).then(|| used as f64 / base as f64 * 100.0)
+    }
+
+    pub fn memory_used_label(&self) -> String {
+        self.memory_working_set_bytes()
+            .map(format_bytes)
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    /// "of 2.0 GiB" for a limited container; "of 7.8 GiB host (3.7 GiB
+    /// available)" when unlimited — the parenthetical shows how much memory
+    /// the host still has free.
+    pub fn memory_detail_label(&self) -> String {
+        match self.memory_limit_bytes {
+            Some(bytes) => format!("of {}", format_bytes(bytes)),
+            None => self
+                .host_memory_total_kb
+                .map(|kb| {
+                    let available = self
+                        .host_memory_available_kb
+                        .map(|avail| format!(" ({} available)", format_bytes(avail * 1024)))
+                        .unwrap_or_default();
+                    format!("of {} host{available}", format_bytes(kb * 1024))
+                })
+                .unwrap_or_else(|| "—".to_owned()),
+        }
+    }
+
+    pub fn memory_percent_label(&self) -> String {
+        percent_label(self.memory_percent())
+    }
+
+    /// Rounded percentage for `<progress>` values.
+    pub fn memory_percent_rounded(&self) -> Option<u32> {
+        percent_rounded(self.memory_percent())
+    }
+
+    /// Sampled CPU use as a percentage of all cores.
+    pub fn cpu_percent(&self) -> Option<f64> {
+        let delta = self.cpu_delta_usec? as f64;
+        let elapsed = self.elapsed_secs?;
+        let cpus = self.cpus? as f64;
+        (elapsed > 0.0 && cpus > 0.0).then(|| delta / (elapsed * 1_000_000.0 * cpus) * 100.0)
+    }
+
+    pub fn cpu_percent_label(&self) -> String {
+        percent_label(self.cpu_percent())
+    }
+
+    /// Cumulative CPU time consumed since the container started.
+    pub fn cpu_total_secs(&self) -> Option<u64> {
+        self.cpu_total_usec.map(|usec| usec / 1_000_000)
+    }
+
+    pub fn cpu_total_label(&self) -> String {
+        self.cpu_total_secs()
+            .map(format_duration)
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn data_label(&self) -> String {
+        self.data_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_percent(&self) -> Option<f64> {
+        let used = self.fs_used_kb? as f64;
+        let total = self.fs_total_kb? as f64;
+        (total > 0.0).then(|| used / total * 100.0)
+    }
+
+    pub fn fs_used_label(&self) -> String {
+        self.fs_used_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_total_label(&self) -> String {
+        self.fs_total_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_avail_label(&self) -> String {
+        self.fs_avail_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_percent_label(&self) -> String {
+        percent_label(self.fs_percent())
+    }
+
+    /// Rounded percentage for `<progress>` values.
+    pub fn fs_percent_rounded(&self) -> Option<u32> {
+        percent_rounded(self.fs_percent())
+    }
+}
+
+/// Disk usage for one storage entry, from the fixed `storage:exec` script
+/// (`/data` is the entry's mount point inside the throwaway container).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VolumeUsage {
+    pub used_kb: Option<u64>,
+    pub fs_total_kb: Option<u64>,
+    pub fs_used_kb: Option<u64>,
+    pub fs_avail_kb: Option<u64>,
+}
+
+impl VolumeUsage {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn used_label(&self) -> String {
+        self.used_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_percent(&self) -> Option<f64> {
+        let used = self.fs_used_kb? as f64;
+        let total = self.fs_total_kb? as f64;
+        (total > 0.0).then(|| used / total * 100.0)
+    }
+
+    pub fn fs_percent_label(&self) -> String {
+        percent_label(self.fs_percent())
+    }
+
+    /// Rounded percentage for `<progress>` values.
+    pub fn fs_percent_rounded(&self) -> Option<u32> {
+        percent_rounded(self.fs_percent())
+    }
+
+    /// "82% of 154.9 GiB used" — the tooltip for a row's usage figure.
+    pub fn fs_label(&self) -> String {
+        match (self.fs_percent(), self.fs_total_kb) {
+            (Some(percent), Some(total)) => {
+                format!("{percent:.0}% of {} used", format_bytes(total * 1024))
+            }
+            _ => "—".to_owned(),
+        }
+    }
+
+    pub fn fs_used_label(&self) -> String {
+        self.fs_used_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_total_label(&self) -> String {
+        self.fs_total_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+
+    pub fn fs_avail_label(&self) -> String {
+        self.fs_avail_kb
+            .map(|kb| format_bytes(kb * 1024))
+            .unwrap_or_else(|| "—".to_owned())
+    }
+}
+
+fn percent_label(percent: Option<f64>) -> String {
+    percent
+        .map(|value| format!("{value:.1}%"))
+        .unwrap_or_else(|| "—".to_owned())
+}
+
+fn percent_rounded(percent: Option<f64>) -> Option<u32> {
+    percent.map(|value| value.round().clamp(0.0, 100.0) as u32)
+}
+
+/// A registered storage entry, from `storage:list-entries --format json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageEntry {
+    pub name: String,
+    pub host_path: String,
+}
+
 /// Summary of the most recent build for an app, from `builds:report --format json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildInfo {
@@ -632,5 +891,154 @@ mod tests {
         assert_eq!(lines.tail(2).as_slice(), &["b", "c"]);
         assert_eq!(lines.tail(5).as_slice(), &["a", "b", "c"]);
         assert!(lines.tail(0).is_empty());
+    }
+
+    #[test]
+    fn format_bytes_buckets() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1 KiB");
+        assert_eq!(format_bytes(2048), "2 KiB");
+        assert_eq!(format_bytes(1_572_864), "1.5 MiB");
+        assert_eq!(format_bytes(6_455_296), "6.2 MiB");
+        assert_eq!(format_bytes(8_326_963_200), "7.8 GiB");
+        assert_eq!(format_bytes(1_099_511_627_776), "1.0 TiB");
+    }
+
+    /// Numbers from the real host capture in `tests/fixtures/redis_stats.txt`.
+    fn captured_stats() -> ServiceStats {
+        ServiceStats {
+            host_memory_total_kb: Some(8_131_800),
+            host_memory_available_kb: Some(3_872_192),
+            memory_current_bytes: Some(9_748_480),
+            memory_limit_bytes: None,
+            inactive_file_bytes: Some(2_715_648),
+            cpu_delta_usec: Some(5_122),
+            cpu_total_usec: Some(23_949_388_167),
+            elapsed_secs: Some(1.01),
+            cpus: Some(4),
+            data_kb: Some(12),
+            fs_total_kb: Some(162_406_320),
+            fs_used_kb: Some(132_162_720),
+            fs_avail_kb: Some(30_227_216),
+        }
+    }
+
+    #[test]
+    fn service_stats_working_set_and_memory_labels() {
+        let stats = captured_stats();
+        assert_eq!(stats.memory_working_set_bytes(), Some(7_032_832));
+        assert_eq!(stats.memory_used_label(), "6.7 MiB");
+        assert_eq!(
+            stats.memory_detail_label(),
+            "of 7.8 GiB host (3.7 GiB available)"
+        );
+        assert_eq!(stats.memory_percent_label(), "0.1%");
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn service_stats_unlimited_without_host_available_omits_parenthetical() {
+        let stats = ServiceStats {
+            host_memory_available_kb: None,
+            ..captured_stats()
+        };
+        assert_eq!(stats.memory_detail_label(), "of 7.8 GiB host");
+    }
+
+    #[test]
+    fn service_stats_memory_limit_label() {
+        let stats = ServiceStats {
+            memory_limit_bytes: Some(2_147_483_648),
+            ..captured_stats()
+        };
+        assert_eq!(stats.memory_detail_label(), "of 2.0 GiB");
+        // The limit takes precedence over the host total for the percentage.
+        assert_eq!(stats.memory_base_bytes(), Some(2_147_483_648));
+    }
+
+    #[test]
+    fn service_stats_cpu_sampling_math() {
+        let stats = captured_stats();
+        let percent = stats.cpu_percent().expect("cpu percent");
+        assert!((percent - 0.1268).abs() < 0.01, "{percent}");
+        assert_eq!(stats.cpu_percent_label(), "0.1%");
+        assert_eq!(stats.cpu_total_secs(), Some(23_949));
+        assert_eq!(stats.cpu_total_label(), "6h 39m");
+    }
+
+    #[test]
+    fn format_duration_buckets() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(60), "1m 0s");
+        assert_eq!(format_duration(312), "5m 12s");
+        assert_eq!(format_duration(3_600), "1h 0m");
+        assert_eq!(format_duration(23_949), "6h 39m");
+        assert_eq!(format_duration(90_000), "1d 1h");
+    }
+
+    #[test]
+    fn service_stats_disk_labels() {
+        let stats = captured_stats();
+        assert_eq!(stats.data_label(), "12 KiB");
+        assert_eq!(stats.fs_used_label(), "126.0 GiB");
+        assert_eq!(stats.fs_total_label(), "154.9 GiB");
+        assert_eq!(stats.fs_avail_label(), "28.8 GiB");
+        assert_eq!(stats.fs_percent_label(), "81.4%");
+    }
+
+    #[test]
+    fn percent_rounding_clamps_for_progress_values() {
+        assert_eq!(captured_stats().memory_percent_rounded(), Some(0));
+        assert_eq!(captured_stats().fs_percent_rounded(), Some(81));
+        let over = ServiceStats {
+            memory_current_bytes: Some(2_000),
+            inactive_file_bytes: None,
+            memory_limit_bytes: Some(1_000),
+            ..ServiceStats::default()
+        };
+        assert_eq!(over.memory_percent_rounded(), Some(100));
+        assert_eq!(ServiceStats::default().memory_percent_rounded(), None);
+    }
+
+    #[test]
+    fn empty_service_stats_render_dashes() {
+        let stats = ServiceStats::default();
+        assert!(stats.is_empty());
+        assert_eq!(stats.memory_used_label(), "—");
+        assert_eq!(stats.memory_detail_label(), "—");
+        assert_eq!(stats.memory_percent_label(), "—");
+        assert_eq!(stats.cpu_percent_label(), "—");
+        assert_eq!(stats.cpu_total_secs(), None);
+        assert_eq!(stats.data_label(), "—");
+        assert_eq!(stats.fs_used_label(), "—");
+        assert_eq!(stats.fs_percent(), None);
+    }
+
+    #[test]
+    fn volume_usage_labels() {
+        let usage = VolumeUsage {
+            used_kb: Some(164),
+            fs_total_kb: Some(162_406_320),
+            fs_used_kb: Some(132_287_668),
+            fs_avail_kb: Some(30_102_164),
+        };
+        assert!(!usage.is_empty());
+        assert_eq!(usage.used_label(), "164 KiB");
+        assert_eq!(usage.fs_percent_label(), "81.5%");
+        assert_eq!(usage.fs_label(), "81% of 154.9 GiB used");
+        assert_eq!(usage.fs_used_label(), "126.2 GiB");
+        assert_eq!(usage.fs_total_label(), "154.9 GiB");
+        assert_eq!(usage.fs_avail_label(), "28.7 GiB");
+    }
+
+    #[test]
+    fn empty_volume_usage_renders_dashes() {
+        let usage = VolumeUsage::default();
+        assert!(usage.is_empty());
+        assert_eq!(usage.used_label(), "—");
+        assert_eq!(usage.fs_label(), "—");
+        assert_eq!(usage.fs_percent(), None);
     }
 }

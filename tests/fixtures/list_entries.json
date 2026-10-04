@@ -1,0 +1,26 @@
+[
+  {
+    "name": "legacy-151e4f1a23",
+    "scheduler": "docker-local",
+    "host_path": "/var/lib/dokku/data/storage/candid/uploads",
+    "schema_version": 1
+  },
+  {
+    "name": "legacy-7e1fa8b59b",
+    "scheduler": "docker-local",
+    "host_path": "/var/lib/dokku/data/storage/recycledair-wp-content",
+    "schema_version": 1
+  },
+  {
+    "name": "legacy-90db719326",
+    "scheduler": "docker-local",
+    "host_path": "/var/lib/dokku/data/services/dokku-ui",
+    "schema_version": 1
+  },
+  {
+    "name": "legacy-fc0b368246",
+    "scheduler": "docker-local",
+    "host_path": "/var/lib/dokku/data/storage/kernl-analytics/uploads",
+    "schema_version": 1
+  }
+]

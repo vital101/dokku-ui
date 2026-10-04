@@ -5,7 +5,7 @@ use actix_web::{HttpRequest, HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
 
-use crate::dokku::{plugin_services, service_linked_apps, service_logs};
+use crate::dokku::{DokkuError, plugin_services, service_linked_apps, service_logs, service_stats};
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_service_list};
@@ -105,6 +105,42 @@ struct LinksPartial<'a> {
 #[template(path = "services/partials/logs.html")]
 struct LogsPartial {
     lines: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/stats.html")]
+struct StatsPartial {
+    not_running: bool,
+    memory_used_label: String,
+    memory_detail_label: String,
+    memory_percent: Option<u32>,
+    cpu_percent_label: String,
+    cpu_total_label: String,
+    data_label: String,
+    fs_used_label: String,
+    fs_total_label: String,
+    fs_avail_label: String,
+    fs_percent: Option<u32>,
+}
+
+impl StatsPartial {
+    /// Placeholder values for the not-running state; the template only reads
+    /// `not_running` in that branch.
+    fn unavailable() -> Self {
+        Self {
+            not_running: true,
+            memory_used_label: "—".into(),
+            memory_detail_label: "—".into(),
+            memory_percent: None,
+            cpu_percent_label: "—".into(),
+            cpu_total_label: "—".into(),
+            data_label: "—".into(),
+            fs_used_label: "—".into(),
+            fs_total_label: "—".into(),
+            fs_avail_label: "—".into(),
+            fs_percent: None,
+        }
+    }
 }
 
 #[derive(Template)]
@@ -453,6 +489,52 @@ pub async fn logs_partial(
         }),
         Err(err) => error_fragment(&retry_url, &err.to_string()),
     }
+}
+
+/// Live resource usage, fetched on demand by the Overview tab's Resources
+/// card. A stopped container is a state, not an error.
+pub async fn stats_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+
+    let retry_url = format!("/services/{plugin}/{service}/partials/stats");
+    match service_stats(&*state.dokku, plugin, &service).await {
+        Ok(Some(stats)) => render(&StatsPartial {
+            not_running: false,
+            memory_used_label: stats.memory_used_label(),
+            memory_detail_label: stats.memory_detail_label(),
+            memory_percent: stats.memory_percent_rounded(),
+            cpu_percent_label: stats.cpu_percent_label(),
+            cpu_total_label: stats.cpu_total_label(),
+            data_label: stats.data_label(),
+            fs_used_label: stats.fs_used_label(),
+            fs_total_label: stats.fs_total_label(),
+            fs_avail_label: stats.fs_avail_label(),
+            fs_percent: stats.fs_percent_rounded(),
+        }),
+        Ok(None) => error_fragment(
+            &retry_url,
+            "No stats were reported by the service container.",
+        ),
+        Err(err) if service_not_running(&err) => render(&StatsPartial::unavailable()),
+        Err(err) => error_fragment(&retry_url, &err.to_string()),
+    }
+}
+
+/// The service plugins fail `enter` with these messages when the container is
+/// stopped or was removed; the stats card renders that as a state.
+fn service_not_running(err: &DokkuError) -> bool {
+    matches!(
+        err,
+        DokkuError::Exit { stderr, .. }
+            if stderr.contains("not running") || stderr.contains("does not exist")
+    )
 }
 
 /// No-JS confirmation page, mirroring the app delete flow. The modal fragment

@@ -1,0 +1,4 @@
+used_kb=164
+fs_total_kb=162406320
+fs_used_kb=132287668
+fs_avail_kb=30102164

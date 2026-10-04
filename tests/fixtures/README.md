@@ -24,13 +24,15 @@ domain parsers' unit tests and the `MockClient` integration suite.
 > to `XXXXXX`** here. The parser never reads the `Dsn` line and the UI never
 > renders it; a test asserts the DSN does not appear in `ServiceInfo`.
 >
-> **Synthetic fixtures:** the service-list, service-log and storage-report
-> fixtures (`*_list.txt`, `redis_logs.txt`, `storage_report*.txt`) are **not
-> live captures yet** — no host access was available when the service/volume
-> pages landed. Their formats were verified against the installed plugin
-> sources (dokku-service `service_list`/`service_logs` in dokku-redis 1.42.1;
-> `plugins/storage/report.go` + `subcommands.go` at dokku tag `v0.38.4`) and
-> should be replaced by real captures on the next host session.
+> **Synthetic fixtures:** the service-list, service-log and
+> `storage_report_empty.txt` fixtures (`*_list.txt`, `redis_logs.txt`,
+> `storage_report_empty.txt`) are **not live captures yet** — no host access was
+> available when the service/volume pages landed. Their formats were verified
+> against the installed plugin sources (dokku-service
+> `service_list`/`service_logs` in dokku-redis 1.42.1; `plugins/storage/report.go`
+> + `subcommands.go` at dokku tag `v0.38.4`) and should be replaced by real
+> captures on the next host session. The stats/entries fixtures below are real
+> captures from 2026-10-04.
 
 ## Formats
 
@@ -62,8 +64,11 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `postgres_list.txt`, `mysql_list.txt`, `mongo_list.txt` | `dokku <plugin>:list` | Same shape for the other service plugins (synthetic). |
 | `service_list_empty.txt` | `dokku redis:list` | Synthetic empty listing: ` !     There are no Redis services` warning line only. |
 | `redis_logs.txt` | `dokku redis:logs candid '' 200` | Synthetic log tail. The installed plugin takes the follow flag as `$2` and the line count as `$3`, so the argv carries an explicit empty string that `russh_client::shell_command` quotes to preserve it. |
-| `storage_report.txt` | `dokku storage:report` (no app) | Synthetic (source-verified at `v0.38.4`): one `=====> <app> storage information` section per app with `Storage build/deploy/run mounts: -v host:container[:opts]` lines. Only these three keys exist on 0.38.4 (the dotted `attachment.N.*` keys are newer). `parse_storage_report` merges phases per mount. |
+| `storage_report.txt` | `dokku storage:report` (no app) | Real capture (2026-10-04, 14 apps): one `=====> <app> storage information` section per app with `Storage build/deploy/run mounts: -v host:container[:opts]` lines. Only these three keys exist on 0.38.4 (the dotted `attachment.N.*` keys are newer). `parse_storage_report` merges phases per mount. |
 | `storage_report_empty.txt` | `dokku storage:report` | Synthetic: an app with the three mount lines all empty. |
+| `redis_stats.txt` | `dokku redis:enter candid sh -c '<stats script>'` | Real capture (2026-10-04). The plugin prints a `-----> Filesystem changes may not persist…` banner first; then the fixed script's `key=value` lines: host `/proc/meminfo`, cgroup v2 `memory.current`/`memory.max` (`max` = unlimited), `memory.stat` inactive_file, `cpu.stat` sampled twice over ~1s, `nproc`, `du`/`df` of the data dir. |
+| `volume_usage.txt` | `dokku storage:exec legacy-90db719326 -- sh -c '<usage script>'` | Real capture (stdout only; docker pull progress goes to stderr): `du`/`df` of the entry mounted at `/data` in the throwaway `alpine:3` container. |
+| `list_entries.json` | `dokku storage:list-entries --format json` | Real capture (2026-10-04): `name`/`scheduler`/`host_path`/`schema_version`. Maps a mount's host path onto its `legacy-<hash>` entry name, which `storage:exec` needs. |
 
 ## Maintenance
 

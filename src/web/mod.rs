@@ -184,6 +184,10 @@ pub fn build_app(
             web::get().to(services::logs_partial),
         )
         .route(
+            "/services/{plugin}/{service}/partials/stats",
+            web::get().to(services::stats_partial),
+        )
+        .route(
             "/services/{plugin}/{service}/partials/delete-confirm",
             web::get().to(services::delete_confirm_modal),
         )
@@ -223,6 +227,14 @@ pub fn build_app(
         .route(
             "/volumes/partials/list",
             web::get().to(volumes::list_partial),
+        )
+        .route(
+            "/volumes/partials/usage",
+            web::get().to(volumes::usage_partial),
+        )
+        .route(
+            "/volumes/partials/disk-summary",
+            web::get().to(volumes::disk_summary_partial),
         )
         .route("/volumes/mount", web::post().to(volumes::mount))
         .route("/volumes/unmount", web::post().to(volumes::unmount))

@@ -123,9 +123,12 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         "/services/postgres/cache/partials/links",
         "/services/postgres/cache/partials/logs",
         "/services/postgres/cache/partials/delete-confirm",
+        "/services/postgres/cache/partials/stats",
         "/services/postgres/cache/delete",
         "/volumes",
         "/volumes/partials/list",
+        "/volumes/partials/usage?entry=legacy-90db719326",
+        "/volumes/partials/disk-summary",
     ] {
         let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");

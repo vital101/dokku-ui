@@ -29,6 +29,19 @@ impl ServicePlugin {
             _ => self.0,
         }
     }
+
+    /// Where the service's data directory is mounted inside its container.
+    /// Used by the stats script's `du`/`df` calls; verified against the
+    /// installed plugin generations' `/proc/mounts` output.
+    pub fn data_dir(&self) -> &'static str {
+        match self.0 {
+            "postgres" => "/var/lib/postgresql/data",
+            "mysql" => "/var/lib/mysql",
+            "redis" => "/data",
+            "mongo" => "/data/db",
+            _ => "/data",
+        }
+    }
 }
 
 impl TryFrom<&str> for ServicePlugin {
@@ -103,6 +116,22 @@ mod tests {
     fn all_lists_every_supported_plugin() {
         let names: Vec<&str> = ServicePlugin::all().map(|p| p.as_str()).collect();
         assert_eq!(names, vec!["postgres", "mysql", "redis", "mongo"]);
+    }
+
+    #[test]
+    fn data_dirs_match_the_installed_plugins() {
+        for (raw, dir) in [
+            ("postgres", "/var/lib/postgresql/data"),
+            ("mysql", "/var/lib/mysql"),
+            ("redis", "/data"),
+            ("mongo", "/data/db"),
+        ] {
+            assert_eq!(
+                ServicePlugin::try_from(raw).expect("supported").data_dir(),
+                dir,
+                "{raw}"
+            );
+        }
     }
 
     #[test]

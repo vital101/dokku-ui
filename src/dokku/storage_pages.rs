@@ -28,11 +28,17 @@ mod tests {
 
         let apps = app_mounts(&client).await.expect("mounts");
 
-        assert_eq!(apps.len(), 2);
-        assert_eq!(apps[0].app, "dokku-ui");
-        assert_eq!(apps[0].mount_count(), 1);
-        assert_eq!(apps[1].app, "starwars");
-        assert!(apps[1].is_empty());
+        assert_eq!(apps.len(), 14);
+        let dokku_ui = apps
+            .iter()
+            .find(|app| app.app == "dokku-ui")
+            .expect("dokku-ui");
+        assert_eq!(dokku_ui.mount_count(), 1);
+        let starwars = apps
+            .iter()
+            .find(|app| app.app == "starwars")
+            .expect("starwars");
+        assert!(starwars.is_empty());
     }
 
     #[tokio::test]
