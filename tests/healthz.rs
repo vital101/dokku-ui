@@ -49,6 +49,24 @@ async fn static_css_is_served() {
 }
 
 #[tokio::test]
+async fn vendored_htmx_is_served() {
+    let (state, _dir) = common::test_state().await;
+    let app = test::init_service(build_app(state)).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/static/js/htmx.min.js")
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = String::from_utf8(test::read_body(resp).await.to_vec()).expect("utf-8 body");
+    assert!(body.contains("htmx"), "vendored htmx bundle served");
+}
+
+#[tokio::test]
 async fn unknown_route_redirects_unauthenticated_requests_to_setup() {
     let (state, _dir) = common::test_state().await;
     let app = test::init_service(build_app(state)).await;

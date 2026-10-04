@@ -1,0 +1,8 @@
+<div class="rounded-lg border border-red-900/60 bg-red-950/30 p-6">
+  <p class="text-sm font-medium text-red-300">Could not load this section.</p>
+  <p class="mt-1 text-sm text-red-400/80">{{ message }}</p>
+  <button hx-get="{{ retry_url }}" hx-target="#app-panel" hx-swap="innerHTML"
+          class="mt-4 rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+    Retry
+  </button>
+</div>

@@ -4,8 +4,8 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 
 use common::{
-    complete_setup, get_body, seed_user, test_state, test_state_with_client,
-    test_state_with_shared_client,
+    complete_setup, extract_csrf, form_request, get_body, location, seed_user, test_state,
+    test_state_with_client, test_state_with_shared_client,
 };
 
 use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
@@ -216,6 +216,86 @@ async fn dashboard_shows_data_age_chip() {
 
     assert!(body.contains("Updated"));
     assert!(body.contains("ago") || body.contains("just now"));
+}
+
+#[tokio::test]
+async fn dashboard_renders_refresh_button() {
+    let (state, _dir) = test_state_with_client(seeded_dashboard()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+
+    assert!(body.contains(r#"action="/refresh""#));
+    assert!(body.contains("Refresh data"));
+}
+
+#[tokio::test]
+async fn refresh_post_reruns_snapshot_and_redirects_home() {
+    let (state, client, _dir) = test_state_with_shared_client(seeded_dashboard()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+    let calls_before = client.calls().len();
+
+    let resp = test::call_service(
+        &app,
+        form_request("/refresh", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/");
+    assert!(
+        client.calls().len() > calls_before,
+        "manual refresh re-runs the snapshot pass"
+    );
+    let cookie = common::response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Data refreshed."));
+}
+
+#[tokio::test]
+async fn refresh_post_without_csrf_is_rejected() {
+    let (state, _dir) = test_state_with_client(seeded_dashboard()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        form_request("/refresh", String::new())
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

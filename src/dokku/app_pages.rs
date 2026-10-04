@@ -5,7 +5,7 @@ use crate::domain::parse::{
     parse_service_info,
 };
 use crate::domain::types::{
-    ContainerDetails, EnvVar, LogLines, ResourceReport, ScaleEntry, ServiceInfo,
+    ContainerDetails, EnvVar, LogLines, ResourceReport, ScaleEntry, ServiceInfo, ServiceLink,
 };
 
 use super::client::{DokkuClient, DokkuError};
@@ -46,6 +46,13 @@ pub async fn app_resources(
 ) -> Result<Vec<ResourceReport>, DokkuError> {
     let output = client.exec(&DokkuCommand::ResourceReport { app }).await?;
     Ok(parse_resource_report(&output.stdout))
+}
+
+/// Fetches the service links for a single app, on demand. `None` means at least
+/// one plugin could not be queried (the caller renders an unknown-status card).
+pub async fn app_service_links(client: &dyn DokkuClient, app: AppName) -> Option<Vec<ServiceLink>> {
+    let plugins = super::snapshot::fetch_service_plugins(client).await;
+    super::snapshot::fetch_service_links(client, &app, plugins.as_deref()).await
 }
 
 /// Fetches `<plugin>:info <service> --format json`. A response that does not

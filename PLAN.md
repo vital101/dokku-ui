@@ -74,6 +74,7 @@ dokku-ui/
 │   ├── setup.html, login.html
 │   ├── dashboard.html
 │   ├── app/show.html, config.html, logs.html, delete.html
+│   ├── app/partials/{overview,processes,services,config,logs,loading,error}.html
 │   └── error.html
 ├── tests/                     # integration tests (actix_web::test)
 │   ├── auth_flows.rs
@@ -99,7 +100,7 @@ dokku-ui/
     │   ├── mod.rs
     │   ├── client.rs          # trait DokkuClient + DokkuOutput/DokkuError
     │   ├── russh_client.rs    # the ONLY russh-dependent file
-    │   ├── snapshot.rs        # Snapshot + SnapshotStore + background refresher
+    │   ├── snapshot.rs        # Snapshot + SnapshotStore + 30-min background refresher
     │   └── mock.rs            # fixture-backed MockClient (used by tests)
     ├── storage/
     │   ├── mod.rs             # pool init, migrate, WAL
@@ -191,7 +192,9 @@ DB opened with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreig
 | `/apps/new` | GET | yes | → apps/new.html | no-JS create form page |
 | `/apps/{name}` | GET | yes | `apps::show` → app/show.html | `apps:report` + `ps:report` |
 | `/apps/{name}/config` | GET | yes | → app/config.html | `config:show --masked` |
-| `/apps/{name}/logs` | GET | yes | → app/logs.html | `?lines=N` (200 default, 1000 max, min 10) |
+| `/apps/{name}/logs` | GET | yes | → app/logs.html | `?lines=N` (200 default, 1000 max, min 10); fragment renders lines |
+| `/apps/{name}/partials/{tab}` | GET | yes | `apps::*_partial` | HTMX fragments (overview/processes/services/config/logs) |
+| `/refresh` | POST | yes | `pages::refresh_now` | manual full snapshot refresh from the dashboard |
 | `/apps/{name}/delete` | GET | yes | → app/delete.html | confirmation page |
 | `/apps/{name}/delete` | POST | yes | `apps::delete` | confirm form input must echo app name |
 | `/apps/{name}/start` | POST | yes | `apps::action` | flash success/error |
@@ -200,7 +203,7 @@ DB opened with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreig
 | `/static/*` | GET | no | actix-files | immutable cache headers, content-hash names |
 | `404/500` | — | — | error.html | via `AppError: ResponseError` |
 
-All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain form + server redirect; confirmations are pages, not JS dialogs.
+All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: every action is a plain form + server redirect; confirmations are pages, not JS dialogs. App-tab data loading is HTMX (shell renders first, fragments fill in); without JS the shells still show nav and actions, just no data.
 
 ## 8. Dokku integration
 
@@ -220,14 +223,15 @@ All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain fo
 - Collect stdout/stderr, read exit status, 30s timeout via `tokio::time::timeout` (`COMMAND_TIMEOUT_SECS`).
 - Host key policy: accept-on-first-use into `known_hosts`-style file at `DOKKU_SSH_HOST_KEYS_PATH`; optional pre-pinned file works read-only.
 - Errors: `DokkuError::Connect | Timeout | Exit { code, stderr }` — `Exit` messages surface stderr for the user flash; `Connect/Timeout` render 503-style error page.
-- A background refresher (`SnapshotStore` + `spawn_refresher`) keeps an in-memory, parsed snapshot of the whole host warm (app list + `ps:report` + `apps:report`, fetched concurrently with 4 permits over the persistent SSH session). Every page read then serves from the snapshot (`Arc` clone, no IO); the first request after boot falls back to one synchronous refresh. After start/stop/restart the affected app is re-fetched synchronously before redirecting; create/destroy trigger a full refresh. A miss (app not listed) triggers a live `apps:list` fallback before 404ing, covering apps created via the CLI within the staleness window. Refresh failures keep the last good snapshot and log a warning. dokku boots its plugin system per command (~750ms), so this removes SSH latency from every request. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
+- A background refresher (`SnapshotStore` + `spawn_refresher`) keeps a cheap in-memory snapshot of the whole host (app list + `ps:report` + `apps:report`, fetched concurrently with 4 permits over the persistent SSH session) on a **30-minute** cadence (`SNAPSHOT_REFRESH_SECS`, default 1800). The heavier per-app details (builds, domains, service links, DNS) are **not** fetched in the background. The dashboard serves from the snapshot (`Arc` clone, no IO), the first request after boot falls back to one synchronous refresh, and a **"Refresh data"** button (`POST /refresh`) forces a fresh pass on demand. After start/stop/restart/scale/create only that app's cheap ps/apps reports are re-fetched (`refresh_app_reports`) before redirecting; the overview fragment then fetches the app's details on demand, so an action click no longer pays for two full detail passes. Destroy triggers a full refresh. A miss (app not listed) triggers a live `apps:list` fallback before 404ing, covering apps created via the CLI within the staleness window. Refresh failures keep the last good snapshot and log a warning. dokku boots its plugin system per command (~750ms), so keeping the background pass small is what keeps host load down. A single multi-app `ps:report` invocation was tried and rejected: dokku 0.38 only reports the first app argument.
+- **App pages load on demand**: every `/apps/{name}/*` route renders an instant shell (nav, action buttons, skeleton) and each tab's data is fetched by an HTMX fragment request to `/apps/{name}/partials/{tab}`. The overview fragment calls `SnapshotStore::refresh_app` (ps/apps report + builds/domains/links/DNS for that one app); processes/config/logs query dokku directly; services fetches links live (`plugin:list` + `app links`). Failed fragments render a small retry card (HTTP 200) instead of a full-page error.
 
 ## 9. Templates & UI
 
 - `base.html`: fixed sidebar (Dashboard; App list; per-app nav: Overview, Config, Logs) + topbar (user email, logout) + flash partial (success/error banners).
 - Pages listed in §7. Askama derive structs (`#[derive(Template)] #[template(path = "app/show.html")]`) hold plain domain types — templates can't do logic beyond simple display, which keeps HTML pure.
 - Tailwind: `assets/input.css` → `static/css/app.css` (watch in dev via css service, minified in prod build). Content scan covers `templates/**` and `src/**/*.rs` (badge classes built in Rust).
-- Zero JavaScript in v1. Dark palette, clean tables, status badges (green/red/gray) — Dokku Pro-like.
+- HTMX 2.0.4 (vendored at `static/js/htmx.min.js`, `defer` in `base.html`): app-tab pages are shells with `hx-get`/`hx-trigger="load"` skeletons, and the logs line-count form re-fetches the fragment via `hx-include`. No inline scripts, so the existing CSP keeps working; htmx's auto-injected indicator `<style>` tag is disabled via a `htmx-config` meta tag because `style-src 'self'` (no `unsafe-inline`) would block it. Fragments always answer 200 — failures (including "app was deleted") swap in a retry card, since htmx does not swap 4xx/5xx responses and the skeleton would spin forever. Vendored rather than CDN so the UI works offline/self-hosted; the prod Dockerfile copies the whole `static/` tree. Dark palette, clean tables, status badges (green/red/gray) — Dokku Pro-like.
 - Security headers middleware: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'self'; style-src 'self'; img-src 'self' data:`.
 
 ## 10. Configuration (env)
@@ -244,7 +248,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. No-JS-safe: every action is a plain fo
 | `SECRET_KEY` | dev value committed | Dokku config secret | actix-session cookie signing (≥32 bytes hex) |
 | `SESSION_TTL_SECS` | 604800 | — | |
 | `COMMAND_TIMEOUT_SECS` | 30 | — | SSH exec timeout |
-| `SNAPSHOT_REFRESH_SECS` | 15 | — | background snapshot refresh interval (positive) |
+| `SNAPSHOT_REFRESH_SECS` | 1800 | — | background snapshot refresh interval (positive; 30 min) |
 | `COOKIE_SECURE` | false | true | Secure flag |
 | `RUST_LOG` | `dokku_ui=debug,tower? n/a` | `info` | tracing filter |
 
@@ -376,25 +380,28 @@ Config set/unset UI (re-auth to unmask), live log tailing (websockets/SSE), depl
 Extends the per-app UI with deep runtime detail, read from the same
 `DokkuClient` seam (all commands pure/argv-tested in `domain/command.rs`):
 
-- **Processes tab** (`GET /apps/{name}/processes`): desired formation
-  (`ps:scale <app>`) merged with observed states (`ps:report`),
+- **Processes tab** (`GET /apps/{name}/processes` + `.../partials/processes`): desired
+  formation (`ps:scale <app>`) merged with observed states (`ps:report`),
   a scale form (`POST /apps/{name}/scale`, `CsrfForm`, capped at
   `SCALE_MAX = 100`, hidden when `ps-can-scale=false` or no formation; the
   `release` process type is shown read-only), per-container detail
   (`ps:inspect`), and resource limits/reservations (`resource:report`). Pure
   assembly lives in `dokku/processes.rs`.
-- **Services tab** (`GET /apps/{name}/services`): linked services from the
-  snapshot detail pass, enriched live per service via `<plugin>:info <service>`
+- **Services tab** (`GET /apps/{name}/services` + `.../partials/services`):
+  linked services fetched live on demand (`PluginList` + `app links`),
+  enriched per service via `<plugin>:info <service>`
   (plain-text report). DSNs are never parsed or rendered; the card shows status,
   version, exposed ports, internal IP, container ID, and linked apps.
 - **Rebuild action** (`POST /apps/{name}/rebuild`): reuses the start/stop/
   restart action path; long commands get a per-command timeout override
   (`PsRebuild` 300s, `PsScaleSet` 120s).
 - **Overview enrichment**: last build (`builds:report`), vhost list
-  (`domains:report`), and full linked-service list — all already fetched by
-  the detail pass, so no extra SSH cost.
+  (`domains:report`), and full linked-service list — fetched live for that app
+  when the overview fragment loads (`SnapshotStore::refresh_app`), never by the
+  background refresher.
 - **Degradation:** every detail command is best-effort; failures render empty
-  sections / an "unknown" card rather than a 5xx. Unknown apps still 404 via
+  sections / an "unknown" card (or a retry fragment for overview/config/logs)
+  rather than a 5xx. Unknown apps still 404 via
   `SnapshotStore::resolve_app`.
 
 **Version constraint:** the target host runs dokku 0.38.4 with redis plugin

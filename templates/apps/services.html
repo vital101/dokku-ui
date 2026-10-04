@@ -1,63 +1,10 @@
 {% extends "apps/base_app.html" %}
 
 {% block app_content %}
-<div class="space-y-6">
-  <div class="flex items-center justify-between">
-    <h3 class="text-sm font-medium text-white">Linked services</h3>
-    <span class="text-xs text-slate-500">Updated {{ updated }}</span>
-  </div>
-
-  {% if links_unknown %}
-  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
-    <p class="text-sm text-slate-400">Service links could not be determined yet.</p>
-  </div>
-  {% else if services.is_empty() %}
-  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
-    <p class="text-sm text-slate-400">No services are linked to this app.</p>
-    <p class="mt-2 text-xs text-slate-500">
-      Link one from the host with <span class="font-mono">dokku postgres:link &lt;service&gt; {{ name }}</span>
-      (or the equivalent for redis, mysql, mongo).
-    </p>
-  </div>
-  {% else %}
-  <div class="grid gap-4 sm:grid-cols-2">
-    {% for service in services %}
-    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
-      <div class="flex items-center justify-between gap-2">
-        <div class="flex items-center gap-2">
-          <span class="rounded-md bg-slate-800 px-2 py-0.5 text-xs font-medium text-slate-300">{{ service.plugin }}</span>
-          <span class="font-mono text-sm text-white">{{ service.service }}</span>
-        </div>
-        <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium {{ service.status_badge_css() }}">
-          <span class="size-1.5 rounded-full bg-current"></span>
-          {{ service.status_label() }}
-        </span>
-      </div>
-      <dl class="mt-4 space-y-2 text-sm">
-        <div class="flex justify-between">
-          <dt class="text-slate-400">Version</dt>
-          <dd class="text-white">{% if service.version.is_empty() %}—{% else %}{{ service.version }}{% endif %}</dd>
-        </div>
-        <div class="flex justify-between">
-          <dt class="text-slate-400">Exposed ports</dt>
-          <dd class="text-white">{% if service.exposed_ports.is_empty() %}—{% else %}{{ service.exposed_ports }}{% endif %}</dd>
-        </div>
-        <div class="flex justify-between">
-          <dt class="text-slate-400">Internal IP</dt>
-          <dd class="font-mono text-white">{% if service.internal_ip.is_empty() %}—{% else %}{{ service.internal_ip }}{% endif %}</dd>
-        </div>
-        <div class="flex justify-between">
-          <dt class="text-slate-400">Container ID</dt>
-          <dd class="font-mono text-white">{% if service.id_short.is_empty() %}—{% else %}{{ service.id_short }}{% endif %}</dd>
-        </div>
-        <div class="flex justify-between">
-          <dt class="text-slate-400">Linked apps</dt>
-          <dd class="text-white">{{ service.linked_apps_label() }}</dd>
-        </div>
-      </dl>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
+<div id="app-panel"
+     hx-get="/apps/{{ name }}/partials/services"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  {% include "apps/partials/loading.html" %}
 </div>
 {% endblock %}

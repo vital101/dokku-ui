@@ -105,6 +105,11 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         "/apps/alpha/delete",
         "/apps/alpha/config",
         "/apps/alpha/logs",
+        "/apps/alpha/partials/overview",
+        "/apps/alpha/partials/processes",
+        "/apps/alpha/partials/services",
+        "/apps/alpha/partials/config",
+        "/apps/alpha/partials/logs",
     ] {
         let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -119,6 +124,7 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         ("/apps/alpha/restart", ""),
         ("/apps/alpha/rebuild", ""),
         ("/apps/alpha/scale", "scale_web=2"),
+        ("/refresh", ""),
     ] {
         let resp = test::call_service(&app, form_request(path, body.to_owned()).to_request()).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
@@ -260,7 +266,7 @@ async fn create_app_error_flashes_and_returns_to_form() {
 }
 
 #[tokio::test]
-async fn show_renders_app_overview() {
+async fn show_shell_renders_htmx_panel_tabs_and_actions() {
     let (state, _dir) = test_state_with_client(seeded_app_client()).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -277,12 +283,49 @@ async fn show_renders_app_overview() {
     let body = get_body(resp).await;
 
     assert!(body.contains("alpha"));
+    assert!(
+        body.contains(r#"hx-get="/apps/alpha/partials/overview""#),
+        "overview panel wired to htmx"
+    );
+    assert!(body.contains(r#"hx-trigger="load""#), "panel loads on load");
+    assert!(body.contains("Loading"), "skeleton shown before swap");
+    assert!(
+        body.contains(r#"href="/apps/alpha/processes""#),
+        "tab links present"
+    );
+    assert!(
+        body.contains("border-emerald-500"),
+        "active tab highlighted"
+    );
+}
+
+#[tokio::test]
+async fn overview_partial_renders_app_data() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/overview")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
     assert!(body.contains("Running"));
     assert!(body.contains(r#">2</p>"#), "process count");
     assert!(body.contains("Yes"), "deployed flag");
     assert!(body.contains("2026-10-03 10:36 UTC"), "created at");
     assert!(body.contains("no"), "locked label");
     assert!(body.contains("Updated"), "data age chip");
+    assert!(
+        !body.contains("<!doctype html>"),
+        "fragment, not a full page"
+    );
 }
 
 #[tokio::test]
@@ -314,8 +357,6 @@ async fn show_renders_populated_app_details() {
             Ok(DokkuOutput::ok(include_str!("fixtures/app_links.txt"))),
         );
     let (state, _client, _dir) = harness(client).await;
-    state.snapshot.ensure_loaded().await.expect("load snapshot");
-    state.snapshot.refresh_details().await.expect("details");
 
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -323,7 +364,7 @@ async fn show_renders_populated_app_details() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha")
+            .uri("/apps/alpha/partials/overview")
             .cookie(cookie)
             .to_request(),
     )
@@ -400,6 +441,55 @@ async fn restart_refreshes_that_apps_report() {
         })
         .count();
     assert_eq!(report_calls, 2, "initial load plus post-action refresh");
+}
+
+#[tokio::test]
+async fn action_refreshes_only_cheap_reports() {
+    let (state, client, _dir) = harness(
+        seeded_app_client()
+            .stub(
+                DokkuCommand::PsRestart {
+                    app: app_name("alpha"),
+                },
+                Ok(DokkuOutput::ok("")),
+            )
+            .stub(
+                DokkuCommand::BuildsReport {
+                    app: app_name("alpha"),
+                },
+                Ok(DokkuOutput::ok(include_str!("fixtures/builds_report.json"))),
+            ),
+    )
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/alpha/restart", format!("csrf_token={csrf}"))
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, DokkuCommand::BuildsReport { .. })),
+        "actions sync only ps/apps state; the overview fragment fetches details on demand"
+    );
 }
 
 #[tokio::test]
@@ -819,7 +909,37 @@ async fn action_buttons_render_on_show_page() {
 }
 
 #[tokio::test]
-async fn config_renders_env_vars_and_tabs() {
+async fn config_shell_renders_tabs_and_panel() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        body.contains(r#"hx-get="/apps/alpha/partials/config""#),
+        "config panel wired to htmx"
+    );
+    assert!(body.contains(r#"href="/apps/alpha/config""#), "config tab");
+    assert!(body.contains(r#"href="/apps/alpha/logs""#), "logs tab");
+    assert!(body.contains(r#"href="/apps/alpha""#), "overview tab");
+    assert!(
+        body.contains("border-emerald-500"),
+        "active tab highlighted"
+    );
+}
+
+#[tokio::test]
+async fn config_partial_renders_env_vars() {
     let (state, _dir) = test_state_with_client(seeded_app_client().stub(
         DokkuCommand::ConfigShow {
             app: app_name("alpha"),
@@ -833,7 +953,7 @@ async fn config_renders_env_vars_and_tabs() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/config")
+            .uri("/apps/alpha/partials/config")
             .cookie(cookie)
             .to_request(),
     )
@@ -851,13 +971,6 @@ async fn config_renders_env_vars_and_tabs() {
     assert!(body.contains("••••••••"), "masked values rendered");
     assert!(!body.contains("=====>"), "dokku header line skipped");
     assert!(body.contains("Values are masked"));
-    assert!(body.contains(r#"href="/apps/alpha/config""#), "config tab");
-    assert!(body.contains(r#"href="/apps/alpha/logs""#), "logs tab");
-    assert!(body.contains(r#"href="/apps/alpha""#), "overview tab");
-    assert!(
-        body.contains("border-emerald-500"),
-        "active tab highlighted"
-    );
 }
 
 #[tokio::test]
@@ -875,7 +988,7 @@ async fn config_empty_renders_empty_state() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/config")
+            .uri("/apps/alpha/partials/config")
             .cookie(cookie)
             .to_request(),
     )
@@ -909,7 +1022,7 @@ async fn config_unknown_app_renders_404_without_config_call() {
 }
 
 #[tokio::test]
-async fn config_fetch_error_renders_502() {
+async fn config_fetch_error_renders_retry_fragment() {
     let (state, _dir) = test_state_with_client(seeded_app_client().stub(
         DokkuCommand::ConfigShow {
             app: app_name("alpha"),
@@ -923,18 +1036,50 @@ async fn config_fetch_error_renders_502() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/config")
+            .uri("/apps/alpha/partials/config")
             .cookie(cookie)
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.status(), StatusCode::OK, "200 so htmx swaps it in");
     let body = get_body(resp).await;
+    assert!(body.contains("Could not load this section."));
     assert!(body.contains("boom"));
+    assert!(body.contains("/apps/alpha/partials/config"));
 }
 
 #[tokio::test]
-async fn logs_defaults_to_200_lines_and_strips_ansi() {
+async fn logs_shell_renders_lines_selector_and_panel() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs?lines=50")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("Lines"));
+    assert!(body.contains(r#"value="50""#), "shell carries line count");
+    assert!(body.contains(r#"hx-get="/apps/alpha/partials/logs""#));
+    assert!(body.contains(r#"hx-get="/apps/alpha/partials/logs?lines=50""#));
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, DokkuCommand::Logs { .. })),
+        "shell never fetches logs"
+    );
+}
+
+#[tokio::test]
+async fn logs_partial_defaults_to_200_lines_and_strips_ansi() {
     let (state, client, _dir) = harness(seeded_app_client().stub(
         DokkuCommand::Logs {
             app: app_name("alpha"),
@@ -949,7 +1094,7 @@ async fn logs_defaults_to_200_lines_and_strips_ansi() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/logs")
+            .uri("/apps/alpha/partials/logs")
             .cookie(cookie)
             .to_request(),
     )
@@ -965,11 +1110,10 @@ async fn logs_defaults_to_200_lines_and_strips_ansi() {
         app: app_name("alpha"),
         num_lines: 200
     }));
-    assert!(body.contains("Lines"));
 }
 
 #[tokio::test]
-async fn logs_clamps_lines_parameter() {
+async fn logs_partial_clamps_lines_parameter() {
     for (query, expected) in [
         ("", 200),
         ("?lines=5", 10),
@@ -989,7 +1133,7 @@ async fn logs_clamps_lines_parameter() {
         let resp = test::call_service(
             &app,
             test::TestRequest::get()
-                .uri(&format!("/apps/alpha/logs{query}"))
+                .uri(&format!("/apps/alpha/partials/logs{query}"))
                 .cookie(cookie)
                 .to_request(),
         )
@@ -1035,7 +1179,7 @@ async fn logs_empty_renders_empty_state() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/logs")
+            .uri("/apps/alpha/partials/logs")
             .cookie(cookie)
             .to_request(),
     )
@@ -1045,11 +1189,11 @@ async fn logs_empty_renders_empty_state() {
 }
 
 #[tokio::test]
-async fn logs_fetch_error_renders_502() {
+async fn logs_fetch_error_renders_retry_fragment() {
     let (state, _dir) = test_state_with_client(seeded_app_client().stub(
         DokkuCommand::Logs {
             app: app_name("alpha"),
-            num_lines: 200,
+            num_lines: 50,
         },
         Err(exit_error(1, "boom")),
     ))
@@ -1060,14 +1204,19 @@ async fn logs_fetch_error_renders_502() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/logs")
+            .uri("/apps/alpha/partials/logs?lines=50")
             .cookie(cookie)
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.status(), StatusCode::OK, "200 so htmx swaps it in");
     let body = get_body(resp).await;
+    assert!(body.contains("Could not load this section."));
     assert!(body.contains("boom"));
+    assert!(
+        body.contains("/apps/alpha/partials/logs?lines=50"),
+        "retry keeps the chosen line count: {body}"
+    );
 }
 
 fn processes_client() -> MockClient {
@@ -1093,7 +1242,7 @@ fn processes_client() -> MockClient {
 }
 
 #[tokio::test]
-async fn processes_renders_formation_containers_and_resources() {
+async fn processes_shell_renders_tabs_and_panel() {
     let (state, _dir) = test_state_with_client(processes_client()).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -1121,6 +1270,29 @@ async fn processes_renders_formation_containers_and_resources() {
         body.contains("border-emerald-500"),
         "active tab highlighted"
     );
+    assert!(
+        body.contains(r#"hx-get="/apps/alpha/partials/processes""#),
+        "processes panel wired to htmx"
+    );
+}
+
+#[tokio::test]
+async fn processes_partial_renders_formation_containers_and_resources() {
+    let (state, _dir) = test_state_with_client(processes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
     assert!(body.contains("Formation"));
     assert!(body.contains(r#"action="/apps/alpha/scale""#), "scale form");
     assert!(
@@ -1172,7 +1344,7 @@ async fn processes_hides_form_when_scaling_is_disabled() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/processes")
+            .uri("/apps/alpha/partials/processes")
             .cookie(cookie)
             .to_request(),
     )
@@ -1203,7 +1375,7 @@ async fn processes_shows_note_when_no_formation_exists() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/processes")
+            .uri("/apps/alpha/partials/processes")
             .cookie(cookie)
             .to_request(),
     )
@@ -1241,7 +1413,7 @@ async fn processes_degrades_when_detail_commands_fail() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/processes")
+            .uri("/apps/alpha/partials/processes")
             .cookie(cookie)
             .to_request(),
     )
@@ -1296,7 +1468,7 @@ async fn scale_posts_formation_and_redirects_with_flash() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/processes")
+            .uri("/apps/alpha")
             .cookie(cookie.clone())
             .to_request(),
     )
@@ -1430,7 +1602,42 @@ async fn scale_dokku_error_flashes_and_returns_to_processes() {
 }
 
 #[tokio::test]
-async fn services_renders_linked_service_details() {
+async fn services_shell_renders_tabs_and_panel() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        body.contains(r#"hx-get="/apps/alpha/partials/services""#),
+        "services panel wired to htmx"
+    );
+    assert!(
+        body.contains(r#"href="/apps/alpha/services""#),
+        "services tab active"
+    );
+    assert!(
+        body.contains(r#"href="/apps/alpha/processes""#),
+        "processes tab"
+    );
+    assert!(
+        body.contains("border-emerald-500"),
+        "active tab highlighted"
+    );
+}
+
+#[tokio::test]
+async fn services_partial_renders_linked_service_details() {
     let client = seeded_app_client()
         .stub(
             DokkuCommand::PluginList,
@@ -1449,17 +1656,8 @@ async fn services_renders_linked_service_details() {
                 service: "roboswarm-db".into(),
             },
             Ok(DokkuOutput::ok(POSTGRES_INFO_FIXTURE)),
-        )
-        .stub(
-            DokkuCommand::AppLinks {
-                plugin: "postgres".into(),
-                app: app_name("alpha"),
-            },
-            Ok(DokkuOutput::ok(include_str!("fixtures/app_links.txt"))),
         );
     let (state, _client, _dir) = harness(client).await;
-    state.snapshot.ensure_loaded().await.expect("load");
-    state.snapshot.refresh_details().await.expect("details");
 
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -1467,7 +1665,7 @@ async fn services_renders_linked_service_details() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/services")
+            .uri("/apps/alpha/partials/services")
             .cookie(cookie)
             .to_request(),
     )
@@ -1486,10 +1684,6 @@ async fn services_renders_linked_service_details() {
     assert!(body.contains("roboswarm-server"));
     assert!(!body.contains("postgres://"), "dsn never rendered: {body}");
     assert!(body.contains("Container ID"));
-    assert!(
-        body.contains(r#"href="/apps/alpha/services""#),
-        "services tab active"
-    );
 }
 
 #[tokio::test]
@@ -1499,8 +1693,6 @@ async fn services_shows_empty_state_when_no_links() {
         Ok(DokkuOutput::ok(include_str!("fixtures/plugin_list.txt"))),
     );
     let (state, _client, _dir) = harness(client).await;
-    state.snapshot.ensure_loaded().await.expect("load");
-    state.snapshot.refresh_details().await.expect("details");
 
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -1508,7 +1700,7 @@ async fn services_shows_empty_state_when_no_links() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/services")
+            .uri("/apps/alpha/partials/services")
             .cookie(cookie)
             .to_request(),
     )
@@ -1518,15 +1710,18 @@ async fn services_shows_empty_state_when_no_links() {
 }
 
 #[tokio::test]
-async fn services_marks_unknown_when_links_not_yet_resolved() {
-    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+async fn services_marks_unknown_when_plugin_list_fails() {
+    let (state, _dir) = test_state_with_client(
+        seeded_app_client().stub(DokkuCommand::PluginList, Err(exit_error(1, "no plugins"))),
+    )
+    .await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
 
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/services")
+            .uri("/apps/alpha/partials/services")
             .cookie(cookie)
             .to_request(),
     )
@@ -1557,8 +1752,6 @@ async fn services_degrades_to_unknown_status_when_info_fails() {
             Err(exit_error(1, "boom")),
         );
     let (state, _client, _dir) = harness(client).await;
-    state.snapshot.ensure_loaded().await.expect("load");
-    state.snapshot.refresh_details().await.expect("details");
 
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -1566,7 +1759,7 @@ async fn services_degrades_to_unknown_status_when_info_fails() {
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/apps/alpha/services")
+            .uri("/apps/alpha/partials/services")
             .cookie(cookie)
             .to_request(),
     )
@@ -1591,4 +1784,51 @@ async fn services_unknown_app_renders_404() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn partials_render_not_found_fragment_for_unknown_app() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    for path in [
+        "/apps/nope/partials/overview",
+        "/apps/nope/partials/processes",
+        "/apps/nope/partials/services",
+        "/apps/nope/partials/config",
+        "/apps/nope/partials/logs",
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(path)
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{path}: htmx only swaps 2xx responses"
+        );
+        let body = get_body(resp).await;
+        assert!(body.contains("was not found"), "{path}: {body}");
+        assert!(body.contains("may have been deleted"), "{path}");
+        assert!(body.contains("Could not load this section."), "{path}");
+    }
+
+    assert!(
+        client.calls().iter().all(|c| {
+            !matches!(
+                c,
+                DokkuCommand::ConfigShow { .. }
+                    | DokkuCommand::Logs { .. }
+                    | DokkuCommand::PsScaleGet { .. }
+                    | DokkuCommand::ServiceInfo { .. }
+                    | DokkuCommand::BuildsReport { .. }
+            )
+        }),
+        "no per-tab detail commands for unknown app"
+    );
 }

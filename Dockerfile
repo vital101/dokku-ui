@@ -32,7 +32,7 @@ RUN apt-get update \
 RUN useradd --system --create-home --uid 1000 dokku-ui
 WORKDIR /app
 COPY --from=build /app/target/release/dokku-ui /app/dokku-ui
-COPY --from=build /app/static/css/app.css /app/static/css/app.css
+COPY --from=build /app/static /app/static
 USER dokku-ui
 ENV PORT=8080
 EXPOSE 8080

@@ -6,6 +6,10 @@
   <title>{% block title %}Dokku UI{% endblock %}</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
   <link rel="stylesheet" href="/static/css/app.css">
+  <!-- Disables htmx's auto-injected indicator <style> tag, which the CSP
+       (style-src 'self', no unsafe-inline) would block. -->
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
+  <script src="/static/js/htmx.min.js" defer></script>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100">
   <div class="flex min-h-screen">

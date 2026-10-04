@@ -7,14 +7,14 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::dokku::{
-    ContainerRow, ProcessRow, app_config, app_containers, app_formation, app_logs, app_resources,
-    container_rows, format_age, formation_rows, overview_from_snapshot, parse_scale_form,
-    service_info,
+    ContainerRow, ProcessRow, SnapshotError, app_config, app_containers, app_formation, app_logs,
+    app_resources, app_service_links, container_rows, format_age, formation_rows,
+    overview_from_snapshot, parse_scale_form, service_info,
 };
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
-use crate::domain::types::{AppInfo, EnvVar, ResourceReport, ServiceInfo};
+use crate::domain::types::{EnvVar, ResourceReport, ServiceInfo};
 use crate::error::AppError;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
@@ -44,6 +44,63 @@ struct ShowPage<'a> {
     flash: Option<&'a FlashMessage>,
     name: &'a str,
     active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/config.html")]
+struct ConfigPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/delete_confirm.html")]
+struct DeleteConfirmPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/logs.html")]
+struct LogsPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+    line_count: u32,
+    min_lines: u32,
+    max_lines: u32,
+}
+
+#[derive(Template)]
+#[template(path = "apps/processes.html")]
+struct ProcessesPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/services.html")]
+struct ServicesPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/overview.html")]
+struct OverviewPartial<'a> {
     health_label: &'static str,
     health_css: &'static str,
     process_label: String,
@@ -59,23 +116,81 @@ struct ShowPage<'a> {
 }
 
 #[derive(Template)]
-#[template(path = "apps/config.html")]
-struct ConfigPage<'a> {
-    email: &'a str,
-    csrf_token: &'a str,
-    flash: Option<&'a FlashMessage>,
+#[template(path = "apps/partials/processes.html")]
+struct ProcessesPartial<'a> {
     name: &'a str,
-    active_tab: &'static str,
+    csrf_token: &'a str,
+    rows: Vec<ProcessRow>,
+    containers: Vec<ContainerRow>,
+    resources: Vec<ResourceReport>,
+    scale_note: Option<String>,
+    updated: String,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/services.html")]
+struct ServicesPartial<'a> {
+    name: &'a str,
+    services: Vec<ServiceInfo>,
+    links_unknown: bool,
+    updated: String,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/config.html")]
+struct ConfigPartial {
     vars: Vec<EnvVar>,
 }
 
 #[derive(Template)]
-#[template(path = "apps/delete_confirm.html")]
-struct DeleteConfirmPage<'a> {
-    email: &'a str,
-    csrf_token: &'a str,
-    flash: Option<&'a FlashMessage>,
-    name: &'a str,
+#[template(path = "apps/partials/logs.html")]
+struct LogsPartial {
+    lines: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/error.html")]
+struct ErrorPartial<'a> {
+    message: &'a str,
+    retry_url: String,
+}
+
+fn partial_url(name: &str, tab: &str, query: Option<&str>) -> String {
+    match query {
+        Some(query) => format!("/apps/{name}/partials/{tab}?{query}"),
+        None => format!("/apps/{name}/partials/{tab}"),
+    }
+}
+
+/// Renders the small retry card that htmx swaps in when a partial fetch fails.
+/// Always 200: htmx does not swap 4xx/5xx responses, so an error status would
+/// leave the loading skeleton spinning forever.
+fn error_fragment(retry_url: &str, message: &str) -> Result<HttpResponse, AppError> {
+    let page = ErrorPartial {
+        message,
+        retry_url: retry_url.to_owned(),
+    };
+    render(&page)
+}
+
+fn not_found_fragment(name: &str, retry_url: &str) -> Result<HttpResponse, AppError> {
+    error_fragment(
+        retry_url,
+        &format!("App '{name}' was not found — it may have been deleted."),
+    )
+}
+
+/// Maps a snapshot miss / SSH failure from `resolve_app` onto the retry card.
+fn fragment_for_resolve_error(
+    name: &str,
+    retry_url: &str,
+    err: SnapshotError,
+) -> Result<HttpResponse, AppError> {
+    if err.is_not_found() {
+        not_found_fragment(name, retry_url)
+    } else {
+        error_fragment(retry_url, &err.to_string())
+    }
 }
 
 async fn current_user(
@@ -129,7 +244,7 @@ pub async fn create(
 
     match state.dokku.exec(&DokkuCommand::AppsCreate { app }).await {
         Ok(_) => {
-            if let Err(err) = state.snapshot.refresh_app(&name).await {
+            if let Err(err) = state.snapshot.refresh_app_reports(&name).await {
                 tracing::warn!(error = %err, "snapshot refresh after create failed");
             }
             set_flash(
@@ -157,23 +272,46 @@ pub async fn show(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
-
-    let (snapshot, _app) = state.snapshot.resolve_app(&name).await?;
-    let overview = overview_from_snapshot(&snapshot, &name)?;
+    state.snapshot.resolve_app(&name).await?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
-    let process_label = match overview.process_count {
-        -1 => "—".to_owned(),
-        count => count.to_string(),
-    };
-    let app_info = overview.app_info.as_ref();
     let page = ShowPage {
         email: &user.email,
         csrf_token: &csrf_token,
         flash: flash.as_ref(),
         name: &name,
         active_tab: "overview",
+    };
+    render(&page)
+}
+
+pub async fn overview_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let retry_url = partial_url(&name, "overview", None);
+    if let Err(err) = state.snapshot.refresh_app(&name).await {
+        return error_fragment(&retry_url, &err.to_string());
+    }
+    let snapshot = state.snapshot.ensure_loaded().await?;
+    let overview = match overview_from_snapshot(&snapshot, &name) {
+        Ok(overview) => overview,
+        // The app vanished between the shell render and this fragment (e.g.
+        // deleted via the CLI); `refresh_app` already removed it above.
+        Err(_) => return not_found_fragment(&name, &retry_url),
+    };
+
+    let process_label = match overview.process_count {
+        -1 => "—".to_owned(),
+        count => count.to_string(),
+    };
+    let app_info = overview.app_info.as_ref();
+    let page = OverviewPartial {
         health_label: overview.health.label(),
         health_css: overview.health.badge_css(),
         process_label,
@@ -183,25 +321,22 @@ pub async fn show(
             .map(|r| r.deployed)
             .unwrap_or(false),
         created_at: app_info.map(|a| a.created_at.as_str()).unwrap_or("unknown"),
-        locked_label: app_info.map(AppInfo::locked_label).unwrap_or("unknown"),
+        locked_label: app_info.map(|a| a.locked_label()).unwrap_or("unknown"),
         image_status_label: app_info
-            .map(AppInfo::image_status_label)
+            .map(|a| a.image_status_label())
             .unwrap_or("unknown"),
         last_build_label: app_info
-            .map(AppInfo::last_build_label)
+            .map(|a| a.last_build_label())
             .unwrap_or_else(|| "unknown".to_owned()),
-        link_exists_label: app_info
-            .map(AppInfo::link_exists_label)
-            .unwrap_or("unknown"),
+        link_exists_label: app_info.map(|a| a.link_exists_label()).unwrap_or("unknown"),
         domains_label: app_info
-            .map(AppInfo::domains_label)
+            .map(|a| a.domains_label())
             .unwrap_or_else(|| "—".to_owned()),
         dns_record_exists_label: app_info
-            .map(AppInfo::dns_record_exists_label)
+            .map(|a| a.dns_record_exists_label())
             .unwrap_or("unknown"),
         updated: format_age(snapshot.age()),
     };
-
     render(&page)
 }
 
@@ -212,9 +347,7 @@ pub async fn config(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
-
-    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
-    let vars = app_config(&*state.dokku, app).await?;
+    state.snapshot.resolve_app(&name).await?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
@@ -224,24 +357,28 @@ pub async fn config(
         flash: flash.as_ref(),
         name: &name,
         active_tab: "config",
-        vars,
     };
-
     render(&page)
 }
 
-#[derive(Template)]
-#[template(path = "apps/logs.html")]
-struct LogsPage<'a> {
-    email: &'a str,
-    csrf_token: &'a str,
-    flash: Option<&'a FlashMessage>,
-    name: &'a str,
-    active_tab: &'static str,
-    lines: Vec<String>,
-    line_count: u32,
-    min_lines: u32,
-    max_lines: u32,
+pub async fn config_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let retry_url = partial_url(&name, "config", None);
+    let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
+    };
+    let vars = match app_config(&*state.dokku, app).await {
+        Ok(vars) => vars,
+        Err(err) => return error_fragment(&retry_url, &err.to_string()),
+    };
+    render(&ConfigPartial { vars })
 }
 
 pub async fn logs(
@@ -252,11 +389,9 @@ pub async fn logs(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
+    state.snapshot.resolve_app(&name).await?;
 
     let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
-    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
-    let log_lines = app_logs(&*state.dokku, app, num_lines).await?;
-
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
     let page = LogsPage {
@@ -265,28 +400,35 @@ pub async fn logs(
         flash: flash.as_ref(),
         name: &name,
         active_tab: "logs",
-        lines: log_lines.as_slice().to_vec(),
         line_count: num_lines,
         min_lines: LOG_LINES_MIN,
         max_lines: LOG_LINES_MAX,
     };
-
     render(&page)
 }
 
-#[derive(Template)]
-#[template(path = "apps/processes.html")]
-struct ProcessesPage<'a> {
-    email: &'a str,
-    csrf_token: &'a str,
-    flash: Option<&'a FlashMessage>,
-    name: &'a str,
-    active_tab: &'static str,
-    rows: Vec<ProcessRow>,
-    containers: Vec<ContainerRow>,
-    resources: Vec<ResourceReport>,
-    scale_note: Option<String>,
-    updated: String,
+pub async fn logs_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
+    let retry_url = partial_url(&name, "logs", Some(&format!("lines={num_lines}")));
+    let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
+    };
+    let log_lines = match app_logs(&*state.dokku, app, num_lines).await {
+        Ok(log_lines) => log_lines,
+        Err(err) => return error_fragment(&retry_url, &err.to_string()),
+    };
+    render(&LogsPartial {
+        lines: log_lines.as_slice().to_vec(),
+    })
 }
 
 pub async fn processes(
@@ -296,23 +438,7 @@ pub async fn processes(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
-
-    let (snapshot, app) = state.snapshot.resolve_app(&name).await?;
-    let ps_report = snapshot.ps_report(&name);
-
-    // Detail commands are best-effort: a failure degrades to an empty section
-    // rather than taking the whole page down.
-    let formation = app_formation(&*state.dokku, app.clone())
-        .await
-        .unwrap_or_default();
-    let containers = app_containers(&*state.dokku, app.clone())
-        .await
-        .unwrap_or_default();
-    let resources = app_resources(&*state.dokku, app).await.unwrap_or_default();
-
-    let rows = formation_rows(&formation, ps_report);
-    let container_rows = container_rows(&containers, OffsetDateTime::now_utc());
-    let scale_note = scale_note(ps_report, &formation);
+    state.snapshot.resolve_app(&name).await?;
 
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
@@ -322,13 +448,49 @@ pub async fn processes(
         flash: flash.as_ref(),
         name: &name,
         active_tab: "processes",
+    };
+    render(&page)
+}
+
+pub async fn processes_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let retry_url = partial_url(&name, "processes", None);
+    let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
+    };
+    let ps_report = snapshot.ps_report(&name);
+
+    // Detail commands are best-effort: a failure degrades to an empty section
+    // rather than taking the whole panel down.
+    let formation = app_formation(&*state.dokku, app.clone())
+        .await
+        .unwrap_or_default();
+    let containers = app_containers(&*state.dokku, app.clone())
+        .await
+        .unwrap_or_default();
+    let resources = app_resources(&*state.dokku, app).await.unwrap_or_default();
+
+    let rows = formation_rows(&formation, ps_report);
+    let containers = container_rows(&containers, OffsetDateTime::now_utc());
+    let scale_note = scale_note(ps_report, &formation);
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let page = ProcessesPartial {
+        name: &name,
+        csrf_token: &csrf_token,
         rows,
-        containers: container_rows,
+        containers,
         resources,
         scale_note,
         updated: format_age(snapshot.age()),
     };
-
     render(&page)
 }
 
@@ -389,7 +551,7 @@ pub async fn scale(
         .await
     {
         Ok(_) => {
-            if let Err(err) = state.snapshot.refresh_app(app.as_str()).await {
+            if let Err(err) = state.snapshot.refresh_app_reports(app.as_str()).await {
                 tracing::warn!(error = %err, "snapshot refresh after scale failed");
             }
             set_flash(&session, FlashLevel::Success, format!("Scaled '{}'.", name));
@@ -405,19 +567,6 @@ pub async fn scale(
     Ok(see_other(&redirect_to))
 }
 
-#[derive(Template)]
-#[template(path = "apps/services.html")]
-struct ServicesPage<'a> {
-    email: &'a str,
-    csrf_token: &'a str,
-    flash: Option<&'a FlashMessage>,
-    name: &'a str,
-    active_tab: &'static str,
-    services: Vec<ServiceInfo>,
-    links_unknown: bool,
-    updated: String,
-}
-
 pub async fn services(
     state: web::Data<AppState>,
     session: Session,
@@ -425,9 +574,36 @@ pub async fn services(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
-    let (snapshot, _app) = state.snapshot.resolve_app(&name).await?;
+    state.snapshot.resolve_app(&name).await?;
 
-    let links = snapshot.app_info(&name).and_then(|info| info.links.clone());
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = ServicesPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "services",
+    };
+    render(&page)
+}
+
+pub async fn services_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let retry_url = partial_url(&name, "services", None);
+    let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
+    };
+
+    // Links are fetched live so the services tab never depends on background data.
+    let links = app_service_links(&*state.dokku, app).await;
     let links_unknown = links.is_none();
     let links = links.unwrap_or_default();
 
@@ -440,19 +616,12 @@ pub async fn services(
         services.push(info);
     }
 
-    let csrf_token = ensure_csrf(&session).await?;
-    let flash = take_flash(&session);
-    let page = ServicesPage {
-        email: &user.email,
-        csrf_token: &csrf_token,
-        flash: flash.as_ref(),
+    let page = ServicesPartial {
         name: &name,
-        active_tab: "services",
         services,
         links_unknown,
         updated: format_age(snapshot.age()),
     };
-
     render(&page)
 }
 
@@ -633,7 +802,7 @@ async fn process_action(
 
     match state.dokku.exec(&action.command(app.clone())).await {
         Ok(_) => {
-            if let Err(err) = state.snapshot.refresh_app(app.as_str()).await {
+            if let Err(err) = state.snapshot.refresh_app_reports(app.as_str()).await {
                 tracing::warn!(error = %err, "snapshot refresh after action failed");
             }
             set_flash(

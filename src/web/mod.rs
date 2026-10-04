@@ -95,6 +95,7 @@ pub fn build_app(
         )
         .route("/logout", web::post().to(auth_handlers::logout))
         .route("/", web::get().to(pages::dashboard))
+        .route("/refresh", web::post().to(pages::refresh_now))
         .route("/apps/new", web::get().to(apps::new_form))
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
@@ -103,6 +104,26 @@ pub fn build_app(
         .route("/apps/{name}/services", web::get().to(apps::services))
         .route("/apps/{name}/config", web::get().to(apps::config))
         .route("/apps/{name}/logs", web::get().to(apps::logs))
+        .route(
+            "/apps/{name}/partials/overview",
+            web::get().to(apps::overview_partial),
+        )
+        .route(
+            "/apps/{name}/partials/processes",
+            web::get().to(apps::processes_partial),
+        )
+        .route(
+            "/apps/{name}/partials/services",
+            web::get().to(apps::services_partial),
+        )
+        .route(
+            "/apps/{name}/partials/config",
+            web::get().to(apps::config_partial),
+        )
+        .route(
+            "/apps/{name}/partials/logs",
+            web::get().to(apps::logs_partial),
+        )
         .service(
             web::resource("/apps/{name}/delete")
                 .route(web::get().to(apps::delete_confirm))

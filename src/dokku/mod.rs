@@ -9,7 +9,8 @@ pub mod russh_client;
 pub mod snapshot;
 
 pub use app_pages::{
-    app_config, app_containers, app_formation, app_logs, app_resources, service_info,
+    app_config, app_containers, app_formation, app_logs, app_resources, app_service_links,
+    service_info,
 };
 pub use client::{DokkuClient, DokkuError, DokkuOutput};
 pub use dashboard::{AppRow, DashboardData, dashboard_from_snapshot};

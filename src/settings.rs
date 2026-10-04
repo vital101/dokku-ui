@@ -15,7 +15,6 @@ pub struct Settings {
     pub session_ttl_secs: u64,
     pub cookie_secure: bool,
     pub snapshot_refresh_secs: u64,
-    pub detail_refresh_secs: u64,
 }
 
 impl Settings {
@@ -80,19 +79,10 @@ impl Settings {
             Some(raw) => raw
                 .parse::<u64>()
                 .map_err(|_| SettingsError::InvalidSnapshotRefresh(raw.clone()))?,
-            None => 15,
+            None => 1800,
         };
         if snapshot_refresh_secs == 0 {
             return Err(SettingsError::InvalidSnapshotRefresh("0".to_owned()));
-        }
-        let detail_refresh_secs = match vars.get("DETAIL_REFRESH_SECS") {
-            Some(raw) => raw
-                .parse::<u64>()
-                .map_err(|_| SettingsError::InvalidDetailRefresh(raw.clone()))?,
-            None => 60,
-        };
-        if detail_refresh_secs == 0 {
-            return Err(SettingsError::InvalidDetailRefresh("0".to_owned()));
         }
         Ok(Self {
             port,
@@ -107,7 +97,6 @@ impl Settings {
             session_ttl_secs,
             cookie_secure,
             snapshot_refresh_secs,
-            detail_refresh_secs,
         })
     }
 }
@@ -126,8 +115,6 @@ pub enum SettingsError {
     InvalidCookieSecure(String),
     #[error("SNAPSHOT_REFRESH_SECS must be a positive integer of seconds, got `{0}`")]
     InvalidSnapshotRefresh(String),
-    #[error("DETAIL_REFRESH_SECS must be a positive integer of seconds, got `{0}`")]
-    InvalidDetailRefresh(String),
 }
 
 #[cfg(test)]
@@ -166,8 +153,7 @@ mod tests {
         );
         assert_eq!(settings.session_ttl_secs, 604_800);
         assert!(!settings.cookie_secure);
-        assert_eq!(settings.snapshot_refresh_secs, 15);
-        assert_eq!(settings.detail_refresh_secs, 60);
+        assert_eq!(settings.snapshot_refresh_secs, 1800);
     }
 
     #[test]
@@ -194,7 +180,6 @@ mod tests {
             ("SESSION_TTL_SECS", "86400"),
             ("COOKIE_SECURE", "true"),
             ("SNAPSHOT_REFRESH_SECS", "45"),
-            ("DETAIL_REFRESH_SECS", "300"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -216,7 +201,6 @@ mod tests {
         assert_eq!(settings.session_ttl_secs, 86_400);
         assert!(settings.cookie_secure);
         assert_eq!(settings.snapshot_refresh_secs, 45);
-        assert_eq!(settings.detail_refresh_secs, 300);
     }
 
     #[test]
@@ -270,19 +254,5 @@ mod tests {
         let err =
             Settings::from_map(&map(&[("SNAPSHOT_REFRESH_SECS", "0")])).expect_err("zero refresh");
         assert!(matches!(err, SettingsError::InvalidSnapshotRefresh(_)));
-    }
-
-    #[test]
-    fn rejects_invalid_detail_refresh() {
-        let err = Settings::from_map(&map(&[("DETAIL_REFRESH_SECS", "soon")]))
-            .expect_err("invalid detail refresh");
-        assert!(matches!(err, SettingsError::InvalidDetailRefresh(_)));
-    }
-
-    #[test]
-    fn rejects_zero_detail_refresh() {
-        let err = Settings::from_map(&map(&[("DETAIL_REFRESH_SECS", "0")]))
-            .expect_err("zero detail refresh");
-        assert!(matches!(err, SettingsError::InvalidDetailRefresh(_)));
     }
 }

@@ -1,14 +1,16 @@
 use actix_session::Session;
 use actix_web::{HttpResponse, web};
 use askama::Template;
+use serde::Deserialize;
 
 use crate::dokku::{AppRow, dashboard_from_snapshot, format_age};
 use crate::domain::types::AppStats;
 use crate::error::AppError;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
-use crate::web::csrf_form::ensure_csrf;
-use crate::web::flash::{FlashMessage, take_flash};
+use crate::web::csrf_form::{CsrfForm, ensure_csrf};
+use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
+use crate::web::render::see_other;
 use crate::web::state::AppState;
 
 #[derive(Template)]
@@ -51,6 +53,27 @@ pub async fn dashboard(
     Ok(HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(page.render()?))
+}
+
+#[derive(Deserialize)]
+pub struct RefreshForm {}
+
+/// Manual full refresh from the dashboard. Runs the cheap ps/apps pass across
+/// every app, so it can take a few seconds on a busy host.
+pub async fn refresh_now(
+    state: web::Data<AppState>,
+    session: Session,
+    _form: CsrfForm<RefreshForm>,
+) -> Result<HttpResponse, AppError> {
+    match state.snapshot.refresh().await {
+        Ok(_) => set_flash(&session, FlashLevel::Success, "Data refreshed."),
+        Err(err) => set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Failed to refresh: {err}"),
+        ),
+    }
+    Ok(see_other("/"))
 }
 
 #[cfg(test)]

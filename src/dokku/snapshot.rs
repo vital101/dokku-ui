@@ -111,8 +111,8 @@ pub async fn build_snapshot(client: &dyn DokkuClient) -> Result<Snapshot, DokkuE
     })
 }
 
-/// The build/domain/link details shown on an app's overview page. Kept in a
-/// separate (heavier) refresh pass because each app costs several SSH execs.
+/// The build/domain/link details shown on an app's overview page. Fetched on
+/// demand when an app page is opened, never by the background refresher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppDetails {
     pub image_status: Option<ImageStatus>,
@@ -122,41 +122,7 @@ pub struct AppDetails {
     pub dns_record_exists: Option<bool>,
 }
 
-/// Copies detail fields from a previous snapshot onto a freshly-built one, so the
-/// cheap ps/apps pass never blanks data that the slower detail pass populated.
-fn carry_over_details(previous: &Snapshot, next: &mut Snapshot) {
-    for (name, info) in next.apps_reports.iter_mut() {
-        let Some(info) = info.as_mut() else { continue };
-        if let Some(Some(prev)) = previous.apps_reports.get(name) {
-            info.image_status = prev.image_status.clone();
-            info.last_build = prev.last_build.clone();
-            info.links = prev.links.clone();
-            info.domains = prev.domains.clone();
-            info.dns_record_exists = prev.dns_record_exists;
-        }
-    }
-}
-
-/// Fetches details for every app with bounded concurrency.
-async fn details_for_apps(
-    client: &dyn DokkuClient,
-    dns: &dyn DnsResolver,
-    apps: &[AppName],
-    plugins: Option<&[String]>,
-) -> Vec<(AppName, AppDetails)> {
-    let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_REPORTS));
-    join_all(apps.iter().cloned().map(|app| {
-        let permits = permits.clone();
-        let plugins = plugins.map(|plugins| plugins.to_vec());
-        async move {
-            let _permit = permits.acquire().await.ok();
-            let details = fetch_one_details(client, dns, &app, plugins.as_deref()).await;
-            (app, details)
-        }
-    }))
-    .await
-}
-
+/// Fetches build/domain/link details for a single app (several SSH execs).
 async fn fetch_one_details(
     client: &dyn DokkuClient,
     dns: &dyn DnsResolver,
@@ -194,7 +160,7 @@ async fn fetch_build(
     }
 }
 
-async fn fetch_service_links(
+pub(super) async fn fetch_service_links(
     client: &dyn DokkuClient,
     app: &AppName,
     plugins: Option<&[String]>,
@@ -247,7 +213,7 @@ async fn fetch_domains(
     (vhosts, status)
 }
 
-async fn fetch_service_plugins(client: &dyn DokkuClient) -> Option<Vec<String>> {
+pub(super) async fn fetch_service_plugins(client: &dyn DokkuClient) -> Option<Vec<String>> {
     client
         .exec(&DokkuCommand::PluginList)
         .await
@@ -300,9 +266,21 @@ impl SnapshotStore {
         self.refresh_locked().await
     }
 
-    /// Refreshes a single app (or removes it if dokku no longer lists it). Used after
-    /// mutating actions and as the live fallback when an app is not in the snapshot.
+    /// Refreshes a single app (or removes it if dokku no longer lists it), including
+    /// the build/domain/link detail pass. Used by the on-demand overview fragment and
+    /// as the live fallback when an app is not in the snapshot.
     pub async fn refresh_app(&self, name: &str) -> Result<(), DokkuError> {
+        self.refresh_app_inner(name, true).await
+    }
+
+    /// Cheap variant for mutating actions: syncs only `ps:report`/`apps:report` state
+    /// so the dashboard reflects the change. The heavy per-app details are fetched by
+    /// the overview fragment when the page is (re)loaded, not here.
+    pub async fn refresh_app_reports(&self, name: &str) -> Result<(), DokkuError> {
+        self.refresh_app_inner(name, false).await
+    }
+
+    async fn refresh_app_inner(&self, name: &str, details: bool) -> Result<(), DokkuError> {
         let _guard = self.write_lock.lock().await;
 
         let output = self.client.exec(&DokkuCommand::AppsList).await?;
@@ -332,20 +310,22 @@ impl SnapshotStore {
                     .await
                     .ok()
                     .and_then(|output| parse_apps_report(&output.stdout, name));
-                if let Some(info) = info.as_mut() {
-                    let plugins = fetch_service_plugins(self.client.as_ref()).await;
-                    let details = fetch_one_details(
-                        self.client.as_ref(),
-                        self.dns.as_ref(),
-                        &app,
-                        plugins.as_deref(),
-                    )
-                    .await;
-                    info.image_status = details.image_status;
-                    info.last_build = details.last_build;
-                    info.links = details.links;
-                    info.domains = details.domains;
-                    info.dns_record_exists = details.dns_record_exists;
+                if details {
+                    if let Some(info) = info.as_mut() {
+                        let plugins = fetch_service_plugins(self.client.as_ref()).await;
+                        let details = fetch_one_details(
+                            self.client.as_ref(),
+                            self.dns.as_ref(),
+                            &app,
+                            plugins.as_deref(),
+                        )
+                        .await;
+                        info.image_status = details.image_status;
+                        info.last_build = details.last_build;
+                        info.links = details.links;
+                        info.domains = details.domains;
+                        info.dns_record_exists = details.dns_record_exists;
+                    }
                 }
                 (ps, info)
             }
@@ -382,59 +362,10 @@ impl SnapshotStore {
     }
 
     async fn refresh_locked(&self) -> Result<Arc<Snapshot>, DokkuError> {
-        let mut snapshot = build_snapshot(self.client.as_ref()).await?;
-        if let Some(previous) = self.current.read().await.as_ref() {
-            carry_over_details(previous, &mut snapshot);
-        }
+        let snapshot = build_snapshot(self.client.as_ref()).await?;
         let snapshot = Arc::new(snapshot);
         *self.current.write().await = Some(snapshot.clone());
         Ok(snapshot)
-    }
-
-    /// Heavy pass: refreshes build/domain/link details for every listed app. Runs
-    /// off the fast `ps:report` loop because each app costs several SSH execs
-    /// (dokku boots its plugin system per command).
-    pub async fn refresh_details(&self) -> Result<(), DokkuError> {
-        let _guard = self.write_lock.lock().await;
-        self.refresh_details_locked().await
-    }
-
-    async fn refresh_details_locked(&self) -> Result<(), DokkuError> {
-        let Some(snapshot) = self.current().await else {
-            return Ok(());
-        };
-        let apps: Vec<AppName> = snapshot
-            .apps_reports
-            .iter()
-            .filter(|(_, info)| info.is_some())
-            .filter_map(|(name, _)| AppName::try_from(name.clone()).ok())
-            .collect();
-        if apps.is_empty() {
-            return Ok(());
-        }
-
-        let plugins = fetch_service_plugins(self.client.as_ref()).await;
-        let details = details_for_apps(
-            self.client.as_ref(),
-            self.dns.as_ref(),
-            &apps,
-            plugins.as_deref(),
-        )
-        .await;
-
-        self.mutate(|snapshot| {
-            for (name, detail) in &details {
-                if let Some(Some(info)) = snapshot.apps_reports.get_mut(name.as_str()) {
-                    info.image_status = detail.image_status.clone();
-                    info.last_build = detail.last_build.clone();
-                    info.links = detail.links.clone();
-                    info.domains = detail.domains.clone();
-                    info.dns_record_exists = detail.dns_record_exists;
-                }
-            }
-        })
-        .await;
-        Ok(())
     }
 
     async fn mutate<F>(&self, edit: F)
@@ -464,29 +395,19 @@ fn listed_app(snapshot: &Snapshot, name: &str) -> Option<AppName> {
 }
 
 /// Refresh forever, sleeping `interval` after each attempt. The cheap ps/apps pass
-/// runs every iteration; the heavier detail pass runs whenever it is due. Failures
-/// keep the last good snapshot; the loop logs and retries rather than taking the UI down.
+/// is all that runs in the background; per-app build/domain/link details are fetched
+/// on demand by the app pages. Failures keep the last good snapshot; the loop logs
+/// and retries rather than taking the UI down.
 pub fn spawn_refresher(
     store: Arc<SnapshotStore>,
     interval: Duration,
-    detail_interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_details: Option<Instant> = None;
         loop {
+            tokio::time::sleep(interval).await;
             if let Err(err) = store.refresh().await {
                 tracing::warn!(error = %err, "snapshot refresh failed; serving last good data");
             }
-            let details_due = last_details
-                .map(|last| last.elapsed() >= detail_interval)
-                .unwrap_or(true);
-            if details_due {
-                match store.refresh_details().await {
-                    Ok(()) => last_details = Some(Instant::now()),
-                    Err(err) => tracing::warn!(error = %err, "snapshot detail refresh failed"),
-                }
-            }
-            tokio::time::sleep(interval).await;
         }
     })
 }
@@ -822,11 +743,7 @@ mod tests {
             crate::dokku::MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"]))),
         );
         let store = Arc::new(SnapshotStore::new(client));
-        let handle = spawn_refresher(
-            store.clone(),
-            Duration::from_millis(10),
-            Duration::from_secs(60),
-        );
+        let handle = spawn_refresher(store.clone(), Duration::from_millis(10));
 
         for _ in 0..50 {
             if store.current().await.is_some() {
@@ -836,208 +753,6 @@ mod tests {
         }
         assert!(store.current().await.is_some(), "refresher warms the store");
         handle.abort();
-    }
-
-    #[tokio::test]
-    async fn refresh_details_populates_app_info() {
-        let client = Arc::new(details_client());
-        let store =
-            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()));
-        store.ensure_loaded().await.expect("load");
-
-        store.refresh_details().await.expect("details");
-
-        let info = store
-            .current()
-            .await
-            .expect("snapshot")
-            .app_info("alpha")
-            .cloned()
-            .expect("app info");
-        assert_eq!(info.image_status, Some(ImageStatus::Built));
-        assert_eq!(
-            info.links,
-            Some(vec![ServiceLink {
-                plugin: "postgres".into(),
-                service: "roboswarm-db".into(),
-            }])
-        );
-        assert_eq!(
-            info.last_build.as_ref().map(|build| build.status.as_str()),
-            Some("succeeded")
-        );
-        assert_eq!(info.domains, vec!["dokku.re-cycledair.com".to_owned()]);
-        assert_eq!(info.dns_record_exists, Some(true));
-    }
-
-    #[tokio::test]
-    async fn refresh_details_marks_no_link_when_no_services_are_linked() {
-        let client = Arc::new(
-            crate::dokku::MockClient::new()
-                .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"])))
-                .stub(
-                    DokkuCommand::PsReport { app: app("alpha") },
-                    Ok(ps_report(true, true, 1)),
-                )
-                .stub(
-                    DokkuCommand::AppsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(APPS_REPORT_JSON)),
-                )
-                .stub(
-                    DokkuCommand::BuildsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(BUILDS_REPORT_JSON)),
-                )
-                .stub(
-                    DokkuCommand::DomainsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(DOMAINS_REPORT_JSON)),
-                )
-                .stub(
-                    DokkuCommand::PluginList,
-                    Ok(DokkuOutput::ok(PLUGIN_LIST_TXT)),
-                ),
-        );
-        let store =
-            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()));
-        store.ensure_loaded().await.expect("load");
-
-        store.refresh_details().await.expect("details");
-
-        let info = store
-            .current()
-            .await
-            .expect("snapshot")
-            .app_info("alpha")
-            .cloned();
-        assert_eq!(info.and_then(|info| info.links), Some(Vec::new()));
-    }
-
-    #[tokio::test]
-    async fn refresh_details_degrades_to_unknown_when_commands_fail() {
-        let failure = || {
-            Err(DokkuError::Exit {
-                code: 1,
-                stderr: "nope".into(),
-            })
-        };
-        let client = Arc::new(
-            crate::dokku::MockClient::new()
-                .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"])))
-                .stub(
-                    DokkuCommand::PsReport { app: app("alpha") },
-                    Ok(ps_report(true, true, 1)),
-                )
-                .stub(
-                    DokkuCommand::AppsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(APPS_REPORT_JSON)),
-                )
-                .stub(DokkuCommand::BuildsReport { app: app("alpha") }, failure())
-                .stub(DokkuCommand::DomainsReport { app: app("alpha") }, failure())
-                .stub(DokkuCommand::PluginList, failure()),
-        );
-        let store =
-            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()));
-        store.ensure_loaded().await.expect("load");
-
-        store.refresh_details().await.expect("details");
-
-        let info = store
-            .current()
-            .await
-            .expect("snapshot")
-            .app_info("alpha")
-            .cloned()
-            .expect("app info");
-        assert_eq!(info.image_status, None);
-        assert_eq!(info.last_build, None);
-        assert_eq!(info.links, None);
-        assert_eq!(info.domains, Vec::<String>::new());
-        assert_eq!(info.dns_record_exists, None);
-    }
-
-    #[tokio::test]
-    async fn refresh_details_without_service_plugins_is_no_link() {
-        let core_plugins = "  apps 0.38.4 enabled dokku core apps plugin\n";
-        let client = Arc::new(
-            crate::dokku::MockClient::new()
-                .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"])))
-                .stub(
-                    DokkuCommand::PsReport { app: app("alpha") },
-                    Ok(ps_report(true, true, 1)),
-                )
-                .stub(
-                    DokkuCommand::AppsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(APPS_REPORT_JSON)),
-                )
-                .stub(
-                    DokkuCommand::BuildsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(BUILDS_REPORT_JSON)),
-                )
-                .stub(
-                    DokkuCommand::DomainsReport { app: app("alpha") },
-                    Ok(DokkuOutput::ok(DOMAINS_REPORT_JSON)),
-                )
-                .stub(DokkuCommand::PluginList, Ok(DokkuOutput::ok(core_plugins))),
-        );
-        let store =
-            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()));
-        store.ensure_loaded().await.expect("load");
-
-        store.refresh_details().await.expect("details");
-
-        let info = store
-            .current()
-            .await
-            .expect("snapshot")
-            .app_info("alpha")
-            .cloned();
-        assert_eq!(info.and_then(|info| info.links), Some(Vec::new()));
-    }
-
-    #[tokio::test]
-    async fn dns_failure_marks_no_record() {
-        let client = Arc::new(details_client());
-        let store =
-            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::none()));
-        store.ensure_loaded().await.expect("load");
-
-        store.refresh_details().await.expect("details");
-
-        let info = store
-            .current()
-            .await
-            .expect("snapshot")
-            .app_info("alpha")
-            .cloned();
-        assert_eq!(info.and_then(|info| info.dns_record_exists), Some(false));
-    }
-
-    #[tokio::test]
-    async fn cheap_refresh_carries_over_details() {
-        let client = Arc::new(details_client());
-        let store =
-            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()));
-        store.ensure_loaded().await.expect("load");
-        store.refresh_details().await.expect("details");
-
-        store.refresh().await.expect("cheap refresh");
-
-        let info = store
-            .current()
-            .await
-            .expect("snapshot")
-            .app_info("alpha")
-            .cloned()
-            .expect("app info");
-        assert_eq!(info.image_status, Some(ImageStatus::Built));
-        assert_eq!(
-            info.links,
-            Some(vec![ServiceLink {
-                plugin: "postgres".into(),
-                service: "roboswarm-db".into(),
-            }])
-        );
-        assert!(info.last_build.is_some());
-        assert_eq!(info.dns_record_exists, Some(true));
     }
 
     #[tokio::test]
@@ -1081,6 +796,43 @@ mod tests {
             }])
         );
         assert_eq!(info.dns_record_exists, Some(true));
+    }
+
+    #[tokio::test]
+    async fn refresh_app_reports_skips_the_detail_pass() {
+        let client = Arc::new(details_client());
+        let store = SnapshotStore::with_resolver(
+            client.clone(),
+            Arc::new(crate::dokku::FakeResolver::all()),
+        );
+        store.ensure_loaded().await.expect("load");
+
+        store
+            .refresh_app_reports("alpha")
+            .await
+            .expect("cheap refresh");
+
+        assert_eq!(
+            count(&client, &DokkuCommand::PsReport { app: app("alpha") }),
+            2,
+            "ps report re-fetched"
+        );
+        assert_eq!(
+            count(&client, &DokkuCommand::BuildsReport { app: app("alpha") }),
+            0,
+            "no build report on the cheap pass"
+        );
+        assert_eq!(
+            count(
+                &client,
+                &DokkuCommand::AppLinks {
+                    plugin: "postgres".into(),
+                    app: app("alpha"),
+                }
+            ),
+            0,
+            "no app links on the cheap pass"
+        );
     }
 
     #[test]
