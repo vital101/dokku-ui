@@ -8,34 +8,19 @@ use crate::domain::types::ScaleEntry;
 /// `<plugin>:enter <service> sh -c <script>`. Emits `key=value` lines only;
 /// `__DATA_DIR__` is replaced with the plugin's in-container data directory.
 /// Validated against the live host (cgroup v2, host kernel via /proc).
-const SERVICE_STATS_SCRIPT: &str = r#"DD=__DATA_DIR__
-echo "host_mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
-echo "host_mem_avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)"
-echo "mem_current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"
-echo "mem_limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"
-echo "inactive_file=$(awk '$1=="inactive_file"{print $2}' /sys/fs/cgroup/memory.stat 2>/dev/null)"
-read up1 _ < /proc/uptime
-c1=$(awk '/^usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null)
-sleep 1
-read up2 _ < /proc/uptime
-c2=$(awk '/^usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null)
-echo "elapsed_s=$(awk "BEGIN{print $up2-$up1}")"
-echo "cpu_delta_usec=$( [ -n "$c2" ] && [ -n "$c1" ] && echo $((c2-c1)) )"
-echo "cpu_total_usec=$c2"
-echo "cpus=$(nproc 2>/dev/null)"
-echo "data_kb=$(du -sk $DD 2>/dev/null | cut -f1)"
-echo "fs_total_kb=$(df -Pk $DD | awk 'NR==2{print $2}')"
-echo "fs_used_kb=$(df -Pk $DD | awk 'NR==2{print $3}')"
-echo "fs_avail_kb=$(df -Pk $DD | awk 'NR==2{print $4}')"
-"#;
+///
+/// Must stay single-line and free of `'`: dokku's SSH wrapper re-splits
+/// `$SSH_ORIGINAL_COMMAND` with `xargs -n 1` + `readarray`, which mangles
+/// shell-style `'\''` escapes (xargs doesn't understand them) and splits
+/// multi-line arguments on the per-token `echo` output.
+const SERVICE_STATS_SCRIPT: &str = r#"DD=__DATA_DIR__; echo "host_mem_total_kb=$(awk "/^MemTotal:/{print \$2}" /proc/meminfo)"; echo "host_mem_avail_kb=$(awk "/^MemAvailable:/{print \$2}" /proc/meminfo)"; echo "mem_current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"; echo "mem_limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"; echo "inactive_file=$(awk "/^inactive_file /{print \$2}" /sys/fs/cgroup/memory.stat 2>/dev/null)"; read up1 _ < /proc/uptime; c1=$(awk "/^usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat 2>/dev/null); sleep 1; read up2 _ < /proc/uptime; c2=$(awk "/^usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat 2>/dev/null); echo "elapsed_s=$(awk "BEGIN{print $up2-$up1}")"; echo "cpu_delta_usec=$( [ -n "$c2" ] && [ -n "$c1" ] && echo $((c2-c1)) )"; echo "cpu_total_usec=$c2"; echo "cpus=$(nproc 2>/dev/null)"; echo "data_kb=$(du -sk $DD 2>/dev/null | cut -f1)"; echo "fs_total_kb=$(df -Pk $DD | awk "NR==2{print \$2}")"; echo "fs_used_kb=$(df -Pk $DD | awk "NR==2{print \$3}")"; echo "fs_avail_kb=$(df -Pk $DD | awk "NR==2{print \$4}")""#;
 
 /// Fixed disk-usage script run via `storage:exec <entry> -- sh -c <script>`
 /// in a throwaway container with the entry mounted at `/data`.
-const VOLUME_USAGE_SCRIPT: &str = r#"echo "used_kb=$(du -sk /data 2>/dev/null | cut -f1)"
-echo "fs_total_kb=$(df -Pk /data | awk 'NR==2{print $2}')"
-echo "fs_used_kb=$(df -Pk /data | awk 'NR==2{print $3}')"
-echo "fs_avail_kb=$(df -Pk /data | awk 'NR==2{print $4}')"
-"#;
+///
+/// Must stay single-line and free of `'` for the same reason as
+/// [`SERVICE_STATS_SCRIPT`].
+const VOLUME_USAGE_SCRIPT: &str = r#"echo "used_kb=$(du -sk /data 2>/dev/null | cut -f1)"; echo "fs_total_kb=$(df -Pk /data | awk "NR==2{print \$2}")"; echo "fs_used_kb=$(df -Pk /data | awk "NR==2{print \$3}")"; echo "fs_avail_kb=$(df -Pk /data | awk "NR==2{print \$4}")""#;
 
 fn service_stats_script(data_dir: &str) -> String {
     SERVICE_STATS_SCRIPT.replace("__DATA_DIR__", data_dir)
@@ -946,6 +931,45 @@ mod tests {
             .argv();
             assert!(argv[4].contains(expected), "{plugin_name}: {}", argv[4]);
         }
+    }
+
+    #[test]
+    fn service_stats_script_is_xargs_safe() {
+        for plugin_name in ["postgres", "mysql", "redis", "mongo"] {
+            let argv = DokkuCommand::ServiceStats {
+                plugin: plugin(plugin_name),
+                service: service("svc"),
+            }
+            .argv();
+            assert!(
+                !argv[4].contains('\''),
+                "{plugin_name}: shell quoting breaks dokku's SSH xargs re-split: {}",
+                argv[4]
+            );
+            assert!(
+                !argv[4].contains('\n'),
+                "{plugin_name}: xargs -n 1 plus readarray split multi-line scripts: {}",
+                argv[4]
+            );
+        }
+    }
+
+    #[test]
+    fn volume_usage_script_is_xargs_safe() {
+        let argv = DokkuCommand::StorageUsage {
+            entry: "legacy-90db719326".into(),
+        }
+        .argv();
+        assert!(
+            !argv[5].contains('\''),
+            "single quote breaks dokku's SSH xargs re-split: {}",
+            argv[5]
+        );
+        assert!(
+            !argv[5].contains('\n'),
+            "xargs -n 1 plus readarray split multi-line scripts: {}",
+            argv[5]
+        );
     }
 
     #[test]

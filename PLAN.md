@@ -472,6 +472,8 @@ Redis, MongoDB) plus app bind mounts.
   `legacy-<hash>` entry via `storage:list-entries --format json` and lazy-loads
   per-row usage via `storage:exec` (throwaway `alpine:3`, entry at `/data`),
   plus a host-disk summary card. Everything degrades to `—`; failures never
-  block the page.
+  block the page. Both scripts are single-line and free of `'` because dokku's
+  SSH wrapper re-splits `$SSH_ORIGINAL_COMMAND` with `xargs -n 1` + `readarray`
+  (shell `'\''` escapes and newlines do not survive that re-split).
 - **Deferred:** named storage entries (`storage:create/destroy/info`), service
   clone/promote/backups, pause, per-app storage tab.
