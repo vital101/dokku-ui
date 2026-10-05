@@ -226,9 +226,10 @@ One reusable mechanism so we stop hand-rolling version checks:
 - A single metadata table binding each `DokkuCommand` variant to its
   requirements (`min_version`, `requires_plugin`), so support is declared once
   next to the argv definition.
-- A read-only probe behind the existing `DokkuClient` seam (`version`,
-  `plugin:list`, targeted `<family>:help` checks), with output parsed and
-  fixture-tested like every other parser.
+- A read-only probe behind the existing `DokkuClient` seam (`dokku version`,
+  `plugin:list`, targeted `<family>:help` checks — the nginx log families
+  share the `nginx:help` probe), with output parsed and fixture-tested like
+  every other parser.
 - The probe result cached in the shared SQLite snapshot (carrying the dokku
   version and `updated_at`) so all containers share one answer and cold starts
   cost zero SSH; refreshed with the same lifecycle as the app snapshot.
@@ -287,9 +288,29 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
   re-auth (`no-store`), batch set/unset as one queued run.
 - **Live logs** (`src/web/logs.rs`, `static/js/logs.js`): SSE stream for app /
   nginx access / nginx error sources, per-source capability-gated; dropping
-  the stream flips the mpsc sender's `is_closed()`, and `RusshClient` aborts
+  the stream flips the mpsc sender's `is_closed()`, and `RusshClient` closes
   the SSH channel without harming the shared session (fake-SSH-server test
   proves the session survives).
+
+## P1 status (implemented)
+
+- **Settings tab**: rename (`apps:rename`), deploy lock/unlock
+  (`apps:lock`/`unlock`), maintenance mode and HTTP basic auth (both
+  `Plugin`-gated; the target host does not install `maintenance`/`http-auth`,
+  so they render explanatory states). Basic-auth passwords travel in argv and
+  are redacted from run lines via `JobPayload.redactions`.
+- **Domains tab**: vhost list with per-domain DNS pre-check, add/remove/set
+  (`domains:add/remove/set`), `DomainName` validation (wildcards allowed).
+- **Resource limits**: per-process-type limit/reserve editing
+  (`resource:limit/reserve` + `-clear`) in the Processes tab.
+- **Cron tab**: `cron:list --format json`, run-now/suspend/resume
+  (`cron:run/suspend/resume`).
+- **Build tab**: buildpack order editing (`buildpacks:list/set/add/remove/clear`)
+  and builder selection/build-dir (`builder:report/set`).
+- **Probe corrections from the live host**: `dokku version` (not `--version`,
+  which the SSH wrapper mangles) and `<cmd>:help` (not `<cmd> --help`, which
+  some plugins parse as an app name); the nginx log commands are subcommands
+  of the `nginx` plugin, so both log families share the `nginx:help` probe.
 - **P1 — App configuration UI**: domains edit; batched env editing; rename;
   lock/unlock; maintenance; resource limit editing; cron tab; build config;
   HTTP basic auth.

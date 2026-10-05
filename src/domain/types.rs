@@ -35,6 +35,41 @@ impl ProcessState {
     }
 }
 
+/// `builder:report <app>` as a typed view (empty strings mean unset).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BuilderReport {
+    pub selected: String,
+    pub computed_selected: String,
+    pub build_dir: String,
+    pub detected: String,
+}
+
+/// One scheduled cron task from `cron:list --format json` (dokku v0.38.4
+/// `CronTask` struct). `task_in_maintenance` is the suspend state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CronTask {
+    pub id: String,
+    pub schedule: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub concurrency_policy: String,
+    #[serde(default)]
+    pub maintenance: bool,
+    #[serde(default, rename = "task-in-maintenance")]
+    pub task_in_maintenance: bool,
+}
+
+/// `domains:report --format json` as a typed view: whether vhost support is
+/// enabled and the app's own vs. global vhost lists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainsReport {
+    pub enabled: bool,
+    pub vhosts: Vec<String>,
+    pub global_enabled: bool,
+    pub global_vhosts: Vec<String>,
+}
+
 /// One process type's desired instance count, from `ps:scale --format json`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ScaleEntry {

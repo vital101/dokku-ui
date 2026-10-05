@@ -16,6 +16,7 @@ use crate::domain::command::DokkuCommand;
 use crate::domain::env_file::{config_diff, parse_env_file};
 use crate::domain::job::{AppAction as JobAppAction, JobSpec};
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
+use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
 use crate::domain::types::{EnvVar, ResourceReport, ServiceInfo};
 use crate::error::AppError;
 use crate::storage::runs::TargetKind;
@@ -105,6 +106,29 @@ struct ServicesPage<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "apps/settings.html")]
+struct SettingsPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/settings.html")]
+struct SettingsPartial<'a> {
+    name: &'a str,
+    csrf_token: &'a str,
+    /// `None` when the app's report is unavailable (unknown, not unlocked).
+    locked: Option<bool>,
+    maintenance_available: bool,
+    maintenance_label: String,
+    http_auth_available: bool,
+    http_auth_label: String,
+}
+
+#[derive(Template)]
 #[template(path = "apps/partials/overview.html")]
 struct OverviewPartial<'a> {
     health_label: &'static str,
@@ -121,6 +145,17 @@ struct OverviewPartial<'a> {
     updated: String,
 }
 
+/// One editable resource row per formation process type (unset values are
+/// empty strings, like the report).
+struct ResourceRow {
+    process_type: String,
+    limit_cpu: String,
+    limit_memory: String,
+    limit_memory_swap: String,
+    reserve_cpu: String,
+    reserve_memory: String,
+}
+
 #[derive(Template)]
 #[template(path = "apps/partials/processes.html")]
 struct ProcessesPartial<'a> {
@@ -128,7 +163,7 @@ struct ProcessesPartial<'a> {
     csrf_token: &'a str,
     rows: Vec<ProcessRow>,
     containers: Vec<ContainerRow>,
-    resources: Vec<ResourceReport>,
+    resource_rows: Vec<ResourceRow>,
     scale_note: Option<String>,
     updated: String,
 }
@@ -561,6 +596,7 @@ pub async fn config_update(
         return Ok(see_other(&format!("/apps/{name}/config")));
     }
 
+    let redactions: Vec<String> = to_set.iter().map(|var| var.value.clone()).collect();
     let mut plan = Vec::new();
     if !to_set.is_empty() {
         plan.push(JobSpec::ConfigSet {
@@ -591,6 +627,7 @@ pub async fn config_update(
                 title: format!("Updating config for {name}…"),
                 plan,
                 completion,
+                redactions: redactions.clone(),
                 refresh_url: Some(format!("/apps/{name}/partials/config")),
             },
         )
@@ -604,6 +641,7 @@ pub async fn config_update(
         crate::storage::runs::TargetKind::App,
         &plan,
         &completion,
+        &redactions,
     )
     .await?;
     set_flash(
@@ -739,6 +777,7 @@ pub async fn processes_partial(
     let rows = formation_rows(&formation, ps_report);
     let containers = container_rows(&containers, OffsetDateTime::now_utc());
     let scale_note = scale_note(ps_report, &formation);
+    let resource_rows = merge_resource_rows(&rows, &resources);
 
     let csrf_token = ensure_csrf(&session).await?;
     let page = ProcessesPartial {
@@ -746,11 +785,213 @@ pub async fn processes_partial(
         csrf_token: &csrf_token,
         rows,
         containers,
-        resources,
+        resource_rows,
         scale_note,
         updated: format_age(snapshot.age()),
     };
     render(&page)
+}
+
+/// One editable row per formation process type, with the reported values
+/// merged in (unset values stay empty).
+fn merge_resource_rows(rows: &[ProcessRow], resources: &[ResourceReport]) -> Vec<ResourceRow> {
+    rows.iter()
+        .map(|row| {
+            let report = resources
+                .iter()
+                .find(|report| report.process_type == row.process_type);
+            ResourceRow {
+                process_type: row.process_type.clone(),
+                limit_cpu: report.map(|r| r.limit_cpu.clone()).unwrap_or_default(),
+                limit_memory: report.map(|r| r.limit_memory.clone()).unwrap_or_default(),
+                limit_memory_swap: report
+                    .map(|r| r.limit_memory_swap.clone())
+                    .unwrap_or_default(),
+                reserve_cpu: report.map(|r| r.reserve_cpu.clone()).unwrap_or_default(),
+                reserve_memory: report.map(|r| r.reserve_memory.clone()).unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub struct ResourceForm {
+    process_type: String,
+    #[serde(default)]
+    limit_cpu: String,
+    #[serde(default)]
+    limit_memory: String,
+    #[serde(default)]
+    limit_memory_swap: String,
+    #[serde(default)]
+    reserve_cpu: String,
+    #[serde(default)]
+    reserve_memory: String,
+    #[serde(default)]
+    action: String,
+}
+
+/// Sets or clears limits/reservations for one process type. Empty fields are
+/// left unchanged; `Clear` removes all limits and reservations for the type
+/// (dokku has no per-key clear on this generation).
+pub async fn update_resources(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<ResourceForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    if let Err(err) = AppName::try_from(name.clone()) {
+        if is_htmx(&req) {
+            return modal_error(format!("Invalid app name: {err}"));
+        }
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Invalid app name: {err}"),
+        );
+        return Ok(see_other("/"));
+    }
+    let form = form.0;
+    let process_type = form.process_type.trim().to_owned();
+    if !is_valid_process_type(&process_type) {
+        let message = format!("Invalid process type: {process_type}");
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/processes")));
+    }
+    for value in [
+        &form.limit_cpu,
+        &form.limit_memory,
+        &form.limit_memory_swap,
+        &form.reserve_cpu,
+        &form.reserve_memory,
+    ] {
+        let value = value.trim();
+        if !value.is_empty() && !is_valid_resource_value(value) {
+            let message = format!("Invalid resource value: {value}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/apps/{name}/processes")));
+        }
+    }
+
+    let opt = |value: &str| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    };
+    let (plan, operation, success_message) = if form.action == "clear" {
+        (
+            vec![
+                JobSpec::ResourceLimitClear {
+                    app: name.clone(),
+                    process_type: process_type.clone(),
+                },
+                JobSpec::ResourceReserveClear {
+                    app: name.clone(),
+                    process_type: process_type.clone(),
+                },
+            ],
+            "resource.clear",
+            format!("Cleared resources for '{name}' ({process_type})."),
+        )
+    } else {
+        let limit = JobSpec::ResourceLimit {
+            app: name.clone(),
+            process_type: process_type.clone(),
+            cpu: opt(&form.limit_cpu),
+            memory: opt(&form.limit_memory),
+            memory_swap: opt(&form.limit_memory_swap),
+        };
+        let reserve = JobSpec::ResourceReserve {
+            app: name.clone(),
+            process_type: process_type.clone(),
+            cpu: opt(&form.reserve_cpu),
+            memory: opt(&form.reserve_memory),
+        };
+        let limit_empty = matches!(
+            &limit,
+            JobSpec::ResourceLimit {
+                cpu: None,
+                memory: None,
+                memory_swap: None,
+                ..
+            }
+        );
+        let reserve_empty = matches!(
+            &reserve,
+            JobSpec::ResourceReserve {
+                cpu: None,
+                memory: None,
+                ..
+            }
+        );
+        if limit_empty && reserve_empty {
+            let message = "Enter at least one value, or use Clear.".to_owned();
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/apps/{name}/processes")));
+        }
+        let mut plan = Vec::new();
+        if !limit_empty {
+            plan.push(limit);
+        }
+        if !reserve_empty {
+            plan.push(reserve);
+        }
+        (
+            plan,
+            "resource.set",
+            format!("Resources updated for '{name}' ({process_type})."),
+        )
+    };
+
+    let completion = RunCompletion {
+        success_message,
+        redirect: None,
+        refresh: RunRefresh::None,
+    };
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: operation.to_owned(),
+                target_kind: TargetKind::App,
+                title: format!("Updating resources for {name}…"),
+                plan,
+                completion,
+                redactions: Vec::new(),
+                refresh_url: Some(format!("/apps/{name}/partials/processes")),
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        &name,
+        operation,
+        TargetKind::App,
+        &plan,
+        &completion,
+        &[],
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: update resources for {name}."),
+    );
+    Ok(see_other(&format!("/apps/{name}/processes")))
 }
 
 fn scale_note(
@@ -834,6 +1075,7 @@ pub async fn scale(
                     redirect: None,
                     refresh: RunRefresh::Reports,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/apps/{name}/partials/processes")),
             },
         )
@@ -855,6 +1097,7 @@ pub async fn scale(
             redirect: None,
             refresh: RunRefresh::Reports,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -921,6 +1164,555 @@ pub async fn services_partial(
         updated: format_age(snapshot.age()),
     };
     render(&page)
+}
+
+pub async fn settings(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let user = current_user(&state, &session).await?;
+    state.snapshot.resolve_app(&name).await?;
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = SettingsPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "settings",
+    };
+    render(&page)
+}
+
+pub async fn settings_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+
+    let retry_url = partial_url(&name, "settings", None);
+    let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
+    };
+    let locked = snapshot.app_info(&name).map(|info| info.locked);
+    let caps = state.capabilities.current().await;
+    let support_of = |command: &DokkuCommand| match &caps {
+        Some(caps) => caps.supports_command(command),
+        None => crate::domain::capabilities::Support::Unknown,
+    };
+    let maintenance = support_of(&DokkuCommand::MaintenanceEnable { app: app.clone() });
+    let http_auth = support_of(&DokkuCommand::HttpAuthAddUser {
+        app: app.clone(),
+        username: String::new(),
+        password: String::new(),
+    });
+    let maintenance_available = maintenance == crate::domain::capabilities::Support::Supported;
+    let http_auth_available = http_auth == crate::domain::capabilities::Support::Supported;
+    let csrf_token = ensure_csrf(&session).await?;
+    render(&SettingsPartial {
+        name: &name,
+        csrf_token: &csrf_token,
+        locked,
+        maintenance_available,
+        maintenance_label: maintenance.label(),
+        http_auth_available,
+        http_auth_label: http_auth.label(),
+    })
+}
+
+/// Deploy lock/unlock. Both are quick config writes (bounded timeout) and
+/// stream through the shared run modal like every other mutation.
+async fn lock_action(
+    state: &AppState,
+    session: &Session,
+    req: &HttpRequest,
+    name: String,
+    lock: bool,
+) -> Result<HttpResponse, AppError> {
+    let verb = if lock { "lock" } else { "unlock" };
+    match AppName::try_from(name.clone()) {
+        Ok(_) => {}
+        Err(err) => {
+            if is_htmx(req) {
+                return modal_error(format!("Invalid app name: {err}"));
+            }
+            set_flash(
+                session,
+                FlashLevel::Error,
+                format!("Invalid app name: {err}"),
+            );
+            return Ok(see_other("/"));
+        }
+    }
+    let plan = vec![if lock {
+        JobSpec::AppLock { app: name.clone() }
+    } else {
+        JobSpec::AppUnlock { app: name.clone() }
+    }];
+    let completion = RunCompletion {
+        success_message: format!("Deploy lock {verb}ed for '{name}'."),
+        redirect: None,
+        refresh: RunRefresh::Reports,
+    };
+    if is_htmx(req) {
+        return start_action_run(
+            state,
+            session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: format!("app.{verb}"),
+                target_kind: TargetKind::App,
+                title: format!("{} {name}…", if lock { "Locking" } else { "Unlocking" }),
+                plan,
+                completion,
+                redactions: Vec::new(),
+                refresh_url: Some(format!("/apps/{name}/partials/settings")),
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        state,
+        session,
+        &name,
+        &format!("app.{verb}"),
+        TargetKind::App,
+        &plan,
+        &completion,
+        &[],
+    )
+    .await?;
+    set_flash(
+        session,
+        FlashLevel::Success,
+        format!("Queued: {verb} {name}."),
+    );
+    Ok(see_other(&format!("/apps/{name}/settings")))
+}
+
+pub async fn lock(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    lock_action(&state, &session, &req, path.into_inner(), true).await
+}
+
+pub async fn unlock(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    lock_action(&state, &session, &req, path.into_inner(), false).await
+}
+
+#[derive(Deserialize)]
+pub struct RenameForm {
+    name: String,
+}
+
+/// Renames the app. The run redirects to the new app page on completion; the
+/// no-JS path queues and stays on the (still-existing) old settings page.
+pub async fn rename(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<RenameForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    if let Err(err) = AppName::try_from(name.clone()) {
+        if is_htmx(&req) {
+            return modal_error(format!("Invalid app name: {err}"));
+        }
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            format!("Invalid app name: {err}"),
+        );
+        return Ok(see_other("/"));
+    }
+    let new_name = match AppName::try_from(form.0.name.trim()) {
+        Ok(new_name) => new_name,
+        Err(err) => {
+            let message = format!("Invalid new name: {err}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/apps/{name}/settings")));
+        }
+    };
+    if new_name.as_str() == name {
+        let message = "The new name is the same as the current name.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+
+    let plan = vec![JobSpec::AppRename {
+        app: name.clone(),
+        new_name: new_name.as_str().to_owned(),
+    }];
+    let completion = RunCompletion {
+        success_message: format!("Renamed '{name}' to '{new_name}'."),
+        redirect: Some(format!("/apps/{new_name}")),
+        refresh: RunRefresh::All,
+    };
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: "app.rename".to_owned(),
+                target_kind: TargetKind::App,
+                title: format!("Renaming {name} to {new_name}…"),
+                plan,
+                completion,
+                redactions: Vec::new(),
+                refresh_url: None,
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        &name,
+        "app.rename",
+        TargetKind::App,
+        &plan,
+        &completion,
+        &[],
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: rename {name} to {new_name}."),
+    );
+    Ok(see_other(&format!("/apps/{name}/settings")))
+}
+
+#[derive(Deserialize)]
+pub struct HttpAuthUserForm {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+pub struct HttpAuthRemoveForm {
+    username: String,
+}
+
+/// Shared dispatch for the plugin-backed settings actions (maintenance,
+/// http-auth): validates the app, refuses unsupported plugins with an
+/// explanatory card, and queues the plan (htmx or redirect).
+#[allow(clippy::too_many_arguments)]
+async fn plugin_run(
+    state: &AppState,
+    session: &Session,
+    req: &HttpRequest,
+    name: String,
+    gate: DokkuCommand,
+    plan: Vec<JobSpec>,
+    operation: &str,
+    title: String,
+    success_message: String,
+    queued_message: String,
+    redactions: Vec<String>,
+) -> Result<HttpResponse, AppError> {
+    if let Err(err) = AppName::try_from(name.clone()) {
+        if is_htmx(req) {
+            return modal_error(format!("Invalid app name: {err}"));
+        }
+        set_flash(
+            session,
+            FlashLevel::Error,
+            format!("Invalid app name: {err}"),
+        );
+        return Ok(see_other("/"));
+    }
+    let support = state
+        .capabilities
+        .current()
+        .await
+        .map(|caps| caps.supports_command(&gate))
+        .unwrap_or(crate::domain::capabilities::Support::Unknown);
+    if support != crate::domain::capabilities::Support::Supported {
+        let message = format!("Unavailable on this host: {}", support.label());
+        if is_htmx(req) {
+            return modal_error(message);
+        }
+        set_flash(session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+
+    let completion = RunCompletion {
+        success_message,
+        redirect: None,
+        refresh: RunRefresh::None,
+    };
+    if is_htmx(req) {
+        return start_action_run(
+            state,
+            session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: operation.to_owned(),
+                target_kind: TargetKind::App,
+                title,
+                plan,
+                completion,
+                redactions,
+                refresh_url: Some(format!("/apps/{name}/partials/settings")),
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        state,
+        session,
+        &name,
+        operation,
+        TargetKind::App,
+        &plan,
+        &completion,
+        &redactions,
+    )
+    .await?;
+    set_flash(session, FlashLevel::Success, queued_message);
+    Ok(see_other(&format!("/apps/{name}/settings")))
+}
+
+pub async fn maintenance_enable(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    maintenance_toggle(&state, &session, &req, path.into_inner(), true).await
+}
+
+pub async fn maintenance_disable(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    maintenance_toggle(&state, &session, &req, path.into_inner(), false).await
+}
+
+async fn maintenance_toggle(
+    state: &AppState,
+    session: &Session,
+    req: &HttpRequest,
+    name: String,
+    enabled: bool,
+) -> Result<HttpResponse, AppError> {
+    let app = gate_app();
+    let gate = if enabled {
+        DokkuCommand::MaintenanceEnable { app }
+    } else {
+        DokkuCommand::MaintenanceDisable { app }
+    };
+    let plan = vec![if enabled {
+        JobSpec::MaintenanceEnable { app: name.clone() }
+    } else {
+        JobSpec::MaintenanceDisable { app: name.clone() }
+    }];
+    let (verb, title) = if enabled {
+        ("enable", format!("Enabling maintenance mode for {name}…"))
+    } else {
+        ("disable", format!("Disabling maintenance mode for {name}…"))
+    };
+    plugin_run(
+        state,
+        session,
+        req,
+        name.clone(),
+        gate,
+        plan,
+        &format!("maintenance.{verb}"),
+        title,
+        format!("Maintenance mode {verb}d for '{name}'."),
+        format!("Queued: {verb} maintenance mode for {name}."),
+        Vec::new(),
+    )
+    .await
+}
+
+/// A placeholder app used only for capability gating (the gate ignores it).
+fn gate_app() -> AppName {
+    AppName::try_from("app").unwrap_or_else(|_| unreachable!())
+}
+
+pub async fn http_auth_enable(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    http_auth_toggle(&state, &session, &req, path.into_inner(), true).await
+}
+
+pub async fn http_auth_disable(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    http_auth_toggle(&state, &session, &req, path.into_inner(), false).await
+}
+
+async fn http_auth_toggle(
+    state: &AppState,
+    session: &Session,
+    req: &HttpRequest,
+    name: String,
+    enabled: bool,
+) -> Result<HttpResponse, AppError> {
+    let app = gate_app();
+    let gate = if enabled {
+        DokkuCommand::HttpAuthEnable { app }
+    } else {
+        DokkuCommand::HttpAuthDisable { app }
+    };
+    let plan = vec![if enabled {
+        JobSpec::HttpAuthEnable { app: name.clone() }
+    } else {
+        JobSpec::HttpAuthDisable { app: name.clone() }
+    }];
+    let (verb, title) = if enabled {
+        ("enable", format!("Enabling basic auth for {name}…"))
+    } else {
+        ("disable", format!("Disabling basic auth for {name}…"))
+    };
+    plugin_run(
+        state,
+        session,
+        req,
+        name.clone(),
+        gate,
+        plan,
+        &format!("http-auth.{verb}"),
+        title,
+        format!("Basic auth {verb}d for '{name}'."),
+        format!("Queued: {verb} basic auth for {name}."),
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn http_auth_add_user(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<HttpAuthUserForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let form = form.0;
+    let username = form.username.trim().to_owned();
+    if !crate::domain::http_auth::is_valid_username(&username) {
+        let message =
+            "Username may contain letters, digits, dots, underscores, and hyphens only.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    if !crate::domain::is_valid_config_value(&form.password) {
+        let message = "Password must be single-line and must not contain single quotes.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    let gate = DokkuCommand::HttpAuthAddUser {
+        app: gate_app(),
+        username: username.clone(),
+        password: form.password.clone(),
+    };
+    let plan = vec![JobSpec::HttpAuthAddUser {
+        app: name.clone(),
+        username: username.clone(),
+        password: form.password.clone(),
+    }];
+    plugin_run(
+        &state,
+        &session,
+        &req,
+        name.clone(),
+        gate,
+        plan,
+        "http-auth.add-user",
+        format!("Adding basic-auth user {username} to {name}…"),
+        format!("Added basic-auth user '{username}' to '{name}'."),
+        format!("Queued: add basic-auth user {username} to {name}."),
+        vec![form.password.clone()],
+    )
+    .await
+}
+
+pub async fn http_auth_remove_user(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<HttpAuthRemoveForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let username = form.0.username.trim().to_owned();
+    if !crate::domain::http_auth::is_valid_username(&username) {
+        let message = "Invalid username.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    let gate = DokkuCommand::HttpAuthRemoveUser {
+        app: gate_app(),
+        username: username.clone(),
+    };
+    let plan = vec![JobSpec::HttpAuthRemoveUser {
+        app: name.clone(),
+        username: username.clone(),
+    }];
+    plugin_run(
+        &state,
+        &session,
+        &req,
+        name.clone(),
+        gate,
+        plan,
+        "http-auth.remove-user",
+        format!("Removing basic-auth user {username} from {name}…"),
+        format!("Removed basic-auth user '{username}' from '{name}'."),
+        format!("Queued: remove basic-auth user {username} from {name}."),
+        Vec::new(),
+    )
+    .await
 }
 
 pub async fn delete_confirm(
@@ -994,6 +1786,7 @@ pub async fn destroy(
                     redirect: Some("/".to_owned()),
                     refresh: RunRefresh::All,
                 },
+                redactions: Vec::new(),
                 refresh_url: None,
             },
         )
@@ -1012,6 +1805,7 @@ pub async fn destroy(
             redirect: Some("/".to_owned()),
             refresh: RunRefresh::All,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -1188,6 +1982,7 @@ async fn process_action(
                     redirect: None,
                     refresh: RunRefresh::Reports,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/apps/{name}/partials/overview")),
             },
         )
@@ -1206,6 +2001,7 @@ async fn process_action(
             redirect: None,
             refresh: RunRefresh::Reports,
         },
+        &[],
     )
     .await?;
     set_flash(

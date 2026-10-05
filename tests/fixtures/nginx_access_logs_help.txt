@@ -1,3 +1,0 @@
-Usage: dokku nginx:access-logs [OPTIONS] <app>
-Options:
-  -t, --tail         continually stream logs

@@ -1,5 +1,6 @@
 use crate::domain::AppName;
 use crate::domain::capabilities::{CapabilityFamily, Requirement};
+use crate::domain::domain_name::DomainName;
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
@@ -46,6 +47,16 @@ pub enum DokkuCommand {
         app: AppName,
         force: bool,
     },
+    AppsLock {
+        app: AppName,
+    },
+    AppsUnlock {
+        app: AppName,
+    },
+    AppsRename {
+        app: AppName,
+        new_name: AppName,
+    },
     PsReport {
         app: AppName,
     },
@@ -80,8 +91,41 @@ pub enum DokkuCommand {
     DomainsReport {
         app: AppName,
     },
+    DomainsAdd {
+        app: AppName,
+        domains: Vec<DomainName>,
+    },
+    DomainsRemove {
+        app: AppName,
+        domains: Vec<DomainName>,
+    },
+    DomainsSet {
+        app: AppName,
+        domains: Vec<DomainName>,
+    },
     ResourceReport {
         app: AppName,
+    },
+    ResourceLimit {
+        app: AppName,
+        process_type: String,
+        cpu: Option<String>,
+        memory: Option<String>,
+        memory_swap: Option<String>,
+    },
+    ResourceReserve {
+        app: AppName,
+        process_type: String,
+        cpu: Option<String>,
+        memory: Option<String>,
+    },
+    ResourceLimitClear {
+        app: AppName,
+        process_type: String,
+    },
+    ResourceReserveClear {
+        app: AppName,
+        process_type: String,
     },
     ServiceInfo {
         plugin: String,
@@ -143,6 +187,34 @@ pub enum DokkuCommand {
         plugin: ServicePlugin,
         service: ServiceName,
     },
+    BuildpacksList {
+        app: AppName,
+    },
+    BuildpacksSet {
+        app: AppName,
+        buildpack: String,
+        index: Option<u32>,
+    },
+    BuildpacksAdd {
+        app: AppName,
+        buildpack: String,
+        index: Option<u32>,
+    },
+    BuildpacksRemove {
+        app: AppName,
+        buildpack: String,
+    },
+    BuildpacksClear {
+        app: AppName,
+    },
+    BuilderReport {
+        app: AppName,
+    },
+    BuilderSet {
+        app: AppName,
+        property: String,
+        value: Option<String>,
+    },
     StorageReport,
     StorageListEntries,
     StorageUsage {
@@ -163,6 +235,42 @@ pub enum DokkuCommand {
     },
     ConfigShow {
         app: AppName,
+    },
+    CronList {
+        app: AppName,
+    },
+    CronRun {
+        app: AppName,
+        cron_id: String,
+    },
+    CronSuspend {
+        app: AppName,
+        cron_id: String,
+    },
+    CronResume {
+        app: AppName,
+        cron_id: String,
+    },
+    MaintenanceEnable {
+        app: AppName,
+    },
+    MaintenanceDisable {
+        app: AppName,
+    },
+    HttpAuthEnable {
+        app: AppName,
+    },
+    HttpAuthDisable {
+        app: AppName,
+    },
+    HttpAuthAddUser {
+        app: AppName,
+        username: String,
+        password: String,
+    },
+    HttpAuthRemoveUser {
+        app: AppName,
+        username: String,
     },
     ConfigSet {
         app: AppName,
@@ -205,6 +313,17 @@ impl DokkuCommand {
                 }
                 argv
             }
+            DokkuCommand::AppsLock { app } => {
+                vec!["apps:lock".into(), app.as_str().into()]
+            }
+            DokkuCommand::AppsUnlock { app } => {
+                vec!["apps:unlock".into(), app.as_str().into()]
+            }
+            DokkuCommand::AppsRename { app, new_name } => vec![
+                "apps:rename".into(),
+                app.as_str().into(),
+                new_name.as_str().into(),
+            ],
             DokkuCommand::PsReport { app } => {
                 vec![
                     "ps:report".into(),
@@ -250,9 +369,85 @@ impl DokkuCommand {
                     "json".into(),
                 ]
             }
+            DokkuCommand::DomainsAdd { app, domains } => {
+                let mut argv = vec!["domains:add".into(), app.as_str().into()];
+                argv.extend(domains.iter().map(|domain| domain.as_str().into()));
+                argv
+            }
+            DokkuCommand::DomainsRemove { app, domains } => {
+                let mut argv = vec!["domains:remove".into(), app.as_str().into()];
+                argv.extend(domains.iter().map(|domain| domain.as_str().into()));
+                argv
+            }
+            DokkuCommand::DomainsSet { app, domains } => {
+                let mut argv = vec!["domains:set".into(), app.as_str().into()];
+                argv.extend(domains.iter().map(|domain| domain.as_str().into()));
+                argv
+            }
             DokkuCommand::ResourceReport { app } => {
                 vec!["resource:report".into(), app.as_str().into()]
             }
+            DokkuCommand::ResourceLimit {
+                app,
+                process_type,
+                cpu,
+                memory,
+                memory_swap,
+            } => {
+                let mut argv = vec![
+                    "resource:limit".into(),
+                    "--process-type".into(),
+                    process_type.clone(),
+                ];
+                if let Some(cpu) = cpu {
+                    argv.push("--cpu".into());
+                    argv.push(cpu.clone());
+                }
+                if let Some(memory) = memory {
+                    argv.push("--memory".into());
+                    argv.push(memory.clone());
+                }
+                if let Some(memory_swap) = memory_swap {
+                    argv.push("--memory-swap".into());
+                    argv.push(memory_swap.clone());
+                }
+                argv.push(app.as_str().into());
+                argv
+            }
+            DokkuCommand::ResourceReserve {
+                app,
+                process_type,
+                cpu,
+                memory,
+            } => {
+                let mut argv = vec![
+                    "resource:reserve".into(),
+                    "--process-type".into(),
+                    process_type.clone(),
+                ];
+                if let Some(cpu) = cpu {
+                    argv.push("--cpu".into());
+                    argv.push(cpu.clone());
+                }
+                if let Some(memory) = memory {
+                    argv.push("--memory".into());
+                    argv.push(memory.clone());
+                }
+                argv.push(app.as_str().into());
+                argv
+            }
+            DokkuCommand::ResourceLimitClear { app, process_type } => vec![
+                "resource:limit-clear".into(),
+                "--process-type".into(),
+                process_type.clone(),
+                app.as_str().into(),
+            ],
+            DokkuCommand::ResourceReserveClear { app, process_type } => vec![
+                "resource:reserve-clear".into(),
+                "--process-type".into(),
+                process_type.clone(),
+                app.as_str().into(),
+            ],
             DokkuCommand::ServiceInfo { plugin, service } => {
                 vec![format!("{plugin}:info"), service.clone()]
             }
@@ -334,6 +529,59 @@ impl DokkuCommand {
                 "-c".into(),
                 service_stats_script(plugin.data_dir()),
             ],
+            DokkuCommand::BuildpacksList { app } => {
+                vec!["buildpacks:list".into(), app.as_str().into()]
+            }
+            DokkuCommand::BuildpacksSet {
+                app,
+                buildpack,
+                index,
+            } => {
+                let mut argv = vec!["buildpacks:set".into()];
+                if let Some(index) = index {
+                    argv.push("--index".into());
+                    argv.push(index.to_string());
+                }
+                argv.push(app.as_str().into());
+                argv.push(buildpack.clone());
+                argv
+            }
+            DokkuCommand::BuildpacksAdd {
+                app,
+                buildpack,
+                index,
+            } => {
+                let mut argv = vec!["buildpacks:add".into()];
+                if let Some(index) = index {
+                    argv.push("--index".into());
+                    argv.push(index.to_string());
+                }
+                argv.push(app.as_str().into());
+                argv.push(buildpack.clone());
+                argv
+            }
+            DokkuCommand::BuildpacksRemove { app, buildpack } => vec![
+                "buildpacks:remove".into(),
+                app.as_str().into(),
+                buildpack.clone(),
+            ],
+            DokkuCommand::BuildpacksClear { app } => {
+                vec!["buildpacks:clear".into(), app.as_str().into()]
+            }
+            DokkuCommand::BuilderReport { app } => {
+                vec!["builder:report".into(), app.as_str().into()]
+            }
+            DokkuCommand::BuilderSet {
+                app,
+                property,
+                value,
+            } => {
+                let mut argv = vec!["builder:set".into(), app.as_str().into(), property.clone()];
+                if let Some(value) = value {
+                    argv.push(value.clone());
+                }
+                argv
+            }
             DokkuCommand::StorageReport => vec!["storage:report".into()],
             DokkuCommand::StorageListEntries => vec![
                 "storage:list-entries".into(),
@@ -363,6 +611,48 @@ impl DokkuCommand {
             DokkuCommand::ConfigShow { app } => {
                 vec!["config:show".into(), app.as_str().into()]
             }
+            DokkuCommand::CronList { app } => vec![
+                "cron:list".into(),
+                app.as_str().into(),
+                "--format".into(),
+                "json".into(),
+            ],
+            DokkuCommand::CronRun { app, cron_id } => {
+                vec!["cron:run".into(), app.as_str().into(), cron_id.clone()]
+            }
+            DokkuCommand::CronSuspend { app, cron_id } => {
+                vec!["cron:suspend".into(), app.as_str().into(), cron_id.clone()]
+            }
+            DokkuCommand::CronResume { app, cron_id } => {
+                vec!["cron:resume".into(), app.as_str().into(), cron_id.clone()]
+            }
+            DokkuCommand::MaintenanceEnable { app } => {
+                vec!["maintenance:enable".into(), app.as_str().into()]
+            }
+            DokkuCommand::MaintenanceDisable { app } => {
+                vec!["maintenance:disable".into(), app.as_str().into()]
+            }
+            DokkuCommand::HttpAuthEnable { app } => {
+                vec!["http-auth:enable".into(), app.as_str().into()]
+            }
+            DokkuCommand::HttpAuthDisable { app } => {
+                vec!["http-auth:disable".into(), app.as_str().into()]
+            }
+            DokkuCommand::HttpAuthAddUser {
+                app,
+                username,
+                password,
+            } => vec![
+                "http-auth:add-user".into(),
+                app.as_str().into(),
+                username.clone(),
+                password.clone(),
+            ],
+            DokkuCommand::HttpAuthRemoveUser { app, username } => vec![
+                "http-auth:remove-user".into(),
+                app.as_str().into(),
+                username.clone(),
+            ],
             DokkuCommand::ConfigSet { app, vars } => {
                 let mut argv = vec!["config:set".into(), app.as_str().into()];
                 argv.extend(vars.iter().map(|var| format!("{}={}", var.key, var.value)));
@@ -400,8 +690,13 @@ impl DokkuCommand {
                 }
                 argv
             }
-            DokkuCommand::DokkuVersion => vec!["--version".into()],
-            DokkuCommand::Help { family } => vec![family.help_command().into(), "--help".into()],
+            // `dokku --version` does not survive the SSH wrapper (the host
+            // rejected it with a coreutils banner as the command name); the
+            // `version` subcommand does
+            DokkuCommand::DokkuVersion => vec!["version".into()],
+            // `<cmd>:help` is dokku's help convention over SSH; `<cmd> --help`
+            // is parsed as an app name by some plugins (e.g. logs)
+            DokkuCommand::Help { family } => vec![family.help_probe().into()],
         }
     }
 
@@ -420,6 +715,7 @@ impl DokkuCommand {
             | DokkuCommand::PsRebuild { .. }
             | DokkuCommand::PsScaleSet { .. }
             | DokkuCommand::AppsDestroy { .. }
+            | DokkuCommand::AppsRename { .. }
             | DokkuCommand::ServiceCreate { .. }
             | DokkuCommand::ServiceDestroy { .. }
             | DokkuCommand::ServiceStart { .. }
@@ -431,6 +727,27 @@ impl DokkuCommand {
             | DokkuCommand::ServiceUnexpose { .. }
             | DokkuCommand::StorageMount { .. }
             | DokkuCommand::StorageUnmount { .. }
+            | DokkuCommand::DomainsAdd { .. }
+            | DokkuCommand::DomainsRemove { .. }
+            | DokkuCommand::DomainsSet { .. }
+            | DokkuCommand::ResourceLimit { .. }
+            | DokkuCommand::ResourceReserve { .. }
+            | DokkuCommand::ResourceLimitClear { .. }
+            | DokkuCommand::ResourceReserveClear { .. }
+            | DokkuCommand::CronRun { .. }
+            | DokkuCommand::CronSuspend { .. }
+            | DokkuCommand::CronResume { .. }
+            | DokkuCommand::MaintenanceEnable { .. }
+            | DokkuCommand::MaintenanceDisable { .. }
+            | DokkuCommand::HttpAuthEnable { .. }
+            | DokkuCommand::HttpAuthDisable { .. }
+            | DokkuCommand::HttpAuthAddUser { .. }
+            | DokkuCommand::HttpAuthRemoveUser { .. }
+            | DokkuCommand::BuildpacksSet { .. }
+            | DokkuCommand::BuildpacksAdd { .. }
+            | DokkuCommand::BuildpacksRemove { .. }
+            | DokkuCommand::BuildpacksClear { .. }
+            | DokkuCommand::BuilderSet { .. }
             | DokkuCommand::Logs { follow: true, .. }
             | DokkuCommand::NginxAccessLogs { follow: true, .. }
             | DokkuCommand::NginxErrorLogs { follow: true, .. } => CommandTimeout::Indefinite,
@@ -462,6 +779,22 @@ impl DokkuCommand {
             | DokkuCommand::ServiceUnexpose { plugin, .. }
             | DokkuCommand::ServiceStats { plugin, .. } => Requirement::Plugin {
                 name: plugin.as_str().to_owned(),
+            },
+            DokkuCommand::MaintenanceEnable { .. } | DokkuCommand::MaintenanceDisable { .. } => {
+                Requirement::Plugin {
+                    name: "maintenance".to_owned(),
+                }
+            }
+            DokkuCommand::HttpAuthEnable { .. }
+            | DokkuCommand::HttpAuthDisable { .. }
+            | DokkuCommand::HttpAuthAddUser { .. }
+            | DokkuCommand::HttpAuthRemoveUser { .. }
+            | DokkuCommand::BuildpacksSet { .. }
+            | DokkuCommand::BuildpacksAdd { .. }
+            | DokkuCommand::BuildpacksRemove { .. }
+            | DokkuCommand::BuildpacksClear { .. }
+            | DokkuCommand::BuilderSet { .. } => Requirement::Plugin {
+                name: "http-auth".to_owned(),
             },
             _ => Requirement::Core,
         }
@@ -570,6 +903,257 @@ mod tests {
         assert_eq!(
             DokkuCommand::DomainsReport { app: app("myapp") }.argv(),
             vec!["domains:report", "myapp", "--format", "json"]
+        );
+    }
+
+    #[test]
+    fn domains_mutations_argv() {
+        let domains = vec![
+            DomainName::try_from("one.example.com").expect("d"),
+            DomainName::try_from("two.example.com").expect("d"),
+        ];
+        assert_eq!(
+            DokkuCommand::DomainsAdd {
+                app: app("myapp"),
+                domains: domains.clone(),
+            }
+            .argv(),
+            vec!["domains:add", "myapp", "one.example.com", "two.example.com"]
+        );
+        assert_eq!(
+            DokkuCommand::DomainsRemove {
+                app: app("myapp"),
+                domains: domains.clone(),
+            }
+            .argv(),
+            vec![
+                "domains:remove",
+                "myapp",
+                "one.example.com",
+                "two.example.com"
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::DomainsSet {
+                app: app("myapp"),
+                domains,
+            }
+            .argv(),
+            vec!["domains:set", "myapp", "one.example.com", "two.example.com"]
+        );
+    }
+
+    #[test]
+    fn resource_mutations_argv() {
+        assert_eq!(
+            DokkuCommand::ResourceLimit {
+                app: app("myapp"),
+                process_type: "web".into(),
+                cpu: Some("1".into()),
+                memory: Some("128".into()),
+                memory_swap: None,
+            }
+            .argv(),
+            vec![
+                "resource:limit",
+                "--process-type",
+                "web",
+                "--cpu",
+                "1",
+                "--memory",
+                "128",
+                "myapp"
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::ResourceReserve {
+                app: app("myapp"),
+                process_type: "worker".into(),
+                cpu: None,
+                memory: Some("512".into()),
+            }
+            .argv(),
+            vec![
+                "resource:reserve",
+                "--process-type",
+                "worker",
+                "--memory",
+                "512",
+                "myapp"
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::ResourceLimitClear {
+                app: app("myapp"),
+                process_type: "web".into(),
+            }
+            .argv(),
+            vec!["resource:limit-clear", "--process-type", "web", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::ResourceReserveClear {
+                app: app("myapp"),
+                process_type: "web".into(),
+            }
+            .argv(),
+            vec!["resource:reserve-clear", "--process-type", "web", "myapp"]
+        );
+    }
+
+    #[test]
+    fn cron_argv() {
+        assert_eq!(
+            DokkuCommand::CronList { app: app("myapp") }.argv(),
+            vec!["cron:list", "myapp", "--format", "json"]
+        );
+        assert_eq!(
+            DokkuCommand::CronRun {
+                app: app("myapp"),
+                cron_id: "a1b2c3".into(),
+            }
+            .argv(),
+            vec!["cron:run", "myapp", "a1b2c3"]
+        );
+        assert_eq!(
+            DokkuCommand::CronSuspend {
+                app: app("myapp"),
+                cron_id: "a1b2c3".into(),
+            }
+            .argv(),
+            vec!["cron:suspend", "myapp", "a1b2c3"]
+        );
+        assert_eq!(
+            DokkuCommand::CronResume {
+                app: app("myapp"),
+                cron_id: "a1b2c3".into(),
+            }
+            .argv(),
+            vec!["cron:resume", "myapp", "a1b2c3"]
+        );
+    }
+
+    #[test]
+    fn maintenance_and_http_auth_argv() {
+        assert_eq!(
+            DokkuCommand::MaintenanceEnable { app: app("myapp") }.argv(),
+            vec!["maintenance:enable", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::MaintenanceDisable { app: app("myapp") }.argv(),
+            vec!["maintenance:disable", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::HttpAuthEnable { app: app("myapp") }.argv(),
+            vec!["http-auth:enable", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::HttpAuthDisable { app: app("myapp") }.argv(),
+            vec!["http-auth:disable", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::HttpAuthAddUser {
+                app: app("myapp"),
+                username: "alice".into(),
+                password: "s3cr3t".into(),
+            }
+            .argv(),
+            vec!["http-auth:add-user", "myapp", "alice", "s3cr3t"]
+        );
+        assert_eq!(
+            DokkuCommand::HttpAuthRemoveUser {
+                app: app("myapp"),
+                username: "alice".into(),
+            }
+            .argv(),
+            vec!["http-auth:remove-user", "myapp", "alice"]
+        );
+    }
+
+    #[test]
+    fn plugin_backed_commands_declare_their_plugins() {
+        use crate::domain::capabilities::Requirement;
+        assert_eq!(
+            DokkuCommand::MaintenanceEnable { app: app("myapp") }.requirement(),
+            Requirement::Plugin {
+                name: "maintenance".into()
+            }
+        );
+        assert_eq!(
+            DokkuCommand::HttpAuthAddUser {
+                app: app("myapp"),
+                username: "alice".into(),
+                password: "s3cr3t".into(),
+            }
+            .requirement(),
+            Requirement::Plugin {
+                name: "http-auth".into()
+            }
+        );
+    }
+
+    #[test]
+    fn build_config_argv() {
+        assert_eq!(
+            DokkuCommand::BuildpacksList { app: app("myapp") }.argv(),
+            vec!["buildpacks:list", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::BuildpacksSet {
+                app: app("myapp"),
+                buildpack: "https://example.com/bp".into(),
+                index: Some(2),
+            }
+            .argv(),
+            vec![
+                "buildpacks:set",
+                "--index",
+                "2",
+                "myapp",
+                "https://example.com/bp"
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::BuildpacksAdd {
+                app: app("myapp"),
+                buildpack: "https://example.com/bp".into(),
+                index: None,
+            }
+            .argv(),
+            vec!["buildpacks:add", "myapp", "https://example.com/bp"]
+        );
+        assert_eq!(
+            DokkuCommand::BuildpacksRemove {
+                app: app("myapp"),
+                buildpack: "https://example.com/bp".into(),
+            }
+            .argv(),
+            vec!["buildpacks:remove", "myapp", "https://example.com/bp"]
+        );
+        assert_eq!(
+            DokkuCommand::BuildpacksClear { app: app("myapp") }.argv(),
+            vec!["buildpacks:clear", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::BuilderReport { app: app("myapp") }.argv(),
+            vec!["builder:report", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::BuilderSet {
+                app: app("myapp"),
+                property: "selected".into(),
+                value: Some("dockerfile".into()),
+            }
+            .argv(),
+            vec!["builder:set", "myapp", "selected", "dockerfile"]
+        );
+        assert_eq!(
+            DokkuCommand::BuilderSet {
+                app: app("myapp"),
+                property: "selected".into(),
+                value: None,
+            }
+            .argv(),
+            vec!["builder:set", "myapp", "selected"]
         );
     }
 
@@ -1086,24 +1670,24 @@ mod tests {
 
     #[test]
     fn dokku_version_argv() {
-        assert_eq!(DokkuCommand::DokkuVersion.argv(), vec!["--version"]);
+        assert_eq!(DokkuCommand::DokkuVersion.argv(), vec!["version"]);
     }
 
     #[test]
-    fn help_argv_runs_the_family_command_with_help() {
+    fn help_argv_uses_the_dokku_help_convention() {
         assert_eq!(
             DokkuCommand::Help {
                 family: crate::domain::capabilities::CapabilityFamily::Logs,
             }
             .argv(),
-            vec!["logs", "--help"]
+            vec!["logs:help"]
         );
         assert_eq!(
             DokkuCommand::Help {
                 family: crate::domain::capabilities::CapabilityFamily::NginxAccessLogs,
             }
             .argv(),
-            vec!["nginx:access-logs", "--help"]
+            vec!["nginx:help"]
         );
     }
 

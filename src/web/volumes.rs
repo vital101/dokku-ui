@@ -279,6 +279,7 @@ pub async fn mount(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(LIST_PARTIAL_URL.to_owned()),
             },
         )
@@ -303,6 +304,7 @@ pub async fn mount(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -355,6 +357,7 @@ pub async fn unmount(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(LIST_PARTIAL_URL.to_owned()),
             },
         )
@@ -379,6 +382,7 @@ pub async fn unmount(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(

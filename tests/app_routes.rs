@@ -203,8 +203,12 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         "/services/postgres/cache/delete",
         "/activity",
         "/apps/alpha/config/edit",
+        "/apps/alpha/settings",
+        "/apps/alpha/partials/settings",
         "/apps/alpha/activity",
         "/apps/alpha/config/edit",
+        "/apps/alpha/settings",
+        "/apps/alpha/partials/settings",
         "/services/postgres/cache/activity",
         "/volumes",
         "/volumes/partials/list",
@@ -1541,7 +1545,12 @@ async fn processes_partial_renders_formation_containers_and_resources() {
         "release is not editable"
     );
     assert!(body.contains("alpha.web.1"), "container row");
-    assert!(body.contains("1024"), "resource limit");
+    assert!(body.contains("1024"), "resource limit prefilled");
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/resources""#),
+        "resource editing form"
+    );
+    assert!(body.contains(r#"name="limit_memory""#), "{body}");
     assert!(body.contains("Apply scale"));
 }
 
@@ -1594,7 +1603,10 @@ async fn processes_hides_form_when_scaling_is_disabled() {
     );
     assert!(body.contains("app.json formation"));
     assert!(body.contains("No running containers."));
-    assert!(body.contains("No resource limits or reservations configured."));
+    assert!(
+        body.contains(r#"name="process_type" value="web""#),
+        "resource editing stays available"
+    );
 }
 
 #[tokio::test]
@@ -2637,4 +2649,763 @@ async fn config_edit_page_requires_reauth_and_enqueues_a_config_job() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("config.set"), "{body}");
+}
+
+#[tokio::test]
+async fn settings_shell_and_partial_render_lock_state() {
+    let (state, _client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::AppsReport {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok(
+            r#"{"app-created-at": "1791023796", "app-locked": "true"}"#,
+        )),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains(r#"hx-get="/apps/alpha/partials/settings""#),
+        "{body}"
+    );
+
+    // The partial reads the (freshly resolved) lock state from the snapshot.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/settings")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Locked"), "{body}");
+    assert!(body.contains(r#"hx-post="/apps/alpha/unlock""#), "{body}");
+    assert!(body.contains(r#"hx-post="/apps/alpha/rename""#), "{body}");
+}
+
+#[tokio::test]
+async fn hx_lock_streams_and_locks_the_app() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::AppsLock {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("-----> Deploy lock created\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/lock", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Locking alpha"), "{body}");
+    assert!(
+        body.contains(r#"data-refresh="/apps/alpha/partials/settings""#),
+        "{body}"
+    );
+
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains("Deploy lock created"), "{events}");
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::AppsLock {
+            app: app_name("alpha")
+        }),
+        "lock ran"
+    );
+}
+
+#[tokio::test]
+async fn hx_unlock_streams_and_unlocks_the_app() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::AppsUnlock {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("-----> Deploy lock removed\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/unlock", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::AppsUnlock {
+            app: app_name("alpha")
+        }),
+        "unlock ran"
+    );
+}
+
+#[tokio::test]
+async fn hx_rename_streams_and_redirects_to_the_new_name() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::AppsRename {
+            app: app_name("alpha"),
+            new_name: app_name("beta"),
+        },
+        Ok(DokkuOutput::ok("-----> Renaming alpha to beta\n")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/rename", format!("csrf_token={csrf}&name=beta"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Renaming alpha to beta"), "{body}");
+
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(events.contains(r#""redirect":"/apps/beta""#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::AppsRename {
+            app: app_name("alpha"),
+            new_name: app_name("beta"),
+        }),
+        "rename ran"
+    );
+}
+
+#[tokio::test]
+async fn hx_rename_rejects_invalid_and_same_names_without_dokku() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    for (new_name, expected) in [
+        ("Bad_Name", "Invalid new name"),
+        ("alpha", "same as the current name"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            hx_form_request(
+                "/apps/alpha/rename",
+                format!("csrf_token={csrf}&name={new_name}"),
+            )
+            .cookie(cookie.clone())
+            .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "modal errors stay 200");
+        let body = get_body(resp).await;
+        assert!(body.contains(expected), "{new_name}: {body}");
+    }
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::AppsRename { .. })),
+        "no rename command for rejected names"
+    );
+}
+
+#[tokio::test]
+async fn non_htmx_lock_queues_and_redirects_to_settings() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::AppsLock {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("")),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/alpha/lock", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha/settings");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    wait_for_call(
+        &client,
+        &DokkuCommand::AppsLock {
+            app: app_name("alpha"),
+        },
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Queued: lock alpha."), "{body}");
+
+    // The rename is audited.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("app.lock"), "{body}");
+}
+
+#[tokio::test]
+async fn hx_resource_save_streams_and_sets_limits_and_reserves() {
+    let client = processes_client()
+        .stub(
+            DokkuCommand::ResourceLimit {
+                app: app_name("alpha"),
+                process_type: "web".into(),
+                cpu: None,
+                memory: Some("1024".into()),
+                memory_swap: None,
+            },
+            Ok(DokkuOutput::ok("")),
+        )
+        .stub(
+            DokkuCommand::ResourceReserve {
+                app: app_name("alpha"),
+                process_type: "web".into(),
+                cpu: Some("1".into()),
+                memory: None,
+            },
+            Ok(DokkuOutput::ok("")),
+        );
+    let (state, client, _dir) = harness(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/resources",
+            format!(
+                "csrf_token={csrf}&process_type=web&limit_cpu=&limit_memory=1024&limit_memory_swap=&reserve_cpu=1&reserve_memory=&action=save"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Updating resources for alpha"), "{body}");
+    assert!(
+        body.contains(r#"data-refresh="/apps/alpha/partials/processes""#),
+        "{body}"
+    );
+
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::ResourceLimit {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+            cpu: None,
+            memory: Some("1024".into()),
+            memory_swap: None,
+        }),
+        "limit ran"
+    );
+    assert!(
+        client.calls().contains(&DokkuCommand::ResourceReserve {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+            cpu: Some("1".into()),
+            memory: None,
+        }),
+        "reserve ran"
+    );
+}
+
+#[tokio::test]
+async fn hx_resource_clear_streams_and_clears_both() {
+    let client = processes_client()
+        .stub(
+            DokkuCommand::ResourceLimitClear {
+                app: app_name("alpha"),
+                process_type: "web".into(),
+            },
+            Ok(DokkuOutput::ok("")),
+        )
+        .stub(
+            DokkuCommand::ResourceReserveClear {
+                app: app_name("alpha"),
+                process_type: "web".into(),
+            },
+            Ok(DokkuOutput::ok("")),
+        );
+    let (state, client, _dir) = harness(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/resources",
+            format!("csrf_token={csrf}&process_type=web&action=clear"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#"Cleared resources"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::ResourceLimitClear {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+        }),
+        "limit-clear ran"
+    );
+    assert!(
+        client
+            .calls()
+            .contains(&DokkuCommand::ResourceReserveClear {
+                app: app_name("alpha"),
+                process_type: "web".into(),
+            }),
+        "reserve-clear ran"
+    );
+}
+
+#[tokio::test]
+async fn resource_forms_reject_empty_and_invalid_values_without_dokku() {
+    let (state, client, _dir) = harness(processes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    for (body, expected) in [
+        ("process_type=web&action=save", "Enter at least one value"),
+        (
+            "process_type=web&limit_memory=128m&action=save",
+            "Invalid resource value",
+        ),
+        (
+            "process_type=web.1&limit_memory=128&action=save",
+            "Invalid process type",
+        ),
+    ] {
+        let resp = test::call_service(
+            &app,
+            hx_form_request("/apps/alpha/resources", format!("csrf_token={csrf}&{body}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "modal errors stay 200");
+        let html = get_body(resp).await;
+        assert!(html.contains(expected), "{body}: {html}");
+    }
+    assert!(
+        client.calls().iter().all(|call| !matches!(
+            call,
+            DokkuCommand::ResourceLimit { .. }
+                | DokkuCommand::ResourceReserve { .. }
+                | DokkuCommand::ResourceLimitClear { .. }
+                | DokkuCommand::ResourceReserveClear { .. }
+        )),
+        "no resource commands for rejected input"
+    );
+}
+
+#[tokio::test]
+async fn non_htmx_resource_save_queues_flashes_and_is_audited() {
+    let client = processes_client().stub(
+        DokkuCommand::ResourceLimit {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+            cpu: None,
+            memory: Some("256".into()),
+            memory_swap: None,
+        },
+        Ok(DokkuOutput::ok("")),
+    );
+    let (state, client, _dir) = harness(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/alpha/resources",
+            format!("csrf_token={csrf}&process_type=web&limit_memory=256&action=save"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha/processes");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    wait_for_call(
+        &client,
+        &DokkuCommand::ResourceLimit {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+            cpu: None,
+            memory: Some("256".into()),
+            memory_swap: None,
+        },
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/processes")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Queued: update resources for alpha."),
+        "{body}"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("resource.set"), "{body}");
+}
+
+fn plugin_probed_client() -> MockClient {
+    seeded_app_client()
+        .stub(
+            DokkuCommand::DokkuVersion,
+            Ok(DokkuOutput::ok("dokku version 0.38.4")),
+        )
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(
+                "=====> Plugins\n  apps 0.38.4 enabled dokku core apps plugin\n  maintenance 1.0.0 enabled dokku maintenance plugin\n  http-auth 1.0.0 enabled dokku http auth plugin\n",
+            )),
+        )
+}
+
+#[tokio::test]
+async fn settings_plugin_sections_explain_missing_plugins() {
+    let (state, _client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/settings")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Maintenance mode"), "{body}");
+    assert!(body.contains("HTTP basic auth"), "{body}");
+    assert!(
+        body.contains("unknown (no probe data yet)"),
+        "cold start explains the gate: {body}"
+    );
+    assert!(
+        !body.contains(r#"hx-post="/apps/alpha/maintenance/enable""#),
+        "no actions without support: {body}"
+    );
+}
+
+#[tokio::test]
+async fn settings_plugin_sections_expose_actions_when_supported() {
+    let (state, _client, _dir) = harness(plugin_probed_client()).await;
+    state.capabilities.ensure_loaded().await.expect("probe");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/settings")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("While enabled, requests receive a maintenance page"),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/maintenance/enable""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/maintenance/disable""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/http-auth/enable""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/http-auth/add-user""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/http-auth/remove-user""#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn hx_maintenance_enable_streams_and_runs_when_supported() {
+    let client = plugin_probed_client().stub(
+        DokkuCommand::MaintenanceEnable {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok("-----> App is now in maintenance mode\n")),
+    );
+    let (state, client, _dir) = harness(client).await;
+    state.capabilities.ensure_loaded().await.expect("probe");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/maintenance/enable",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Enabling maintenance mode for alpha"),
+        "{body}"
+    );
+
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::MaintenanceEnable {
+            app: app_name("alpha")
+        }),
+        "maintenance enable ran"
+    );
+}
+
+#[tokio::test]
+async fn plugin_actions_are_refused_without_the_plugin() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/maintenance/enable",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "gate errors stay 200");
+    let body = get_body(resp).await;
+    assert!(body.contains("Unavailable on this host"), "{body}");
+    assert!(
+        client.calls().iter().all(|call| !matches!(
+            call,
+            DokkuCommand::MaintenanceEnable { .. }
+                | DokkuCommand::MaintenanceDisable { .. }
+                | DokkuCommand::HttpAuthEnable { .. }
+                | DokkuCommand::HttpAuthDisable { .. }
+                | DokkuCommand::HttpAuthAddUser { .. }
+                | DokkuCommand::HttpAuthRemoveUser { .. }
+        )),
+        "no plugin commands without support"
+    );
+}
+
+#[tokio::test]
+async fn hx_http_auth_add_user_streams_and_redacts_the_password() {
+    let client = plugin_probed_client().stub(
+        DokkuCommand::HttpAuthAddUser {
+            app: app_name("alpha"),
+            username: "alice".into(),
+            password: "hunter2".into(),
+        },
+        Ok(DokkuOutput::ok(
+            "-----> Adding user alice with password hunter2\n",
+        )),
+    );
+    let (state, client, _dir) = harness(client).await;
+    state.capabilities.ensure_loaded().await.expect("probe");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/http-auth/add-user",
+            format!("csrf_token={csrf}&username=alice&password=hunter2"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        !events.contains("hunter2"),
+        "the password never appears in the stream: {events}"
+    );
+    assert!(
+        events.contains("••••••••"),
+        "the password is masked: {events}"
+    );
+    assert!(
+        client.calls().contains(&DokkuCommand::HttpAuthAddUser {
+            app: app_name("alpha"),
+            username: "alice".into(),
+            password: "hunter2".into(),
+        }),
+        "add-user ran with the password"
+    );
+}
+
+#[tokio::test]
+async fn http_auth_add_user_validates_and_queues_on_the_no_js_path() {
+    let client = plugin_probed_client().stub(
+        DokkuCommand::HttpAuthAddUser {
+            app: app_name("alpha"),
+            username: "alice".into(),
+            password: "s3cr3t".into(),
+        },
+        Ok(DokkuOutput::ok("")),
+    );
+    let (state, client, _dir) = harness(client).await;
+    state.capabilities.ensure_loaded().await.expect("probe");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    // Invalid usernames are rejected before any command.
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/http-auth/add-user",
+            format!("csrf_token={csrf}&username=bad user&password=x"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Username may contain"), "{body}");
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/alpha/http-auth/add-user",
+            format!("csrf_token={csrf}&username=alice&password=s3cr3t"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/alpha/settings");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    wait_for_call(
+        &client,
+        &DokkuCommand::HttpAuthAddUser {
+            app: app_name("alpha"),
+            username: "alice".into(),
+            password: "s3cr3t".into(),
+        },
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/settings")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Queued: add basic-auth user alice to alpha."),
+        "{body}"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("http-auth.add-user"), "{body}");
 }

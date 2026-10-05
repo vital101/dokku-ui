@@ -73,8 +73,8 @@ pub async fn probe_capabilities(client: &dyn DokkuClient) -> Result<Capabilities
     for family in CapabilityFamily::all() {
         match client.exec(&DokkuCommand::Help { family }).await {
             Ok(output) => {
-                if parse_help_supports_tail(&output.stdout) {
-                    log_sources.push(family.help_command().to_owned());
+                if parse_help_supports_tail(&output.stdout, family.command_name()) {
+                    log_sources.push(family.command_name().to_owned());
                 }
             }
             // A transient failure would mark a healthy family unsupported for
@@ -209,8 +209,7 @@ mod tests {
     const DOKKU_VERSION: &str = include_str!("../../tests/fixtures/dokku_version.txt");
     const PLUGIN_LIST: &str = include_str!("../../tests/fixtures/plugin_list.txt");
     const LOGS_HELP: &str = include_str!("../../tests/fixtures/logs_help.txt");
-    const NGINX_ACCESS_HELP: &str = include_str!("../../tests/fixtures/nginx_access_logs_help.txt");
-    const NGINX_ERROR_HELP: &str = include_str!("../../tests/fixtures/nginx_error_logs_help.txt");
+    const NGINX_HELP: &str = include_str!("../../tests/fixtures/nginx_help.txt");
 
     fn logs_help() -> DokkuCommand {
         DokkuCommand::Help {
@@ -239,8 +238,8 @@ mod tests {
             )
             .stub(DokkuCommand::PluginList, Ok(DokkuOutput::ok(PLUGIN_LIST)))
             .stub(logs_help(), Ok(DokkuOutput::ok(LOGS_HELP)))
-            .stub(access_help(), Ok(DokkuOutput::ok(NGINX_ACCESS_HELP)))
-            .stub(error_help(), Ok(DokkuOutput::ok(NGINX_ERROR_HELP)))
+            .stub(access_help(), Ok(DokkuOutput::ok(NGINX_HELP)))
+            .stub(error_help(), Ok(DokkuOutput::ok(NGINX_HELP)))
     }
 
     async fn store_with(client: Arc<dyn DokkuClient>) -> (CapabilitiesStore, tempfile::TempDir) {

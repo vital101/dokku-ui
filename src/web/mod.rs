@@ -2,7 +2,10 @@ mod activity;
 mod apps;
 mod auth_handlers;
 mod auth_middleware;
+mod build;
+mod cron;
 mod csrf_form;
+mod domains;
 mod favicon;
 mod flash;
 mod fragments;
@@ -117,7 +120,81 @@ pub fn build_app(
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))
         .route("/apps/{name}/scale", web::post().to(apps::scale))
+        .route(
+            "/apps/{name}/resources",
+            web::post().to(apps::update_resources),
+        )
         .route("/apps/{name}/services", web::get().to(apps::services))
+        .route(
+            "/apps/{name}/maintenance/enable",
+            web::post().to(apps::maintenance_enable),
+        )
+        .route(
+            "/apps/{name}/maintenance/disable",
+            web::post().to(apps::maintenance_disable),
+        )
+        .route(
+            "/apps/{name}/http-auth/enable",
+            web::post().to(apps::http_auth_enable),
+        )
+        .route(
+            "/apps/{name}/http-auth/disable",
+            web::post().to(apps::http_auth_disable),
+        )
+        .route(
+            "/apps/{name}/http-auth/add-user",
+            web::post().to(apps::http_auth_add_user),
+        )
+        .route(
+            "/apps/{name}/http-auth/remove-user",
+            web::post().to(apps::http_auth_remove_user),
+        )
+        .route("/apps/{name}/build", web::get().to(build::page))
+        .route("/apps/{name}/partials/build", web::get().to(build::partial))
+        .route(
+            "/apps/{name}/build/buildpacks/add",
+            web::post().to(build::buildpacks_add),
+        )
+        .route(
+            "/apps/{name}/build/buildpacks/set",
+            web::post().to(build::buildpacks_set),
+        )
+        .route(
+            "/apps/{name}/build/buildpacks/remove",
+            web::post().to(build::buildpacks_remove),
+        )
+        .route(
+            "/apps/{name}/build/buildpacks/clear",
+            web::post().to(build::buildpacks_clear),
+        )
+        .route(
+            "/apps/{name}/build/builder",
+            web::post().to(build::builder_set),
+        )
+        .route("/apps/{name}/cron", web::get().to(cron::page))
+        .route("/apps/{name}/partials/cron", web::get().to(cron::partial))
+        .route("/apps/{name}/cron/run", web::post().to(cron::run))
+        .route("/apps/{name}/cron/suspend", web::post().to(cron::suspend))
+        .route("/apps/{name}/cron/resume", web::post().to(cron::resume))
+        .route("/apps/{name}/domains", web::get().to(domains::page))
+        .route(
+            "/apps/{name}/partials/domains",
+            web::get().to(domains::partial),
+        )
+        .route("/apps/{name}/domains/add", web::post().to(domains::add))
+        .route(
+            "/apps/{name}/domains/remove",
+            web::post().to(domains::remove),
+        )
+        .route("/apps/{name}/domains/set", web::post().to(domains::set))
+        .route("/apps/{name}/settings", web::get().to(apps::settings))
+        .route(
+            "/apps/{name}/partials/settings",
+            web::get().to(apps::settings_partial),
+        )
+        .route("/apps/{name}/lock", web::post().to(apps::lock))
+        .route("/apps/{name}/unlock", web::post().to(apps::unlock))
+        .route("/apps/{name}/rename", web::post().to(apps::rename))
         .route("/apps/{name}/config", web::get().to(apps::config))
         .route("/apps/{name}/config/edit", web::get().to(apps::config_edit))
         .route(

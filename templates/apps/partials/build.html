@@ -1,0 +1,147 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Buildpacks</h3>
+      <span class="text-xs text-slate-500">updated {{ updated }}</span>
+    </div>
+    {% if buildpacks.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">
+      No buildpacks configured — the builder detects one from the app's files.
+    </p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="w-12 py-2 pr-4 font-medium">#</th>
+          <th class="py-2 pr-4 font-medium">Buildpack</th>
+          <th class="py-2 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in buildpacks %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 text-slate-400">{{ row.index }}</td>
+          <td class="py-2 pr-4 font-mono text-white">{{ row.url }}</td>
+          <td class="py-2 text-right">
+            <form hx-post="/apps/{{ name }}/build/buildpacks/remove" hx-target="#modal-content" hx-swap="innerHTML"
+                  method="post" data-action-form class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="buildpack" value="{{ row.url }}">
+              <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+                Remove
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    <div class="mt-4 grid gap-4 border-t border-slate-800/50 pt-4 lg:grid-cols-2">
+      <form hx-post="/apps/{{ name }}/build/buildpacks/add" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex-1">
+          <label for="add-buildpack" class="mb-1 block text-sm text-slate-400">Add buildpack</label>
+          <input id="add-buildpack" type="text" name="buildpack" required placeholder="https://github.com/…"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <div>
+          <label for="add-index" class="mb-1 block text-sm text-slate-400">Position</label>
+          <input id="add-index" type="number" name="index" min="1" max="1000" placeholder="last"
+                 class="w-24 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Add
+        </button>
+      </form>
+      <form hx-post="/apps/{{ name }}/build/buildpacks/set" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex-1">
+          <label for="set-buildpack" class="mb-1 block text-sm text-slate-400">Set buildpack at position</label>
+          <input id="set-buildpack" type="text" name="buildpack" required placeholder="https://github.com/…"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <div>
+          <label for="set-index" class="mb-1 block text-sm text-slate-400">Position</label>
+          <input id="set-index" type="number" name="index" min="1" max="1000" value="1"
+                 class="w-24 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Set
+        </button>
+      </form>
+    </div>
+    {% if !buildpacks.is_empty() %}
+    <form hx-post="/apps/{{ name }}/build/buildpacks/clear" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-slate-700">
+        Clear all buildpacks
+      </button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Builder</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Auto lets dokku detect the builder from the app's files. Changes take
+      effect on the next deploy or rebuild.
+    </p>
+    <div class="mt-4 grid gap-4 lg:grid-cols-2">
+      <form hx-post="/apps/{{ name }}/build/builder" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="property" value="selected">
+        <div>
+          <label for="builder-selected" class="mb-1 block text-sm text-slate-400">Selected builder</label>
+          <select id="builder-selected" name="value"
+                  class="w-48 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+            <option value="" {% if builder.selected.is_empty() %}selected{% endif %}>Auto</option>
+            {% for builder_name in builders %}
+            <option value="{{ builder_name }}" {% if builder.selected.as_str() == builder_name.as_str() %}selected{% endif %}>{{ builder_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Save
+        </button>
+      </form>
+      <form hx-post="/apps/{{ name }}/build/builder" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="property" value="build-dir">
+        <div class="flex-1">
+          <label for="builder-dir" class="mb-1 block text-sm text-slate-400">Build directory (blank clears)</label>
+          <input id="builder-dir" type="text" name="value" value="{{ builder.build_dir }}" placeholder="/app/subdir"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Save
+        </button>
+      </form>
+    </div>
+    <dl class="mt-4 grid gap-2 text-sm lg:grid-cols-3">
+      <div>
+        <dt class="text-xs text-slate-500">Detected</dt>
+        <dd class="font-mono text-slate-300">{{ builder.detected }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Computed selected</dt>
+        <dd class="font-mono text-slate-300">{{ builder.computed_selected }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Build directory</dt>
+        <dd class="font-mono text-slate-300">{{ builder.build_dir }}</dd>
+      </div>
+    </dl>
+  </div>
+</div>

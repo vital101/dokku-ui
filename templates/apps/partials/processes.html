@@ -102,33 +102,62 @@
 
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <h3 class="text-sm font-medium text-white">Resource limits</h3>
-    {% if resources.is_empty() %}
-    <p class="mt-4 text-sm text-slate-400">No resource limits or reservations configured.</p>
+    <p class="mt-1 text-xs text-slate-500">
+      Empty fields are left unchanged. Clear removes all limits and
+      reservations for the process type. Changes take effect on the next
+      restart.
+    </p>
+    {% if resource_rows.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No processes found.</p>
     {% else %}
-    <table class="mt-4 w-full text-left text-sm">
-      <thead>
-        <tr class="border-b border-slate-800 text-slate-400">
-          <th class="py-2 pr-4 font-medium">Process</th>
-          <th class="py-2 pr-4 font-medium">Limit CPU</th>
-          <th class="py-2 pr-4 font-medium">Limit memory</th>
-          <th class="py-2 pr-4 font-medium">Limit swap</th>
-          <th class="py-2 pr-4 font-medium">Reserve CPU</th>
-          <th class="py-2 font-medium">Reserve memory</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for resource in resources %}
-        <tr class="border-b border-slate-800/50">
-          <td class="py-2 pr-4 font-mono text-white">{{ resource.process_type }}</td>
-          <td class="py-2 pr-4 text-slate-300">{{ resource.limit_cpu }}</td>
-          <td class="py-2 pr-4 text-slate-300">{{ resource.limit_memory }}</td>
-          <td class="py-2 pr-4 text-slate-300">{{ resource.limit_memory_swap }}</td>
-          <td class="py-2 pr-4 text-slate-300">{{ resource.reserve_cpu }}</td>
-          <td class="py-2 text-slate-300">{{ resource.reserve_memory }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    {% for resource in resource_rows %}
+    <form method="post" action="/apps/{{ name }}/resources"
+          hx-post="/apps/{{ name }}/resources" hx-target="#modal-content" hx-swap="innerHTML"
+          data-action-form
+          class="mt-4 grid grid-cols-2 items-end gap-3 border-t border-slate-800/50 pt-4 lg:grid-cols-7">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="process_type" value="{{ resource.process_type }}">
+      <div>
+        <span class="block text-xs text-slate-500">Process</span>
+        <span class="font-mono text-sm text-white">{{ resource.process_type }}</span>
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500" for="limit-cpu-{{ resource.process_type }}">Limit CPU</label>
+        <input id="limit-cpu-{{ resource.process_type }}" type="text" name="limit_cpu" value="{{ resource.limit_cpu }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500" for="limit-memory-{{ resource.process_type }}">Limit memory</label>
+        <input id="limit-memory-{{ resource.process_type }}" type="text" name="limit_memory" value="{{ resource.limit_memory }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500" for="limit-swap-{{ resource.process_type }}">Limit swap</label>
+        <input id="limit-swap-{{ resource.process_type }}" type="text" name="limit_memory_swap" value="{{ resource.limit_memory_swap }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500" for="reserve-cpu-{{ resource.process_type }}">Reserve CPU</label>
+        <input id="reserve-cpu-{{ resource.process_type }}" type="text" name="reserve_cpu" value="{{ resource.reserve_cpu }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+      </div>
+      <div>
+        <label class="block text-xs text-slate-500" for="reserve-memory-{{ resource.process_type }}">Reserve memory</label>
+        <input id="reserve-memory-{{ resource.process_type }}" type="text" name="reserve_memory" value="{{ resource.reserve_memory }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-white">
+      </div>
+      <div class="flex gap-2">
+        <button type="submit" name="action" value="save"
+                class="app-action rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500">
+          Save
+        </button>
+        <button type="submit" name="action" value="clear"
+                class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+          Clear
+        </button>
+      </div>
+    </form>
+    {% endfor %}
     {% endif %}
   </div>
 </div>

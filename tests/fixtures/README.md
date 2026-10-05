@@ -69,10 +69,13 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `redis_stats.txt` | `dokku redis:enter candid sh -c '<stats script>'` | Real capture (2026-10-04). The plugin prints a `-----> Filesystem changes may not persist…` banner first; then the fixed script's `key=value` lines: host `/proc/meminfo`, cgroup v2 `memory.current`/`memory.max` (`max` = unlimited), `memory.stat` inactive_file, `cpu.stat` sampled twice over ~1s, `nproc`, `du`/`df` of the data dir. |
 | `volume_usage.txt` | `dokku storage:exec legacy-90db719326 -- sh -c '<usage script>'` | Real capture (stdout only; docker pull progress goes to stderr): `du`/`df` of the entry mounted at `/data` in the throwaway `alpine:3` container. |
 | `list_entries.json` | `dokku storage:list-entries --format json` | Real capture (2026-10-04): `name`/`scheduler`/`host_path`/`schema_version`. Maps a mount's host path onto its `legacy-<hash>` entry name, which `storage:exec` needs. |
-| `dokku_version.txt` | `dokku --version` | `dokku version 0.38.4` — drives the capability framework's version gate. |
-| `logs_help.txt` | `dokku logs --help` | Synthetic (source-verified against dokku 0.38.4): the help text names `-t, --tail`, which is how live-tail support is probed. Replace with a real capture on the next host session. |
-| `nginx_access_logs_help.txt` | `dokku nginx:access-logs --help` | Synthetic (source-verified): names `-t, --tail`. |
-| `nginx_error_logs_help.txt` | `dokku nginx:error-logs --help` | Synthetic (source-verified): names `-t, --tail`. |
+| `dokku_version.txt` | `dokku version` | `dokku version 0.38.4`. **Not `--version`** — the flag does not survive the SSH wrapper (the host rejects a coreutils banner as the command name). |
+| `logs_help.txt` | `dokku logs:help` | Real capture (2026-10-05). `<cmd>:help` is dokku's help convention over SSH; `<cmd> --help` is parsed as an app name by the logs plugin. The `logs` line names `-t|--tail`, which is how live-tail support is probed. |
+| `nginx_help.txt` | `dokku nginx:help` | Real capture (2026-10-05). The `nginx` plugin's help lists `nginx:access-logs <app> [-t]` and `nginx:error-logs <app> [-t]` — the capability probe scopes the `-t` match to each command's line. |
+| `apps_report_locked.json` | `dokku apps:report <app> --format json` | Real capture (2026-10-05) of a locked app (`app-locked: "true"`). |
+| `cron_list_empty.json` | `dokku cron:list <app> --format json` | Real capture (2026-10-05): `[]` for an app with no cron tasks. Populated entries (id/schedule/concurrency/maintenance/command) are parsed tolerantly. |
+| `buildpacks_list_empty.txt` | `dokku buildpacks:list <app>` | Real capture (2026-10-05): the `-----> <app> buildpack urls` header with no URLs. |
+| `builder_report.txt` | `dokku builder:report <app>` | Real capture (2026-10-05): `Builder selected:`, `Builder computed selected:`, etc. `builder:set <app> selected <builder>` sets; no value clears. |
 
 ## Maintenance
 

@@ -1,0 +1,8 @@
+=====> p1-scratch2 builder information
+       Builder build dir:             
+       Builder computed build dir:    
+       Builder computed selected:     
+       Builder detected:              
+       Builder global build dir:      
+       Builder global selected:       
+       Builder selected:              

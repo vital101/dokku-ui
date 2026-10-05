@@ -466,6 +466,16 @@ impl SnapshotStore {
         Ok(())
     }
 
+    /// Resolves each host through the injected DNS resolver, returning
+    /// `(host, resolves)` pairs for the domains tab's per-vhost badges.
+    pub async fn domain_dns_statuses(&self, hosts: &[String]) -> Vec<(String, bool)> {
+        let mut statuses = Vec::with_capacity(hosts.len());
+        for host in hosts {
+            statuses.push((host.clone(), self.dns.resolves(host).await));
+        }
+        statuses
+    }
+
     /// Reads the snapshot, verifying `name` is a listed app. On a miss it refreshes just
     /// that app once (covers apps created via the dokku CLI within the staleness window)
     /// before giving up.

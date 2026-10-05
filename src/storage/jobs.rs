@@ -333,6 +333,7 @@ mod tests {
                 redirect: None,
                 refresh: CompletionRefresh::None,
             },
+            redactions: Vec::new(),
         }
     }
 

@@ -1,3 +1,0 @@
-Usage: dokku nginx:error-logs [OPTIONS] <app>
-Options:
-  -t, --tail         continually stream logs

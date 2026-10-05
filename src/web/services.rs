@@ -327,6 +327,7 @@ pub async fn create(
                     redirect: Some(redirect_to),
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: None,
             },
         )
@@ -729,6 +730,7 @@ async fn process_action(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/services/{plugin}/{service}/partials/overview")),
             },
         )
@@ -747,6 +749,7 @@ async fn process_action(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -801,6 +804,7 @@ pub async fn destroy(
                     redirect: Some(list_url.clone()),
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: None,
             },
         )
@@ -822,6 +826,7 @@ pub async fn destroy(
             redirect: Some(list_url.clone()),
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -881,6 +886,7 @@ pub async fn expose(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/services/{plugin}/{service}/partials/overview")),
             },
         )
@@ -903,6 +909,7 @@ pub async fn expose(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -943,6 +950,7 @@ pub async fn unexpose(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/services/{plugin}/{service}/partials/overview")),
             },
         )
@@ -964,6 +972,7 @@ pub async fn unexpose(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -1022,6 +1031,7 @@ pub async fn link(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/services/{plugin}/{service}/partials/links")),
             },
         )
@@ -1044,6 +1054,7 @@ pub async fn link(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(
@@ -1097,6 +1108,7 @@ pub async fn unlink(
                     redirect: None,
                     refresh: RunRefresh::None,
                 },
+                redactions: Vec::new(),
                 refresh_url: Some(format!("/services/{plugin}/{service}/partials/links")),
             },
         )
@@ -1119,6 +1131,7 @@ pub async fn unlink(
             redirect: None,
             refresh: RunRefresh::None,
         },
+        &[],
     )
     .await?;
     set_flash(

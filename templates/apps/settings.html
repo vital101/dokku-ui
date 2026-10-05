@@ -1,0 +1,10 @@
+{% extends "apps/base_app.html" %}
+
+{% block app_content %}
+<div id="app-panel"
+     hx-get="/apps/{{ name }}/partials/settings"
+     hx-trigger="load"
+     hx-swap="innerHTML">
+  {% include "partials/loading.html" %}
+</div>
+{% endblock %}

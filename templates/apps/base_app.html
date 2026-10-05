@@ -13,6 +13,14 @@
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "processes" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Processes
   </a>
+  <a href="/apps/{{ name }}/cron"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "cron" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Cron
+  </a>
+  <a href="/apps/{{ name }}/build"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "build" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Build
+  </a>
   <a href="/apps/{{ name }}/services"
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "services" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Services
@@ -21,6 +29,10 @@
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "config" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Config
   </a>
+  <a href="/apps/{{ name }}/domains"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "domains" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Domains
+  </a>
   <a href="/apps/{{ name }}/logs"
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "logs" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Logs
@@ -28,6 +40,10 @@
   <a href="/apps/{{ name }}/activity"
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "activity" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Activity
+  </a>
+  <a href="/apps/{{ name }}/settings"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "settings" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Settings
   </a>
 </nav>
 {% block app_content %}{% endblock %}

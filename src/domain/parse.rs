@@ -1,8 +1,8 @@
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::types::{
-    AppInfo, AppMounts, BuildInfo, ContainerDetails, EnvVar, ImageStatus, LogLines, Mount,
-    ProcessState, ProcessStatus, PsReport, ResourceReport, ScaleEntry, ServiceInfo, ServiceStats,
-    StorageEntry, VolumeUsage,
+    AppInfo, AppMounts, BuildInfo, BuilderReport, ContainerDetails, CronTask, DomainsReport,
+    EnvVar, ImageStatus, LogLines, Mount, ProcessState, ProcessStatus, PsReport, ResourceReport,
+    ScaleEntry, ServiceInfo, ServiceStats, StorageEntry, VolumeUsage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -90,15 +90,70 @@ pub fn parse_builds_report(json: &str) -> Option<ImageStatus> {
     parse_build_info(json).map(|build| build.image_status())
 }
 
+/// `dokku buildpacks:list <app>` -> buildpack URLs in order. The
+/// `-----> <app> buildpack urls` banner and blank lines are skipped.
+pub fn parse_buildpacks_list(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty() && !line.starts_with("----->"))
+        .collect()
+}
+
+/// `dokku builder:report <app>` -> the selected/computed builder and build
+/// dir. Keys are `Builder <name>:` lines; unknown keys are ignored.
+pub fn parse_builder_report(output: &str) -> BuilderReport {
+    let mut report = BuilderReport::default();
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_lowercase();
+        let value = normalize_report_value(value);
+        match key.as_str() {
+            "builder selected" => report.selected = value,
+            "builder computed selected" => report.computed_selected = value,
+            "builder build dir" => report.build_dir = value,
+            "builder detected" => report.detected = value,
+            _ => {}
+        }
+    }
+    report
+}
+
+/// `dokku cron:list <app> --format json` -> scheduled tasks. A malformed
+/// response yields an empty list (the caller renders an empty state).
+pub fn parse_cron_tasks(json: &str) -> Vec<CronTask> {
+    serde_json::from_str::<Vec<CronTask>>(json).unwrap_or_default()
+}
+
 /// `dokku domains:report <app> --format json` -> the app's vhost hostnames.
 pub fn parse_domains_report(json: &str) -> Vec<String> {
-    let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json) else {
-        return Vec::new();
-    };
-    map.get("app-vhosts")
-        .and_then(|value| value.as_str())
-        .map(|vhosts| vhosts.split_whitespace().map(str::to_owned).collect())
+    parse_domains_detail(json)
+        .map(|report| report.vhosts)
         .unwrap_or_default()
+}
+
+/// `dokku domains:report <app> --format json` -> the typed report. Tolerant:
+/// a missing/odd value degrades to disabled/empty rather than failing.
+pub fn parse_domains_detail(json: &str) -> Option<DomainsReport> {
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(json).ok()?;
+    let flag = |key: &str| map.get(key).and_then(|value| value.as_str()) == Some("true");
+    let list = |key: &str| {
+        map.get(key)
+            .and_then(|value| value.as_str())
+            .map(|vhosts| vhosts.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    Some(DomainsReport {
+        enabled: flag("app-enabled"),
+        vhosts: list("app-vhosts"),
+        global_enabled: flag("global-enabled"),
+        global_vhosts: list("global-vhosts"),
+    })
 }
 
 /// `dokku plugin:list` -> names of enabled plugins whose description ends in
@@ -652,6 +707,7 @@ mod tests {
     const REDIS_STATS: &str = include_str!("../../tests/fixtures/redis_stats.txt");
     const VOLUME_USAGE: &str = include_str!("../../tests/fixtures/volume_usage.txt");
     const LIST_ENTRIES: &str = include_str!("../../tests/fixtures/list_entries.json");
+    const BUILDER_REPORT: &str = include_str!("../../tests/fixtures/builder_report.txt");
 
     #[test]
     fn parses_apps_list_fixture() {
@@ -795,6 +851,78 @@ mod tests {
             parse_domains_report(DOMAINS_REPORT_DEFAULT),
             vec!["starwars.re-cycledair.com"]
         );
+    }
+
+    #[test]
+    fn parses_buildpacks_list() {
+        let output = "-----> alpha buildpack urls\nhttps://github.com/heroku/heroku-buildpack-nodejs\nhttps://github.com/heroku/heroku-buildpack-ruby\n";
+        assert_eq!(
+            parse_buildpacks_list(output),
+            vec![
+                "https://github.com/heroku/heroku-buildpack-nodejs",
+                "https://github.com/heroku/heroku-buildpack-ruby",
+            ]
+        );
+        assert_eq!(
+            parse_buildpacks_list("-----> alpha buildpack urls\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(parse_buildpacks_list(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_builder_report_fixture() {
+        let report = parse_builder_report(BUILDER_REPORT);
+        assert_eq!(report.selected, "");
+        assert_eq!(report.build_dir, "");
+        let populated = "=====> alpha builder information\n       Builder build dir:             /app\n       Builder computed selected:     dockerfile\n       Builder detected:              dockerfile\n       Builder selected:              dockerfile\n";
+        let report = parse_builder_report(populated);
+        assert_eq!(report.selected, "dockerfile");
+        assert_eq!(report.computed_selected, "dockerfile");
+        assert_eq!(report.build_dir, "/app");
+        assert_eq!(report.detected, "dockerfile");
+    }
+
+    #[test]
+    fn parses_cron_tasks_from_json() {
+        let json = r#"[
+            {"id":"a1b2c3","schedule":"0 * * * *","command":"echo hi","concurrency_policy":"allow","maintenance":false,"task-in-maintenance":false},
+            {"id":"d4e5f6","schedule":"30 2 * * *","command":"backup","concurrency_policy":"forbid","maintenance":true,"task-in-maintenance":true}
+        ]"#;
+        let tasks = parse_cron_tasks(json);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, "a1b2c3");
+        assert_eq!(tasks[0].schedule, "0 * * * *");
+        assert_eq!(tasks[0].command, "echo hi");
+        assert_eq!(tasks[0].concurrency_policy, "allow");
+        assert!(!tasks[0].task_in_maintenance);
+        assert!(tasks[1].maintenance);
+        assert!(tasks[1].task_in_maintenance);
+    }
+
+    #[test]
+    fn cron_tasks_empty_and_malformed_are_empty() {
+        assert!(parse_cron_tasks("[]").is_empty());
+        assert!(parse_cron_tasks("not json").is_empty());
+        assert!(parse_cron_tasks("").is_empty());
+    }
+
+    #[test]
+    fn parses_domains_detail_fixture() {
+        let report = parse_domains_detail(DOMAINS_REPORT).expect("report");
+        assert!(report.enabled);
+        assert_eq!(report.vhosts, vec!["dokku.re-cycledair.com"]);
+        assert!(report.global_enabled);
+        assert_eq!(report.global_vhosts, vec!["re-cycledair.com"]);
+    }
+
+    #[test]
+    fn domains_detail_tolerates_missing_fields() {
+        let report = parse_domains_detail(r#"{"app-vhosts":"one.example.com"}"#).expect("report");
+        assert!(!report.enabled);
+        assert_eq!(report.vhosts, vec!["one.example.com"]);
+        assert!(report.global_vhosts.is_empty());
+        assert_eq!(parse_domains_detail("not json"), None);
     }
 
     #[test]

@@ -1,9 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::AppName;
+use crate::domain::build::{
+    is_valid_builder_property, is_valid_builder_value, is_valid_buildpack, is_valid_buildpack_index,
+};
 use crate::domain::command::DokkuCommand;
+use crate::domain::cron::is_valid_cron_id;
+use crate::domain::domain_name::DomainName;
 use crate::domain::env_file::{is_valid_config_key, is_valid_config_value};
+use crate::domain::http_auth::is_valid_username;
 use crate::domain::mount_spec::MountSpec;
+use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::{EnvVar, ScaleEntry};
@@ -23,6 +30,104 @@ pub enum JobSpec {
     },
     AppDestroy {
         app: String,
+    },
+    AppLock {
+        app: String,
+    },
+    AppUnlock {
+        app: String,
+    },
+    AppRename {
+        app: String,
+        new_name: String,
+    },
+    DomainsAdd {
+        app: String,
+        domains: Vec<String>,
+    },
+    DomainsRemove {
+        app: String,
+        domains: Vec<String>,
+    },
+    DomainsSet {
+        app: String,
+        domains: Vec<String>,
+    },
+    ResourceLimit {
+        app: String,
+        process_type: String,
+        cpu: Option<String>,
+        memory: Option<String>,
+        memory_swap: Option<String>,
+    },
+    ResourceReserve {
+        app: String,
+        process_type: String,
+        cpu: Option<String>,
+        memory: Option<String>,
+    },
+    ResourceLimitClear {
+        app: String,
+        process_type: String,
+    },
+    ResourceReserveClear {
+        app: String,
+        process_type: String,
+    },
+    CronRun {
+        app: String,
+        cron_id: String,
+    },
+    CronSuspend {
+        app: String,
+        cron_id: String,
+    },
+    CronResume {
+        app: String,
+        cron_id: String,
+    },
+    MaintenanceEnable {
+        app: String,
+    },
+    MaintenanceDisable {
+        app: String,
+    },
+    HttpAuthEnable {
+        app: String,
+    },
+    HttpAuthDisable {
+        app: String,
+    },
+    HttpAuthAddUser {
+        app: String,
+        username: String,
+        password: String,
+    },
+    HttpAuthRemoveUser {
+        app: String,
+        username: String,
+    },
+    BuildpacksSet {
+        app: String,
+        buildpack: String,
+        index: Option<u32>,
+    },
+    BuildpacksAdd {
+        app: String,
+        buildpack: String,
+        index: Option<u32>,
+    },
+    BuildpacksRemove {
+        app: String,
+        buildpack: String,
+    },
+    BuildpacksClear {
+        app: String,
+    },
+    BuilderSet {
+        app: String,
+        property: String,
+        value: Option<String>,
     },
     ServiceAction {
         plugin: String,
@@ -118,6 +223,214 @@ impl JobSpec {
             JobSpec::AppDestroy { app } => {
                 let app = parse_app(app)?;
                 Ok(vec![DokkuCommand::AppsDestroy { app, force: true }])
+            }
+            JobSpec::AppLock { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::AppsLock { app }])
+            }
+            JobSpec::AppUnlock { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::AppsUnlock { app }])
+            }
+            JobSpec::AppRename { app, new_name } => {
+                let app = parse_app(app)?;
+                let new_name = parse_app(new_name)?;
+                Ok(vec![DokkuCommand::AppsRename { app, new_name }])
+            }
+            JobSpec::DomainsAdd { app, domains } => {
+                let app = parse_app(app)?;
+                let domains = parse_domains(domains)?;
+                Ok(vec![DokkuCommand::DomainsAdd { app, domains }])
+            }
+            JobSpec::DomainsRemove { app, domains } => {
+                let app = parse_app(app)?;
+                let domains = parse_domains(domains)?;
+                Ok(vec![DokkuCommand::DomainsRemove { app, domains }])
+            }
+            JobSpec::DomainsSet { app, domains } => {
+                let app = parse_app(app)?;
+                let domains = parse_domains(domains)?;
+                Ok(vec![DokkuCommand::DomainsSet { app, domains }])
+            }
+            JobSpec::ResourceLimit {
+                app,
+                process_type,
+                cpu,
+                memory,
+                memory_swap,
+            } => {
+                let app = parse_app(app)?;
+                let process_type = parse_process_type(process_type)?;
+                let cpu = parse_optional_resource(cpu)?;
+                let memory = parse_optional_resource(memory)?;
+                let memory_swap = parse_optional_resource(memory_swap)?;
+                if cpu.is_none() && memory.is_none() && memory_swap.is_none() {
+                    return Err(JobSpecError::Invalid(
+                        "no resource values provided".to_owned(),
+                    ));
+                }
+                Ok(vec![DokkuCommand::ResourceLimit {
+                    app,
+                    process_type,
+                    cpu,
+                    memory,
+                    memory_swap,
+                }])
+            }
+            JobSpec::ResourceReserve {
+                app,
+                process_type,
+                cpu,
+                memory,
+            } => {
+                let app = parse_app(app)?;
+                let process_type = parse_process_type(process_type)?;
+                let cpu = parse_optional_resource(cpu)?;
+                let memory = parse_optional_resource(memory)?;
+                if cpu.is_none() && memory.is_none() {
+                    return Err(JobSpecError::Invalid(
+                        "no resource values provided".to_owned(),
+                    ));
+                }
+                Ok(vec![DokkuCommand::ResourceReserve {
+                    app,
+                    process_type,
+                    cpu,
+                    memory,
+                }])
+            }
+            JobSpec::ResourceLimitClear { app, process_type } => {
+                let app = parse_app(app)?;
+                let process_type = parse_process_type(process_type)?;
+                Ok(vec![DokkuCommand::ResourceLimitClear { app, process_type }])
+            }
+            JobSpec::ResourceReserveClear { app, process_type } => {
+                let app = parse_app(app)?;
+                let process_type = parse_process_type(process_type)?;
+                Ok(vec![DokkuCommand::ResourceReserveClear {
+                    app,
+                    process_type,
+                }])
+            }
+            JobSpec::CronRun { app, cron_id } => {
+                let app = parse_app(app)?;
+                let cron_id = parse_cron_id(cron_id)?;
+                Ok(vec![DokkuCommand::CronRun { app, cron_id }])
+            }
+            JobSpec::CronSuspend { app, cron_id } => {
+                let app = parse_app(app)?;
+                let cron_id = parse_cron_id(cron_id)?;
+                Ok(vec![DokkuCommand::CronSuspend { app, cron_id }])
+            }
+            JobSpec::CronResume { app, cron_id } => {
+                let app = parse_app(app)?;
+                let cron_id = parse_cron_id(cron_id)?;
+                Ok(vec![DokkuCommand::CronResume { app, cron_id }])
+            }
+            JobSpec::MaintenanceEnable { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::MaintenanceEnable { app }])
+            }
+            JobSpec::MaintenanceDisable { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::MaintenanceDisable { app }])
+            }
+            JobSpec::HttpAuthEnable { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::HttpAuthEnable { app }])
+            }
+            JobSpec::HttpAuthDisable { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::HttpAuthDisable { app }])
+            }
+            JobSpec::HttpAuthAddUser {
+                app,
+                username,
+                password,
+            } => {
+                let app = parse_app(app)?;
+                let username = parse_username(username)?;
+                if !is_valid_config_value(password) {
+                    return Err(JobSpecError::Invalid(
+                        "invalid password (single-line and quote-free required)".to_owned(),
+                    ));
+                }
+                Ok(vec![DokkuCommand::HttpAuthAddUser {
+                    app,
+                    username,
+                    password: password.clone(),
+                }])
+            }
+            JobSpec::HttpAuthRemoveUser { app, username } => {
+                let app = parse_app(app)?;
+                let username = parse_username(username)?;
+                Ok(vec![DokkuCommand::HttpAuthRemoveUser { app, username }])
+            }
+            JobSpec::BuildpacksSet {
+                app,
+                buildpack,
+                index,
+            } => {
+                let app = parse_app(app)?;
+                let buildpack = parse_buildpack(buildpack)?;
+                let index = parse_buildpack_index(*index)?;
+                Ok(vec![DokkuCommand::BuildpacksSet {
+                    app,
+                    buildpack,
+                    index,
+                }])
+            }
+            JobSpec::BuildpacksAdd {
+                app,
+                buildpack,
+                index,
+            } => {
+                let app = parse_app(app)?;
+                let buildpack = parse_buildpack(buildpack)?;
+                let index = parse_buildpack_index(*index)?;
+                Ok(vec![DokkuCommand::BuildpacksAdd {
+                    app,
+                    buildpack,
+                    index,
+                }])
+            }
+            JobSpec::BuildpacksRemove { app, buildpack } => {
+                let app = parse_app(app)?;
+                let buildpack = parse_buildpack(buildpack)?;
+                Ok(vec![DokkuCommand::BuildpacksRemove { app, buildpack }])
+            }
+            JobSpec::BuildpacksClear { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::BuildpacksClear { app }])
+            }
+            JobSpec::BuilderSet {
+                app,
+                property,
+                value,
+            } => {
+                let app = parse_app(app)?;
+                if !is_valid_builder_property(property) {
+                    return Err(JobSpecError::Invalid(format!(
+                        "invalid builder property `{property}`"
+                    )));
+                }
+                let value = match value {
+                    None => None,
+                    Some(value) if value.is_empty() => None,
+                    Some(value) => Some(value.clone()),
+                };
+                if let Some(value) = &value {
+                    if !is_valid_builder_value(property, value) {
+                        return Err(JobSpecError::Invalid(format!(
+                            "invalid builder value `{value}`"
+                        )));
+                    }
+                }
+                Ok(vec![DokkuCommand::BuilderSet {
+                    app,
+                    property: property.clone(),
+                    value,
+                }])
             }
             JobSpec::ServiceAction {
                 plugin,
@@ -229,6 +542,69 @@ impl JobSpec {
     }
 }
 
+fn parse_domains(raw: &[String]) -> Result<Vec<DomainName>, JobSpecError> {
+    if raw.is_empty() {
+        return Err(JobSpecError::Invalid("no domains provided".to_owned()));
+    }
+    raw.iter()
+        .map(|domain| {
+            DomainName::try_from(domain.as_str())
+                .map_err(|err| JobSpecError::Invalid(err.to_string()))
+        })
+        .collect()
+}
+
+fn parse_buildpack(raw: &str) -> Result<String, JobSpecError> {
+    if !is_valid_buildpack(raw) {
+        return Err(JobSpecError::Invalid(format!("invalid buildpack `{raw}`")));
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_buildpack_index(index: Option<u32>) -> Result<Option<u32>, JobSpecError> {
+    match index {
+        None => Ok(None),
+        Some(index) if is_valid_buildpack_index(index) => Ok(Some(index)),
+        Some(index) => Err(JobSpecError::Invalid(format!(
+            "invalid buildpack index `{index}`"
+        ))),
+    }
+}
+
+fn parse_username(raw: &str) -> Result<String, JobSpecError> {
+    if !is_valid_username(raw) {
+        return Err(JobSpecError::Invalid(format!("invalid username `{raw}`")));
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_cron_id(raw: &str) -> Result<String, JobSpecError> {
+    if !is_valid_cron_id(raw) {
+        return Err(JobSpecError::Invalid(format!("invalid cron id `{raw}`")));
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_process_type(raw: &str) -> Result<String, JobSpecError> {
+    if !is_valid_process_type(raw) {
+        return Err(JobSpecError::Invalid(format!(
+            "invalid process type `{raw}`"
+        )));
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_optional_resource(raw: &Option<String>) -> Result<Option<String>, JobSpecError> {
+    match raw {
+        None => Ok(None),
+        Some(value) if value.is_empty() => Ok(None),
+        Some(value) if is_valid_resource_value(value) => Ok(Some(value.clone())),
+        Some(value) => Err(JobSpecError::Invalid(format!(
+            "invalid resource value `{value}`"
+        ))),
+    }
+}
+
 fn parse_app(raw: &str) -> Result<AppName, JobSpecError> {
     AppName::try_from(raw).map_err(|err| JobSpecError::Invalid(err.to_string()))
 }
@@ -271,6 +647,10 @@ pub enum CompletionRefresh {
 pub struct JobPayload {
     pub plan: Vec<JobSpec>,
     pub completion: CompletionSpec,
+    /// Literal secrets (config values, http-auth passwords) redacted from
+    /// every persisted run line for this job.
+    #[serde(default)]
+    pub redactions: Vec<String>,
 }
 
 #[cfg(test)]
@@ -394,6 +774,406 @@ mod tests {
     }
 
     #[test]
+    fn lock_unlock_and_rename_rehydrate() {
+        assert_eq!(
+            JobSpec::AppLock {
+                app: "alpha".into()
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::AppsLock { app: app("alpha") }]
+        );
+        assert_eq!(
+            JobSpec::AppUnlock {
+                app: "alpha".into()
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::AppsUnlock { app: app("alpha") }]
+        );
+        assert_eq!(
+            JobSpec::AppRename {
+                app: "alpha".into(),
+                new_name: "beta".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::AppsRename {
+                app: app("alpha"),
+                new_name: app("beta"),
+            }]
+        );
+        let bad = JobSpec::AppRename {
+            app: "alpha".into(),
+            new_name: "Bad_Name".into(),
+        };
+        assert!(bad.to_commands().is_err(), "invalid new names are rejected");
+    }
+
+    #[test]
+    fn domain_specs_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::DomainsAdd {
+                app: "alpha".into(),
+                domains: vec!["one.example.com".into()],
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::DomainsAdd {
+                app: app("alpha"),
+                domains: vec![DomainName::try_from("one.example.com").expect("d")],
+            }]
+        );
+        assert_eq!(
+            JobSpec::DomainsSet {
+                app: "alpha".into(),
+                domains: vec!["one.example.com".into(), "two.example.com".into()],
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::DomainsSet {
+                app: app("alpha"),
+                domains: vec![
+                    DomainName::try_from("one.example.com").expect("d"),
+                    DomainName::try_from("two.example.com").expect("d"),
+                ],
+            }]
+        );
+        assert!(
+            JobSpec::DomainsAdd {
+                app: "alpha".into(),
+                domains: vec!["bad_domain".into()],
+            }
+            .to_commands()
+            .is_err(),
+            "invalid domains are rejected"
+        );
+        assert!(
+            JobSpec::DomainsRemove {
+                app: "alpha".into(),
+                domains: Vec::new(),
+            }
+            .to_commands()
+            .is_err(),
+            "empty domain lists are rejected"
+        );
+    }
+
+    #[test]
+    fn resource_specs_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::ResourceLimit {
+                app: "alpha".into(),
+                process_type: "web".into(),
+                cpu: Some("1".into()),
+                memory: Some("128".into()),
+                memory_swap: None,
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::ResourceLimit {
+                app: app("alpha"),
+                process_type: "web".into(),
+                cpu: Some("1".into()),
+                memory: Some("128".into()),
+                memory_swap: None,
+            }]
+        );
+        assert_eq!(
+            JobSpec::ResourceReserve {
+                app: "alpha".into(),
+                process_type: "worker".into(),
+                cpu: None,
+                memory: Some("512".into()),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::ResourceReserve {
+                app: app("alpha"),
+                process_type: "worker".into(),
+                cpu: None,
+                memory: Some("512".into()),
+            }]
+        );
+        assert_eq!(
+            JobSpec::ResourceLimitClear {
+                app: "alpha".into(),
+                process_type: "web".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::ResourceLimitClear {
+                app: app("alpha"),
+                process_type: "web".into(),
+            }]
+        );
+        assert!(
+            JobSpec::ResourceLimit {
+                app: "alpha".into(),
+                process_type: "web.1".into(),
+                cpu: Some("1".into()),
+                memory: None,
+                memory_swap: None,
+            }
+            .to_commands()
+            .is_err(),
+            "invalid process types are rejected"
+        );
+        assert!(
+            JobSpec::ResourceLimit {
+                app: "alpha".into(),
+                process_type: "web".into(),
+                cpu: Some("1 2".into()),
+                memory: None,
+                memory_swap: None,
+            }
+            .to_commands()
+            .is_err(),
+            "invalid resource values are rejected"
+        );
+        assert!(
+            JobSpec::ResourceReserve {
+                app: "alpha".into(),
+                process_type: "web".into(),
+                cpu: None,
+                memory: None,
+            }
+            .to_commands()
+            .is_err(),
+            "empty resource sets are rejected"
+        );
+    }
+
+    #[test]
+    fn cron_specs_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::CronRun {
+                app: "alpha".into(),
+                cron_id: "a1b2c3".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::CronRun {
+                app: app("alpha"),
+                cron_id: "a1b2c3".into(),
+            }]
+        );
+        assert_eq!(
+            JobSpec::CronSuspend {
+                app: "alpha".into(),
+                cron_id: "a1b2c3".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::CronSuspend {
+                app: app("alpha"),
+                cron_id: "a1b2c3".into(),
+            }]
+        );
+        assert_eq!(
+            JobSpec::CronResume {
+                app: "alpha".into(),
+                cron_id: "a1b2c3".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::CronResume {
+                app: app("alpha"),
+                cron_id: "a1b2c3".into(),
+            }]
+        );
+        assert!(
+            JobSpec::CronRun {
+                app: "alpha".into(),
+                cron_id: "bad id".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid cron ids are rejected"
+        );
+    }
+
+    #[test]
+    fn maintenance_and_http_auth_specs_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::MaintenanceEnable {
+                app: "alpha".into()
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::MaintenanceEnable { app: app("alpha") }]
+        );
+        assert_eq!(
+            JobSpec::HttpAuthDisable {
+                app: "alpha".into()
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::HttpAuthDisable { app: app("alpha") }]
+        );
+        assert_eq!(
+            JobSpec::HttpAuthAddUser {
+                app: "alpha".into(),
+                username: "alice".into(),
+                password: "s3cr3t".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::HttpAuthAddUser {
+                app: app("alpha"),
+                username: "alice".into(),
+                password: "s3cr3t".into(),
+            }]
+        );
+        assert!(
+            JobSpec::HttpAuthAddUser {
+                app: "alpha".into(),
+                username: "bad user".into(),
+                password: "x".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid usernames are rejected"
+        );
+        assert!(
+            JobSpec::HttpAuthAddUser {
+                app: "alpha".into(),
+                username: "alice".into(),
+                password: "it's".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "quote-carrying passwords are rejected"
+        );
+    }
+
+    #[test]
+    fn payload_redactions_roundtrip() {
+        let payload = JobPayload {
+            plan: vec![JobSpec::HttpAuthAddUser {
+                app: "alpha".into(),
+                username: "alice".into(),
+                password: "s3cr3t".into(),
+            }],
+            completion: CompletionSpec {
+                success_message: "done".into(),
+                redirect: None,
+                refresh: CompletionRefresh::None,
+            },
+            redactions: vec!["s3cr3t".into()],
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let parsed: JobPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.redactions, vec!["s3cr3t".to_owned()]);
+    }
+
+    #[test]
+    fn build_config_specs_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::BuildpacksSet {
+                app: "alpha".into(),
+                buildpack: "https://example.com/bp".into(),
+                index: Some(2),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::BuildpacksSet {
+                app: app("alpha"),
+                buildpack: "https://example.com/bp".into(),
+                index: Some(2),
+            }]
+        );
+        assert_eq!(
+            JobSpec::BuildpacksAdd {
+                app: "alpha".into(),
+                buildpack: "https://example.com/bp".into(),
+                index: None,
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::BuildpacksAdd {
+                app: app("alpha"),
+                buildpack: "https://example.com/bp".into(),
+                index: None,
+            }]
+        );
+        assert_eq!(
+            JobSpec::BuildpacksRemove {
+                app: "alpha".into(),
+                buildpack: "https://example.com/bp".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::BuildpacksRemove {
+                app: app("alpha"),
+                buildpack: "https://example.com/bp".into(),
+            }]
+        );
+        assert_eq!(
+            JobSpec::BuildpacksClear {
+                app: "alpha".into()
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::BuildpacksClear { app: app("alpha") }]
+        );
+        assert_eq!(
+            JobSpec::BuilderSet {
+                app: "alpha".into(),
+                property: "selected".into(),
+                value: Some("dockerfile".into()),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::BuilderSet {
+                app: app("alpha"),
+                property: "selected".into(),
+                value: Some("dockerfile".into()),
+            }]
+        );
+        assert!(
+            JobSpec::BuildpacksSet {
+                app: "alpha".into(),
+                buildpack: "it's".into(),
+                index: None,
+            }
+            .to_commands()
+            .is_err(),
+            "quote-carrying buildpacks are rejected"
+        );
+        assert!(
+            JobSpec::BuildpacksSet {
+                app: "alpha".into(),
+                buildpack: "https://example.com/bp".into(),
+                index: Some(0),
+            }
+            .to_commands()
+            .is_err(),
+            "index 0 is rejected"
+        );
+        assert!(
+            JobSpec::BuilderSet {
+                app: "alpha".into(),
+                property: "detected".into(),
+                value: Some("dockerfile".into()),
+            }
+            .to_commands()
+            .is_err(),
+            "read-only properties are rejected"
+        );
+        assert!(
+            JobSpec::BuilderSet {
+                app: "alpha".into(),
+                property: "selected".into(),
+                value: Some("podman".into()),
+            }
+            .to_commands()
+            .is_err(),
+            "unknown builders are rejected"
+        );
+    }
+
+    #[test]
     fn destructive_specs_are_flagged() {
         assert!(
             JobSpec::AppDestroy {
@@ -481,6 +1261,7 @@ mod tests {
                 redirect: None,
                 refresh: CompletionRefresh::Reports,
             },
+            redactions: Vec::new(),
         };
         let json = serde_json::to_string(&payload).expect("serialize");
         let parsed: JobPayload = serde_json::from_str(&json).expect("deserialize");

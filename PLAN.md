@@ -384,7 +384,7 @@ Coverage protection rails: `main.rs` stays trivial; anything nontrivial lives be
 
 ## 16. Post-v1 backlog (context, not scope)
 
-Deployments & build logs, one-off `run` commands, user management/roles UI, login rate limiting, Let's Encrypt/certs UI, ssh-keys management, plugin screens, backup/export, i18n, themes. (Config set/unset with re-auth reveal, live log tailing over SSE, durable audit + job queue + toasts, capability detection, and RBAC/re-auth seams landed in the P0 milestone — see `GAPS.md` §P0 status.)
+Deployments & build logs, one-off `run` commands, user management/roles UI, login rate limiting, Let's Encrypt/certs UI, ssh-keys management, plugin screens, backup/export, i18n, themes. (P0 foundations — config editing with re-auth reveal, live log tailing over SSE, durable audit + job queue + toasts, capability detection, RBAC/re-auth seams — and the P1 app configuration UI — rename, deploy lock, domains, resource limits, cron, build config, plugin-gated maintenance/basic auth — are landed; see `GAPS.md`.)
 
 ### Deferred from App Detail v1
 

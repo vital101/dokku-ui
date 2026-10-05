@@ -59,11 +59,23 @@ Why not bare `cargo test`: `static/css/app.css` is a generated, gitignored artif
   handlers build validated `JobSpec` plans (`src/domain/job.rs`) and enqueue via
   `fragments::enqueue_action_run`; an immediate executor claims **its own job
   by id** (`claim_by_id` — never "the oldest", which in a same-second race
-  could be another process's and strand both), and the worker pool
+  could be another process's and strand both) and verifies `claimed_by`
+  ownership before running an already-claimed job; the worker pool
   (`dokku::spawn_worker` in `lib.rs`) reclaims expired leases cross-container.
   Retries: transient `Connect`/`Timeout` only, exponential backoff; `Exit`
   never; destructive specs `max_attempts=1`. Payloads rehydrate through the
   newtype constructors, so tampered rows fail without touching the host.
+  `JobPayload.redactions` carries literal secrets (config values, basic-auth
+  passwords) that are masked from every persisted run line.
+- **P1 app configuration UI**: app tabs Domains, Cron, Build, and Settings
+  (rename, deploy lock, maintenance, HTTP basic auth). New commands live in
+  `DokkuCommand` with exhaustive `requirement()` gates — `maintenance` and
+  `http-auth` are `Plugin`-gated and render an explanatory state when absent.
+  Domain names, buildpack URLs, builder properties/values, cron ids, process
+  types, and resource values all have pure validators (`domain/domain_name.rs`,
+  `domain/build.rs`, `domain/resource.rs`, `domain/cron.rs`) re-checked at job
+  rehydration. Plugin/cron/buildpacks `:help` output is fixture-locked; the
+  nginx log families share the `nginx:help` probe.
 - **Audit**: `action_runs` carries actor/operation/target_kind/parent_run_id
   (migration `0005`); run lines are redacted before persisting
   (`domain::redact`, literal secrets + `KEY:`/URL-credential masking).

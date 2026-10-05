@@ -188,6 +188,7 @@ async fn run_plan(
         state.action_runs.clone(),
         run_id.to_owned(),
         rx,
+        payload.redactions.clone(),
     ));
 
     let jobs = state.jobs.clone();
@@ -242,6 +243,7 @@ fn persist_lines(
     repo: Arc<SqliteRunsRepo>,
     run_id: String,
     rx: tokio::sync::mpsc::Receiver<String>,
+    redactions: Vec<String>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = rx;
@@ -252,7 +254,10 @@ fn persist_lines(
             while let Some(pos) = partial.find('\n') {
                 let line: String = partial.drain(..=pos).collect();
                 let line = line.trim_end_matches(['\n', '\r']).to_owned();
-                if let Err(err) = repo.append_line(&run_id, seq as usize, &line, &[]).await {
+                if let Err(err) = repo
+                    .append_line(&run_id, seq as usize, &line, &redactions)
+                    .await
+                {
                     tracing::warn!(error = %err, "failed to persist run line");
                 }
                 seq += 1;
@@ -260,7 +265,10 @@ fn persist_lines(
         }
         let rest = partial.trim_end_matches(['\n', '\r']);
         if !rest.is_empty() {
-            if let Err(err) = repo.append_line(&run_id, seq as usize, rest, &[]).await {
+            if let Err(err) = repo
+                .append_line(&run_id, seq as usize, rest, &redactions)
+                .await
+            {
                 tracing::warn!(error = %err, "failed to persist run line");
             }
         }

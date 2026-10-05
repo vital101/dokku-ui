@@ -1,0 +1,90 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Vhosts</h3>
+      <span class="text-xs text-slate-500">updated {{ updated }}</span>
+    </div>
+    {% if !report.enabled %}
+    <p class="mt-4 text-sm text-slate-400">VHOST support is disabled for this app.</p>
+    {% else if rows.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No vhosts configured.</p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Domain</th>
+          <th class="py-2 pr-4 font-medium">DNS</th>
+          <th class="py-2 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 font-mono text-white">{{ row.domain }}</td>
+          <td class="py-2 pr-4">
+            {% if row.resolves %}
+            <span class="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-400">resolves</span>
+            {% else %}
+            <span class="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-400">does not resolve</span>
+            {% endif %}
+          </td>
+          <td class="py-2 text-right">
+            <form hx-post="/apps/{{ name }}/domains/remove" hx-target="#modal-content" hx-swap="innerHTML"
+                  method="post" data-action-form class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="domain" value="{{ row.domain }}">
+              <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+                Remove
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Add domains</h3>
+    <form hx-post="/apps/{{ name }}/domains/add" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="add-domains" class="mb-1 block text-sm text-slate-400">Domains (space or comma separated)</label>
+        <input id="add-domains" type="text" name="domains" required placeholder="one.example.com two.example.com"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Add
+      </button>
+    </form>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Replace all domains</h3>
+    <p class="mt-1 text-sm text-slate-400">
+      Sets the complete vhost list for this app. Removing a domain here
+      removes it from the proxy immediately.
+    </p>
+    <form hx-post="/apps/{{ name }}/domains/set" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="set-domains" class="mb-1 block text-sm text-slate-400">All domains</label>
+        <input id="set-domains" type="text" name="domains" value="{{ current_list }}" required
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+        Replace
+      </button>
+    </form>
+    {% if !report.global_vhosts.is_empty() %}
+    <p class="mt-4 text-xs text-slate-500">
+      Global vhosts also route to this app: {{ report.global_vhosts.join(", ") }}
+    </p>
+    {% endif %}
+  </div>
+</div>

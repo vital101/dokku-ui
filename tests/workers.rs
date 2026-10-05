@@ -62,6 +62,7 @@ async fn enqueue(state: &AppState, max_attempts: usize) -> (String, String) {
             &JobPayload {
                 plan: vec![restart_spec()],
                 completion: completion(),
+                redactions: Vec::new(),
             },
             max_attempts,
         )
@@ -239,6 +240,7 @@ async fn destructive_jobs_are_never_retried() {
                     app: "alpha".into(),
                 }],
                 completion: completion(),
+                redactions: Vec::new(),
             },
             1,
         )

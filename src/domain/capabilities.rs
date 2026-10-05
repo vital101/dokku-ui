@@ -61,12 +61,22 @@ impl CapabilityFamily {
         [Self::Logs, Self::NginxAccessLogs, Self::NginxErrorLogs]
     }
 
-    /// The dokku command whose `--help` output is probed.
-    pub fn help_command(&self) -> &'static str {
+    /// The command this family runs (`logs`, `nginx:access-logs`, …). Also
+    /// the token stored in `log_sources` and matched in help output.
+    pub fn command_name(&self) -> &'static str {
         match self {
             Self::Logs => "logs",
             Self::NginxAccessLogs => "nginx:access-logs",
             Self::NginxErrorLogs => "nginx:error-logs",
+        }
+    }
+
+    /// The `:help` command whose output is probed. The nginx log commands are
+    /// subcommands of the `nginx` plugin, so their families share one probe.
+    pub fn help_probe(&self) -> &'static str {
+        match self {
+            Self::Logs => "logs:help",
+            Self::NginxAccessLogs | Self::NginxErrorLogs => "nginx:help",
         }
     }
 
@@ -86,7 +96,7 @@ impl TryFrom<&str> for CapabilityFamily {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::all()
             .into_iter()
-            .find(|family| family.help_command() == value)
+            .find(|family| family.command_name() == value)
             .ok_or_else(|| CapabilityFamilyError::Unsupported(value.to_owned()))
     }
 }
@@ -105,12 +115,13 @@ pub enum CapabilityFamilyError {
     Unsupported(String),
 }
 
-/// A family's `--help` output advertises live tail when it names the follow
-/// flag. Anything else (missing family command, bare usage line) is `false`.
-pub fn parse_help_supports_tail(output: &str) -> bool {
+/// A family's help output advertises live tail when a line that names the
+/// family's command also names the follow flag. Scoping to the command's line
+/// matters because the `nginx` help lists both log commands in one probe.
+pub fn parse_help_supports_tail(output: &str, command: &str) -> bool {
     output
-        .split_whitespace()
-        .any(|token| token == "--tail" || token == "-t")
+        .lines()
+        .any(|line| line.contains(command) && (line.contains("--tail") || line.contains("-t")))
 }
 
 /// `dokku plugin:list` -> names of all *enabled* plugins (core, service, and
@@ -173,7 +184,7 @@ impl Support {
             Self::PluginMissing { plugin } => format!("requires the `{plugin}` plugin"),
             Self::FamilyUnsupported { family } => format!(
                 "live tail is not available on this host (`{0}` has no follow flag)",
-                family.help_command()
+                family.command_name()
             ),
         }
     }
@@ -224,7 +235,7 @@ impl Capabilities {
         if self
             .log_sources
             .iter()
-            .any(|source| source == family.help_command())
+            .any(|source| source == family.command_name())
         {
             return Support::Supported;
         }
@@ -302,9 +313,17 @@ mod tests {
     #[test]
     fn help_output_advertises_tail_when_the_follow_flag_is_named() {
         let usage = "Usage: dokku logs [OPTIONS] <app>\nOptions:\n  -n, --num <num>    number of lines to display\n  -t, --tail         continually stream logs\n";
-        assert!(parse_help_supports_tail(usage));
-        assert!(!parse_help_supports_tail("Usage: dokku logs <app>"));
-        assert!(!parse_help_supports_tail(""));
+        assert!(parse_help_supports_tail(usage, "logs"));
+        assert!(!parse_help_supports_tail("Usage: dokku logs <app>", "logs"));
+        assert!(!parse_help_supports_tail("", "logs"));
+    }
+
+    #[test]
+    fn nginx_help_scopes_tail_to_each_command_line() {
+        let usage = "Usage: dokku nginx[:COMMAND]\n\nAdditional commands:\n    nginx:access-logs <app> [-t]              Show the nginx access logs for an application (-t follows)\n    nginx:error-logs <app> [-t]               Show the nginx error logs for an application (-t follows)\n    nginx:report [<app>] [<flag>]             Displays an nginx report for one or more apps\n";
+        assert!(parse_help_supports_tail(usage, "nginx:access-logs"));
+        assert!(parse_help_supports_tail(usage, "nginx:error-logs"));
+        assert!(!parse_help_supports_tail(usage, "nginx:reload"));
     }
 
     #[test]
@@ -427,7 +446,7 @@ mod tests {
     #[test]
     fn family_try_from_matches_help_commands() {
         for family in CapabilityFamily::all() {
-            let parsed: CapabilityFamily = family.help_command().parse().expect("parse");
+            let parsed: CapabilityFamily = family.command_name().parse().expect("parse");
             assert_eq!(parsed, family);
         }
         assert_eq!(

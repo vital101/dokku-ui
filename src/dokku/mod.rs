@@ -14,8 +14,8 @@ pub mod storage_pages;
 pub mod workers;
 
 pub use app_pages::{
-    app_config, app_containers, app_formation, app_logs, app_resources, app_service_links,
-    service_info,
+    app_config, app_containers, app_domains, app_formation, app_logs, app_resources,
+    app_service_links, service_info,
 };
 pub use capabilities::{
     CapabilitiesError, CapabilitiesStore, probe_capabilities, spawn_capabilities_refresher,

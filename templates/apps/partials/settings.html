@@ -1,0 +1,160 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white">Deploy lock</h3>
+        <p class="mt-1 text-sm text-slate-400">
+          A locked app rejects deploys until it is unlocked.
+        </p>
+      </div>
+      <div class="flex items-center gap-3">
+        {% if let Some(true) = locked %}
+        <span class="inline-flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-400">
+          Locked
+        </span>
+        <form hx-post="/apps/{{ name }}/unlock" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Unlock
+          </button>
+        </form>
+        {% else %}
+        <span class="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
+          Unlocked
+        </span>
+        <form hx-post="/apps/{{ name }}/lock" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Lock
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Rename app</h3>
+    <p class="mt-1 text-sm text-slate-400">
+      Renaming retires the old containers and rebuilds under the new name. The
+      app's data, config, and domains move with it.
+    </p>
+    <form hx-post="/apps/{{ name }}/rename" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="new-name" class="mb-1 block text-sm text-slate-400">New name</label>
+        <input id="new-name" type="text" name="name" required
+               class="w-64 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Rename
+      </button>
+    </form>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white">Maintenance mode</h3>
+        {% if maintenance_available %}
+        <p class="mt-1 text-sm text-slate-400">
+          While enabled, requests receive a maintenance page instead of the app.
+        </p>
+        {% else %}
+        <p class="mt-1 text-sm text-slate-400">{{ maintenance_label }}</p>
+        {% endif %}
+      </div>
+      {% if maintenance_available %}
+      <div class="flex items-center gap-2">
+        <form hx-post="/apps/{{ name }}/maintenance/enable" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Enable
+          </button>
+        </form>
+        <form hx-post="/apps/{{ name }}/maintenance/disable" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Disable
+          </button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white">HTTP basic auth</h3>
+        {% if http_auth_available %}
+        <p class="mt-1 text-sm text-slate-400">
+          Protects the app with an HTTP basic-auth prompt. Add or remove users
+          below; disabling removes the prompt entirely.
+        </p>
+        {% else %}
+        <p class="mt-1 text-sm text-slate-400">{{ http_auth_label }}</p>
+        {% endif %}
+      </div>
+      {% if http_auth_available %}
+      <div class="flex items-center gap-2">
+        <form hx-post="/apps/{{ name }}/http-auth/enable" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Enable
+          </button>
+        </form>
+        <form hx-post="/apps/{{ name }}/http-auth/disable" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Disable
+          </button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    {% if http_auth_available %}
+    <div class="mt-4 grid gap-4 lg:grid-cols-2">
+      <form hx-post="/apps/{{ name }}/http-auth/add-user" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div>
+          <label for="auth-user" class="mb-1 block text-sm text-slate-400">Username</label>
+          <input id="auth-user" type="text" name="username" required
+                 class="w-40 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <div>
+          <label for="auth-pass" class="mb-1 block text-sm text-slate-400">Password</label>
+          <input id="auth-pass" type="password" name="password" required
+                 class="w-48 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Add user
+        </button>
+      </form>
+      <form hx-post="/apps/{{ name }}/http-auth/remove-user" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div>
+          <label for="auth-remove-user" class="mb-1 block text-sm text-slate-400">Remove user</label>
+          <input id="auth-remove-user" type="text" name="username" required
+                 class="w-40 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Remove
+        </button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+</div>

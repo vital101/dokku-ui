@@ -84,6 +84,8 @@ pub(super) struct RunRequest {
     pub(super) plan: Vec<JobSpec>,
     pub(super) completion: RunCompletion,
     pub(super) refresh_url: Option<String>,
+    /// Literal secrets redacted from persisted run lines.
+    pub(super) redactions: Vec<String>,
 }
 
 /// Attributes the run to the session's user when possible; a missing or stale
@@ -114,10 +116,11 @@ fn completion_spec(completion: &RunCompletion) -> CompletionSpec {
     }
 }
 
-fn job_payload(plan: &[JobSpec], completion: &RunCompletion) -> JobPayload {
+fn job_payload(plan: &[JobSpec], completion: &RunCompletion, redactions: &[String]) -> JobPayload {
     JobPayload {
         plan: plan.to_vec(),
         completion: completion_spec(completion),
+        redactions: redactions.to_vec(),
     }
 }
 
@@ -147,6 +150,7 @@ pub(super) async fn start_action_run(
         request.target_kind,
         &request.plan,
         &request.completion,
+        &request.redactions,
     )
     .await
     {
@@ -162,6 +166,7 @@ pub(super) async fn start_action_run(
 
 /// Persists a run + its job and spawns an executor. Returns the run id. The
 /// no-JS paths call this directly and redirect with a "queued" flash.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn enqueue_action_run(
     state: &AppState,
     session: &Session,
@@ -170,6 +175,7 @@ pub(super) async fn enqueue_action_run(
     target_kind: TargetKind,
     plan: &[JobSpec],
     completion: &RunCompletion,
+    redactions: &[String],
 ) -> Result<String, AppError> {
     let actor = current_actor(state, session).await;
     let run_id = state
@@ -184,7 +190,11 @@ pub(super) async fn enqueue_action_run(
         .await?;
     let job_id = state
         .jobs
-        .enqueue(&run_id, &job_payload(plan, completion), max_attempts(plan))
+        .enqueue(
+            &run_id,
+            &job_payload(plan, completion, redactions),
+            max_attempts(plan),
+        )
         .await?;
     spawn_job_executor(state.clone(), job_id.clone(), job_id);
     Ok(run_id)

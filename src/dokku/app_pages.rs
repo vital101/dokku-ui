@@ -1,8 +1,8 @@
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::parse::{
-    parse_config_show, parse_logs, parse_ps_inspect, parse_ps_scale, parse_resource_report,
-    parse_service_info,
+    parse_config_show, parse_domains_detail, parse_logs, parse_ps_inspect, parse_ps_scale,
+    parse_resource_report, parse_service_info,
 };
 use crate::domain::types::{
     ContainerDetails, EnvVar, LogLines, ResourceReport, ScaleEntry, ServiceInfo, ServiceLink,
@@ -13,6 +13,16 @@ use super::client::{DokkuClient, DokkuError};
 pub async fn app_config(client: &dyn DokkuClient, app: AppName) -> Result<Vec<EnvVar>, DokkuError> {
     let output = client.exec(&DokkuCommand::ConfigShow { app }).await?;
     Ok(parse_config_show(&output.stdout))
+}
+
+/// Fetches `domains:report <app> --format json` as a typed report. `None`
+/// means the output could not be parsed (the caller renders a retry card).
+pub async fn app_domains(
+    client: &dyn DokkuClient,
+    app: AppName,
+) -> Result<Option<crate::domain::types::DomainsReport>, DokkuError> {
+    let output = client.exec(&DokkuCommand::DomainsReport { app }).await?;
+    Ok(parse_domains_detail(&output.stdout))
 }
 
 pub async fn app_logs(
