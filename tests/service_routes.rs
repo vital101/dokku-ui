@@ -581,15 +581,24 @@ async fn service_action_error_is_queued_and_fails_in_the_audit_trail() {
     )
     .await;
 
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/services/redis/candid/activity")
-            .cookie(cookie)
-            .to_request(),
-    )
-    .await;
-    let body = get_body(resp).await;
+    // The executor finishes the run asynchronously after the command call;
+    // poll until the outcome lands rather than racing a single read.
+    let mut body = String::new();
+    for _ in 0..200 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/services/redis/candid/activity")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        body = get_body(resp).await;
+        if body.contains("failed") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     assert!(body.contains("service.start"), "{body}");
     assert!(

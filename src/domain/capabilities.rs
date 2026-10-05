@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::domain::command::DokkuCommand;
 
-/// A dokku release, parsed from `dokku --version` (e.g. `dokku version 0.38.4`).
+/// A dokku release, parsed from `dokku version` (e.g. `dokku version 0.38.4`).
 /// Compared as numeric segments so 0.38.26 sorts after 0.38.4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DokkuVersion {
@@ -18,7 +18,7 @@ impl fmt::Display for DokkuVersion {
     }
 }
 
-/// `dokku --version` reports the release as a `major.minor.patch` triplet
+/// `dokku version` reports the release as a `major.minor.patch` triplet
 /// somewhere in the output (`dokku version 0.38.4`). Unrecognisable output
 /// yields `None` so probing degrades instead of failing.
 pub fn parse_dokku_version(output: &str) -> Option<DokkuVersion> {
@@ -46,9 +46,10 @@ pub fn parse_dokku_version(output: &str) -> Option<DokkuVersion> {
     None
 }
 
-/// Command families whose live-tail support is probed with `<cmd> --help`
-/// (see [`DokkuCommand::Help`]). A family is supported when the help text
-/// advertises the follow flag (`--tail`/`-t`).
+/// Command families whose live-tail support is probed with `<cmd>:help`
+/// (see [`DokkuCommand::Help`]; the nginx log families share `nginx:help`).
+/// A family is supported when its command's help line advertises the follow
+/// flag (`--tail`/`-t`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityFamily {
     Logs,
@@ -231,6 +232,14 @@ impl Capabilities {
         }
     }
 
+    /// Plugin-level gate for handlers that don't hold a `DokkuCommand` (e.g.
+    /// settings sections built from a plugin name).
+    pub fn supports_plugin(&self, plugin: &str) -> Support {
+        self.supports_requirement(&Requirement::Plugin {
+            name: plugin.to_owned(),
+        })
+    }
+
     pub fn supports_family(&self, family: CapabilityFamily) -> Support {
         if self
             .log_sources
@@ -389,6 +398,24 @@ mod tests {
             }),
             Support::Unknown
         );
+    }
+
+    #[test]
+    fn plugin_support_is_queryable_by_name() {
+        let caps = capabilities();
+        assert_eq!(caps.supports_plugin("logs"), Support::Supported);
+        assert_eq!(
+            caps.supports_plugin("http-auth"),
+            Support::PluginMissing {
+                plugin: "http-auth".into()
+            }
+        );
+        let unknown = Capabilities {
+            dokku_version: None,
+            enabled_plugins: Vec::new(),
+            log_sources: Vec::new(),
+        };
+        assert_eq!(unknown.supports_plugin("logs"), Support::Unknown);
     }
 
     #[test]

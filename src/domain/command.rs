@@ -788,12 +788,7 @@ impl DokkuCommand {
             DokkuCommand::HttpAuthEnable { .. }
             | DokkuCommand::HttpAuthDisable { .. }
             | DokkuCommand::HttpAuthAddUser { .. }
-            | DokkuCommand::HttpAuthRemoveUser { .. }
-            | DokkuCommand::BuildpacksSet { .. }
-            | DokkuCommand::BuildpacksAdd { .. }
-            | DokkuCommand::BuildpacksRemove { .. }
-            | DokkuCommand::BuildpacksClear { .. }
-            | DokkuCommand::BuilderSet { .. } => Requirement::Plugin {
+            | DokkuCommand::HttpAuthRemoveUser { .. } => Requirement::Plugin {
                 name: "http-auth".to_owned(),
             },
             _ => Requirement::Core,

@@ -792,10 +792,12 @@ pub async fn processes_partial(
     render(&page)
 }
 
-/// One editable row per formation process type, with the reported values
-/// merged in (unset values stay empty).
+/// One editable row per formation process type plus any report-only entries
+/// (e.g. dokku's `_default_` type set without `--process-type`), so a value
+/// shown by `resource:report` is always visible and clearable.
 fn merge_resource_rows(rows: &[ProcessRow], resources: &[ResourceReport]) -> Vec<ResourceRow> {
-    rows.iter()
+    let mut merged: Vec<ResourceRow> = rows
+        .iter()
         .map(|row| {
             let report = resources
                 .iter()
@@ -811,7 +813,24 @@ fn merge_resource_rows(rows: &[ProcessRow], resources: &[ResourceReport]) -> Vec
                 reserve_memory: report.map(|r| r.reserve_memory.clone()).unwrap_or_default(),
             }
         })
-        .collect()
+        .collect();
+    for report in resources {
+        if merged
+            .iter()
+            .any(|row| row.process_type == report.process_type)
+        {
+            continue;
+        }
+        merged.push(ResourceRow {
+            process_type: report.process_type.clone(),
+            limit_cpu: report.limit_cpu.clone(),
+            limit_memory: report.limit_memory.clone(),
+            limit_memory_swap: report.limit_memory_swap.clone(),
+            reserve_cpu: report.reserve_cpu.clone(),
+            reserve_memory: report.reserve_memory.clone(),
+        });
+    }
+    merged
 }
 
 #[derive(Deserialize)]
@@ -863,29 +882,13 @@ pub async fn update_resources(
         set_flash(&session, FlashLevel::Error, message);
         return Ok(see_other(&format!("/apps/{name}/processes")));
     }
-    for value in [
-        &form.limit_cpu,
-        &form.limit_memory,
-        &form.limit_memory_swap,
-        &form.reserve_cpu,
-        &form.reserve_memory,
-    ] {
-        let value = value.trim();
-        if !value.is_empty() && !is_valid_resource_value(value) {
-            let message = format!("Invalid resource value: {value}");
-            if is_htmx(&req) {
-                return modal_error(message);
-            }
-            set_flash(&session, FlashLevel::Error, message);
-            return Ok(see_other(&format!("/apps/{name}/processes")));
-        }
-    }
-
     let opt = |value: &str| {
         let value = value.trim();
         (!value.is_empty()).then(|| value.to_owned())
     };
     let (plan, operation, success_message) = if form.action == "clear" {
+        // Clear ignores the field values entirely (the form carries the
+        // current report back; those values may use units this UI predates).
         (
             vec![
                 JobSpec::ResourceLimitClear {
@@ -901,6 +904,23 @@ pub async fn update_resources(
             format!("Cleared resources for '{name}' ({process_type})."),
         )
     } else {
+        for value in [
+            &form.limit_cpu,
+            &form.limit_memory,
+            &form.limit_memory_swap,
+            &form.reserve_cpu,
+            &form.reserve_memory,
+        ] {
+            let value = value.trim();
+            if !value.is_empty() && !is_valid_resource_value(value) {
+                let message = format!("Invalid resource value: {value}");
+                if is_htmx(&req) {
+                    return modal_error(message);
+                }
+                set_flash(&session, FlashLevel::Error, message);
+                return Ok(see_other(&format!("/apps/{name}/processes")));
+            }
+        }
         let limit = JobSpec::ResourceLimit {
             app: name.clone(),
             process_type: process_type.clone(),
@@ -1196,22 +1216,18 @@ pub async fn settings_partial(
     current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name, "settings", None);
-    let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
+    let (snapshot, _app) = match state.snapshot.resolve_app(&name).await {
         Ok(resolved) => resolved,
         Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
     };
     let locked = snapshot.app_info(&name).map(|info| info.locked);
     let caps = state.capabilities.current().await;
-    let support_of = |command: &DokkuCommand| match &caps {
-        Some(caps) => caps.supports_command(command),
+    let support_of = |plugin: &str| match &caps {
+        Some(caps) => caps.supports_plugin(plugin),
         None => crate::domain::capabilities::Support::Unknown,
     };
-    let maintenance = support_of(&DokkuCommand::MaintenanceEnable { app: app.clone() });
-    let http_auth = support_of(&DokkuCommand::HttpAuthAddUser {
-        app: app.clone(),
-        username: String::new(),
-        password: String::new(),
-    });
+    let maintenance = support_of("maintenance");
+    let http_auth = support_of("http-auth");
     let maintenance_available = maintenance == crate::domain::capabilities::Support::Supported;
     let http_auth_available = http_auth == crate::domain::capabilities::Support::Supported;
     let csrf_token = ensure_csrf(&session).await?;
@@ -1427,7 +1443,7 @@ async fn plugin_run(
     session: &Session,
     req: &HttpRequest,
     name: String,
-    gate: DokkuCommand,
+    plugin: &str,
     plan: Vec<JobSpec>,
     operation: &str,
     title: String,
@@ -1450,7 +1466,7 @@ async fn plugin_run(
         .capabilities
         .current()
         .await
-        .map(|caps| caps.supports_command(&gate))
+        .map(|caps| caps.supports_plugin(plugin))
         .unwrap_or(crate::domain::capabilities::Support::Unknown);
     if support != crate::domain::capabilities::Support::Supported {
         let message = format!("Unavailable on this host: {}", support.label());
@@ -1525,12 +1541,6 @@ async fn maintenance_toggle(
     name: String,
     enabled: bool,
 ) -> Result<HttpResponse, AppError> {
-    let app = gate_app();
-    let gate = if enabled {
-        DokkuCommand::MaintenanceEnable { app }
-    } else {
-        DokkuCommand::MaintenanceDisable { app }
-    };
     let plan = vec![if enabled {
         JobSpec::MaintenanceEnable { app: name.clone() }
     } else {
@@ -1546,7 +1556,7 @@ async fn maintenance_toggle(
         session,
         req,
         name.clone(),
-        gate,
+        "maintenance",
         plan,
         &format!("maintenance.{verb}"),
         title,
@@ -1555,11 +1565,6 @@ async fn maintenance_toggle(
         Vec::new(),
     )
     .await
-}
-
-/// A placeholder app used only for capability gating (the gate ignores it).
-fn gate_app() -> AppName {
-    AppName::try_from("app").unwrap_or_else(|_| unreachable!())
 }
 
 pub async fn http_auth_enable(
@@ -1589,12 +1594,6 @@ async fn http_auth_toggle(
     name: String,
     enabled: bool,
 ) -> Result<HttpResponse, AppError> {
-    let app = gate_app();
-    let gate = if enabled {
-        DokkuCommand::HttpAuthEnable { app }
-    } else {
-        DokkuCommand::HttpAuthDisable { app }
-    };
     let plan = vec![if enabled {
         JobSpec::HttpAuthEnable { app: name.clone() }
     } else {
@@ -1610,7 +1609,7 @@ async fn http_auth_toggle(
         session,
         req,
         name.clone(),
-        gate,
+        "http-auth",
         plan,
         &format!("http-auth.{verb}"),
         title,
@@ -1648,11 +1647,6 @@ pub async fn http_auth_add_user(
         set_flash(&session, FlashLevel::Error, message);
         return Ok(see_other(&format!("/apps/{name}/settings")));
     }
-    let gate = DokkuCommand::HttpAuthAddUser {
-        app: gate_app(),
-        username: username.clone(),
-        password: form.password.clone(),
-    };
     let plan = vec![JobSpec::HttpAuthAddUser {
         app: name.clone(),
         username: username.clone(),
@@ -1663,7 +1657,7 @@ pub async fn http_auth_add_user(
         &session,
         &req,
         name.clone(),
-        gate,
+        "http-auth",
         plan,
         "http-auth.add-user",
         format!("Adding basic-auth user {username} to {name}…"),
@@ -1691,10 +1685,6 @@ pub async fn http_auth_remove_user(
         set_flash(&session, FlashLevel::Error, message);
         return Ok(see_other(&format!("/apps/{name}/settings")));
     }
-    let gate = DokkuCommand::HttpAuthRemoveUser {
-        app: gate_app(),
-        username: username.clone(),
-    };
     let plan = vec![JobSpec::HttpAuthRemoveUser {
         app: name.clone(),
         username: username.clone(),
@@ -1704,7 +1694,7 @@ pub async fn http_auth_remove_user(
         &session,
         &req,
         name.clone(),
-        gate,
+        "http-auth",
         plan,
         "http-auth.remove-user",
         format!("Removing basic-auth user {username} from {name}…"),

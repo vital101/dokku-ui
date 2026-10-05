@@ -22,10 +22,14 @@
         <tr class="border-b border-slate-800/50">
           <td class="py-2 pr-4 font-mono text-white">{{ row.domain }}</td>
           <td class="py-2 pr-4">
-            {% if row.resolves %}
+            {% if let Some(resolves) = row.resolves %}
+            {% if resolves %}
             <span class="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-400">resolves</span>
             {% else %}
             <span class="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-400">does not resolve</span>
+            {% endif %}
+            {% else %}
+            <span class="text-xs text-slate-500" title="Wildcard vhosts cannot be checked with a literal lookup">—</span>
             {% endif %}
           </td>
           <td class="py-2 text-right">

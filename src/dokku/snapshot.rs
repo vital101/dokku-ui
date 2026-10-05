@@ -468,10 +468,16 @@ impl SnapshotStore {
 
     /// Resolves each host through the injected DNS resolver, returning
     /// `(host, resolves)` pairs for the domains tab's per-vhost badges.
-    pub async fn domain_dns_statuses(&self, hosts: &[String]) -> Vec<(String, bool)> {
+    /// Wildcard vhosts (`*.example.com`) resolve to `None`: a literal lookup
+    /// can never succeed, so claiming "does not resolve" would be wrong.
+    pub async fn domain_dns_statuses(&self, hosts: &[String]) -> Vec<(String, Option<bool>)> {
         let mut statuses = Vec::with_capacity(hosts.len());
         for host in hosts {
-            statuses.push((host.clone(), self.dns.resolves(host).await));
+            if host.starts_with("*.") {
+                statuses.push((host.clone(), None));
+                continue;
+            }
+            statuses.push((host.clone(), Some(self.dns.resolves(host).await)));
         }
         statuses
     }

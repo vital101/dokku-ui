@@ -29,10 +29,11 @@ struct DomainsPage<'a> {
     active_tab: &'static str,
 }
 
-/// One vhost row with its DNS pre-check result.
+/// One vhost row with its DNS pre-check result (`None` for wildcard vhosts,
+/// which cannot be resolved literally).
 struct DomainRow {
     domain: String,
-    resolves: bool,
+    resolves: Option<bool>,
 }
 
 #[derive(Template)]

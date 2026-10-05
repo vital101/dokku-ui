@@ -2963,6 +2963,50 @@ async fn hx_resource_save_streams_and_sets_limits_and_reserves() {
 }
 
 #[tokio::test]
+async fn hx_resource_save_accepts_unit_values() {
+    let client = processes_client().stub(
+        DokkuCommand::ResourceLimit {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+            cpu: None,
+            memory: Some("1g".into()),
+            memory_swap: Some("-1".into()),
+        },
+        Ok(DokkuOutput::ok("")),
+    );
+    let (state, client, _dir) = harness(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/resources",
+            format!(
+                "csrf_token={csrf}&process_type=web&limit_memory=1g&limit_memory_swap=-1&action=save"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::ResourceLimit {
+            app: app_name("alpha"),
+            process_type: "web".into(),
+            cpu: None,
+            memory: Some("1g".into()),
+            memory_swap: Some("-1".into()),
+        }),
+        "unit values reached dokku"
+    );
+}
+
+#[tokio::test]
 async fn hx_resource_clear_streams_and_clears_both() {
     let client = processes_client()
         .stub(
@@ -2984,11 +3028,13 @@ async fn hx_resource_clear_streams_and_clears_both() {
     let cookie = complete_setup(&app).await;
     let csrf = shell_csrf(&app, &cookie).await;
 
+    // The pre-filled form carries whatever `resource:report` said — units and
+    // all — and Clear must not reject them.
     let resp = test::call_service(
         &app,
         hx_form_request(
             "/apps/alpha/resources",
-            format!("csrf_token={csrf}&process_type=web&action=clear"),
+            format!("csrf_token={csrf}&process_type=web&limit_memory=1g&limit_cpu=-1&action=clear"),
         )
         .cookie(cookie.clone())
         .to_request(),
@@ -3016,6 +3062,39 @@ async fn hx_resource_clear_streams_and_clears_both() {
 }
 
 #[tokio::test]
+async fn resource_rows_include_report_only_process_types() {
+    let client = processes_client().stub(
+        DokkuCommand::ResourceReport {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok(
+            "=====> alpha resource information\n       _default_ limit memory:  256\n",
+        )),
+    );
+    let (state, _client, _dir) = harness(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/processes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("_default_"),
+        "report-only type rendered: {body}"
+    );
+    assert!(
+        body.contains(r#"value="256""#),
+        "its value is editable and clearable: {body}"
+    );
+}
+
+#[tokio::test]
 async fn resource_forms_reject_empty_and_invalid_values_without_dokku() {
     let (state, client, _dir) = harness(processes_client()).await;
     let app = test::init_service(build_app(state)).await;
@@ -3025,7 +3104,7 @@ async fn resource_forms_reject_empty_and_invalid_values_without_dokku() {
     for (body, expected) in [
         ("process_type=web&action=save", "Enter at least one value"),
         (
-            "process_type=web&limit_memory=128m&action=save",
+            "process_type=web&limit_memory=12x&action=save",
             "Invalid resource value",
         ),
         (

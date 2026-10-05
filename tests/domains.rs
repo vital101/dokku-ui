@@ -23,7 +23,7 @@ fn app_name(name: &str) -> AppName {
     AppName::try_from(name).expect("valid app name")
 }
 
-const DOMAINS_REPORT: &str = r#"{"app-enabled":"true","app-vhosts":"alpha.example.com beta.example.com","global-enabled":"true","global-vhosts":"example.com"}"#;
+const DOMAINS_REPORT: &str = r#"{"app-enabled":"true","app-vhosts":"alpha.example.com beta.example.com *.wild.example.com","global-enabled":"true","global-vhosts":"example.com"}"#;
 
 fn seeded_app_client() -> MockClient {
     MockClient::new()
@@ -182,12 +182,20 @@ async fn domains_partial_renders_vhosts_with_dns_badges() {
     assert!(body.contains("beta.example.com"), "{body}");
     assert!(body.contains("resolves"), "{body}");
     assert!(
+        body.contains("*.wild.example.com"),
+        "wildcard vhost shown: {body}"
+    );
+    assert!(
+        !body.contains("does not resolve"),
+        "wildcards are not falsely reported as failing: {body}"
+    );
+    assert!(
         body.contains(r#"hx-post="/apps/alpha/domains/remove""#),
         "{body}"
     );
     assert!(body.contains("example.com"), "global vhosts shown: {body}");
     assert!(
-        body.contains(r#"value="alpha.example.com beta.example.com""#),
+        body.contains(r#"value="alpha.example.com beta.example.com *.wild.example.com""#),
         "set form prefilled: {body}"
     );
 }
