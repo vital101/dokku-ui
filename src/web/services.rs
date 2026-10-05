@@ -8,15 +8,18 @@ use serde::Deserialize;
 use crate::dokku::{DokkuError, plugin_services, service_linked_apps, service_logs, service_stats};
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
+use crate::domain::job::{JobSpec, ServiceAction as JobServiceAction};
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_service_list};
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::ServiceInfo;
 use crate::error::AppError;
+use crate::storage::runs::TargetKind;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
-    RunCompletion, RunRefresh, current_user, error_fragment, is_htmx, modal_error, start_action_run,
+    RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, error_fragment,
+    is_htmx, modal_error, run_synchronously, start_action_run,
 };
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
@@ -198,15 +201,15 @@ async fn ensure_service_exists(
 
 /// Everything the service detail shells need: validated plugin/service, the
 /// session user, and a CSRF token.
-struct DetailContext {
-    plugin: ServicePlugin,
-    service: ServiceName,
-    email: String,
-    csrf_token: String,
-    flash: Option<FlashMessage>,
+pub(super) struct DetailContext {
+    pub(super) plugin: ServicePlugin,
+    pub(super) service: ServiceName,
+    pub(super) email: String,
+    pub(super) csrf_token: String,
+    pub(super) flash: Option<FlashMessage>,
 }
 
-async fn detail_context(
+pub(super) async fn detail_context(
     state: &AppState,
     session: &Session,
     raw_plugin: &str,
@@ -309,23 +312,37 @@ pub async fn create(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &format!("{plugin}/{service}"),
-            format!("Creating {service}…"),
-            DokkuCommand::ServiceCreate { plugin, service },
-            RunCompletion {
-                success_message: format!("Service '{name}' created."),
-                redirect: Some(redirect_to),
-                refresh: RunRefresh::None,
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.create".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Creating {service}…"),
+                plan: vec![JobSpec::ServiceCreate {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Service '{name}' created."),
+                    redirect: Some(redirect_to),
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: None,
             },
-            None,
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::ServiceCreate { plugin, service })
-        .await
+    match run_synchronously(
+        &state,
+        &session,
+        &name,
+        "service.create",
+        TargetKind::Service,
+        DokkuCommand::ServiceCreate { plugin, service },
+        &format!("Service '{name}' created."),
+    )
+    .await
     {
         Ok(_) => {
             set_flash(
@@ -613,20 +630,17 @@ impl ServiceAction {
         }
     }
 
-    fn command(self, plugin: ServicePlugin, service: &ServiceName) -> DokkuCommand {
-        match self {
-            ServiceAction::Start => DokkuCommand::ServiceStart {
-                plugin,
-                service: service.clone(),
-            },
-            ServiceAction::Stop => DokkuCommand::ServiceStop {
-                plugin,
-                service: service.clone(),
-            },
-            ServiceAction::Restart => DokkuCommand::ServiceRestart {
-                plugin,
-                service: service.clone(),
-            },
+    /// The serializable job form of this action (used by the queued run path).
+    fn job(self, plugin: &ServicePlugin, service: &ServiceName) -> JobSpec {
+        let action = match self {
+            ServiceAction::Start => JobServiceAction::Start,
+            ServiceAction::Stop => JobServiceAction::Stop,
+            ServiceAction::Restart => JobServiceAction::Restart,
+        };
+        JobSpec::ServiceAction {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+            action,
         }
     }
 }
@@ -703,31 +717,43 @@ async fn process_action(
     if is_htmx(req) {
         return start_action_run(
             state,
-            &format!("{plugin}/{service}"),
-            format!("{} {service}…", action.present_participle()),
-            action.command(plugin, &service),
-            RunCompletion {
-                success_message: format!("Service '{service}' {}.", action.past_tense()),
-                redirect: None,
-                refresh: RunRefresh::None,
+            session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: format!("service.{}", action.verb()),
+                target_kind: TargetKind::Service,
+                title: format!("{} {service}…", action.present_participle()),
+                plan: vec![action.job(&plugin, &service)],
+                completion: RunCompletion {
+                    success_message: format!("Service '{service}' {}.", action.past_tense()),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(format!("/services/{plugin}/{service}/partials/overview")),
             },
-            Some(format!("/services/{plugin}/{service}/partials/overview")),
         )
         .await;
     }
 
-    match state.dokku.exec(&action.command(plugin, &service)).await {
-        Ok(_) => set_flash(
-            session,
-            FlashLevel::Success,
-            format!("Service '{service}' {}.", action.past_tense()),
-        ),
-        Err(err) => set_flash(
-            session,
-            FlashLevel::Error,
-            format!("Failed to {} service: {err}", action.verb()),
-        ),
-    }
+    let _ = enqueue_action_run(
+        state,
+        session,
+        service.as_str(),
+        &format!("service.{}", action.verb()),
+        TargetKind::Service,
+        &[action.job(&plugin, &service)],
+        &RunCompletion {
+            success_message: format!("Service '{service}' {}.", action.past_tense()),
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        session,
+        FlashLevel::Success,
+        format!("Queued: {} {service}.", action.verb()),
+    );
     Ok(see_other(&redirect_to))
 }
 
@@ -760,43 +786,49 @@ pub async fn destroy(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &format!("{plugin}/{service}"),
-            format!("Destroying {service}…"),
-            DokkuCommand::ServiceDestroy {
-                plugin,
-                service: service.clone(),
-                force: true,
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.destroy".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Destroying {service}…"),
+                plan: vec![JobSpec::ServiceDestroy {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Service '{service}' destroyed."),
+                    redirect: Some(list_url.clone()),
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: None,
             },
-            RunCompletion {
-                success_message: format!("Service '{service}' destroyed."),
-                redirect: Some(list_url),
-                refresh: RunRefresh::None,
-            },
-            None,
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::ServiceDestroy {
-            plugin,
-            service: service.clone(),
-            force: true,
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!("Service '{service}' destroyed."),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to destroy service: {err}"),
-        ),
-    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.destroy",
+        TargetKind::Service,
+        &[JobSpec::ServiceDestroy {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+        }],
+        &RunCompletion {
+            success_message: format!("Service '{service}' destroyed."),
+            redirect: Some(list_url.clone()),
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: destroy {service}."),
+    );
     Ok(see_other(&list_url))
 }
 
@@ -833,43 +865,51 @@ pub async fn expose(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &format!("{plugin}/{service}"),
-            format!("Exposing {service}…"),
-            DokkuCommand::ServiceExpose {
-                plugin,
-                service: service.clone(),
-                ports: ports.clone(),
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.expose".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Exposing {service}…"),
+                plan: vec![JobSpec::ServiceExpose {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                    ports: ports.clone(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Service '{service}' exposed on {ports}."),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(format!("/services/{plugin}/{service}/partials/overview")),
             },
-            RunCompletion {
-                success_message: format!("Service '{service}' exposed on {ports}."),
-                redirect: None,
-                refresh: RunRefresh::None,
-            },
-            Some(format!("/services/{plugin}/{service}/partials/overview")),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::ServiceExpose {
-            plugin,
-            service: service.clone(),
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.expose",
+        TargetKind::Service,
+        &[JobSpec::ServiceExpose {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
             ports,
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!("Service '{service}' exposed."),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to expose service: {err}"),
-        ),
-    }
+        }],
+        &RunCompletion {
+            success_message: format!("Service '{service}' exposed."),
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: expose {service}."),
+    );
     Ok(see_other(&detail_url(plugin, &service)))
 }
 
@@ -888,41 +928,49 @@ pub async fn unexpose(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &format!("{plugin}/{service}"),
-            format!("Unexposing {service}…"),
-            DokkuCommand::ServiceUnexpose {
-                plugin,
-                service: service.clone(),
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.unexpose".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Unexposing {service}…"),
+                plan: vec![JobSpec::ServiceUnexpose {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Service '{service}' unexposed."),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(format!("/services/{plugin}/{service}/partials/overview")),
             },
-            RunCompletion {
-                success_message: format!("Service '{service}' unexposed."),
-                redirect: None,
-                refresh: RunRefresh::None,
-            },
-            Some(format!("/services/{plugin}/{service}/partials/overview")),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::ServiceUnexpose {
-            plugin,
-            service: service.clone(),
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!("Service '{service}' unexposed."),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to unexpose service: {err}"),
-        ),
-    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.unexpose",
+        TargetKind::Service,
+        &[JobSpec::ServiceUnexpose {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+        }],
+        &RunCompletion {
+            success_message: format!("Service '{service}' unexposed."),
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: unexpose {service}."),
+    );
     Ok(see_other(&redirect_to))
 }
 
@@ -958,43 +1006,51 @@ pub async fn link(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &format!("{plugin}/{service}"),
-            format!("Linking {service} to {app}…"),
-            DokkuCommand::ServiceLink {
-                plugin,
-                service: service.clone(),
-                app: app.clone(),
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.link".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Linking {service} to {app}…"),
+                plan: vec![JobSpec::ServiceLink {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                    app: app.as_str().to_owned(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Linked '{service}' to '{app}'."),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(format!("/services/{plugin}/{service}/partials/links")),
             },
-            RunCompletion {
-                success_message: format!("Linked '{service}' to '{app}'."),
-                redirect: None,
-                refresh: RunRefresh::None,
-            },
-            Some(format!("/services/{plugin}/{service}/partials/links")),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::ServiceLink {
-            plugin,
-            service: service.clone(),
-            app: app.clone(),
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!("Linked '{service}' to '{app}'."),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to link service: {err}"),
-        ),
-    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.link",
+        TargetKind::Service,
+        &[JobSpec::ServiceLink {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+            app: app.as_str().to_owned(),
+        }],
+        &RunCompletion {
+            success_message: format!("Linked '{service}' to '{app}'."),
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: link {service} to {app}."),
+    );
     Ok(see_other(&links_url))
 }
 
@@ -1025,42 +1081,50 @@ pub async fn unlink(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &format!("{plugin}/{service}"),
-            format!("Unlinking {service} from {app}…"),
-            DokkuCommand::ServiceUnlink {
-                plugin,
-                service: service.clone(),
-                app: app.clone(),
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.unlink".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Unlinking {service} from {app}…"),
+                plan: vec![JobSpec::ServiceUnlink {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                    app: app.as_str().to_owned(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Unlinked '{service}' from '{app}'."),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(format!("/services/{plugin}/{service}/partials/links")),
             },
-            RunCompletion {
-                success_message: format!("Unlinked '{service}' from '{app}'."),
-                redirect: None,
-                refresh: RunRefresh::None,
-            },
-            Some(format!("/services/{plugin}/{service}/partials/links")),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::ServiceUnlink {
-            plugin,
-            service: service.clone(),
-            app: app.clone(),
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!("Unlinked '{service}' from '{app}'."),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to unlink service: {err}"),
-        ),
-    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.unlink",
+        TargetKind::Service,
+        &[JobSpec::ServiceUnlink {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+            app: app.as_str().to_owned(),
+        }],
+        &RunCompletion {
+            success_message: format!("Unlinked '{service}' from '{app}'."),
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: unlink {service} from {app}."),
+    );
     Ok(see_other(&links_url))
 }

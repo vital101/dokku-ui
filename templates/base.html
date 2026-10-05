@@ -22,6 +22,9 @@
         <li>
           <a href="/apps/new" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">Apps</a>
         </li>
+        <li>
+          <a href="/activity" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">Activity</a>
+        </li>
       </ul>
       <p class="mt-6 mb-2 px-3 text-xs font-medium uppercase tracking-wide text-slate-500">Services</p>
       <ul class="space-y-1 text-sm">
@@ -63,6 +66,12 @@
         {% block content %}{% endblock %}
       </main>
     </div>
+  </div>
+  <div id="toast-tray"
+       class="fixed right-4 bottom-4 z-50 w-80 space-y-2"
+       hx-get="/actions/toasts"
+       hx-trigger="load, every 5s"
+       hx-swap="innerHTML">
   </div>
 </body>
 </html>

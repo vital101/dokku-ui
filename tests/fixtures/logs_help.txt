@@ -1,0 +1,5 @@
+Usage: dokku logs [OPTIONS] <app>
+Options:
+  -n, --num <num>    number of lines to display
+  -t, --tail         continually stream logs
+  -q, --quiet        display nothing

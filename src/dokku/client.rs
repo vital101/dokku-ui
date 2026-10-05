@@ -35,6 +35,19 @@ pub enum DokkuError {
     Timeout { secs: u64 },
     #[error("dokku command failed (exit {code}): {stderr}")]
     Exit { code: i32, stderr: String },
+    /// The streaming viewer went away (browser closed a live-log stream); the
+    /// command's channel is aborted but the shared session is unharmed.
+    #[error("stream closed by the viewer")]
+    StreamClosed,
+}
+
+impl DokkuError {
+    /// Infrastructure failures worth retrying: the command never ran (or its
+    /// connection died). `Exit` means dokku ran it and rejected it — retrying
+    /// would repeat side effects, so it is never auto-retried.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, DokkuError::Connect(_)) || matches!(self, DokkuError::Timeout { .. })
+    }
 }
 
 #[async_trait]

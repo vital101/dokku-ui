@@ -25,6 +25,10 @@
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "logs" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Logs
   </a>
+  <a href="/apps/{{ name }}/activity"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "activity" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Activity
+  </a>
 </nav>
 {% block app_content %}{% endblock %}
 

@@ -1,3 +1,4 @@
+mod activity;
 mod apps;
 mod auth_handlers;
 mod auth_middleware;
@@ -5,12 +6,15 @@ mod csrf_form;
 mod favicon;
 mod flash;
 mod fragments;
+mod logs;
 mod pages;
+mod reauth;
 mod render;
 mod runs;
 mod security_headers;
 mod services;
 mod state;
+mod toasts;
 mod volumes;
 
 use actix_session::SessionMiddleware;
@@ -98,8 +102,16 @@ pub fn build_app(
                 .route(web::post().to(auth_handlers::login_submit)),
         )
         .route("/logout", web::post().to(auth_handlers::logout))
+        .service(
+            web::resource("/reauth")
+                .route(web::get().to(reauth::reauth_form))
+                .route(web::post().to(reauth::reauth_submit)),
+        )
         .route("/", web::get().to(pages::dashboard))
         .route("/refresh", web::post().to(pages::refresh_now))
+        .route("/activity", web::get().to(activity::index))
+        .route("/actions/toasts", web::get().to(toasts::tray))
+        .route("/actions/runs/{id}/ack", web::post().to(toasts::ack))
         .route("/apps/new", web::get().to(apps::new_form))
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
@@ -107,6 +119,12 @@ pub fn build_app(
         .route("/apps/{name}/scale", web::post().to(apps::scale))
         .route("/apps/{name}/services", web::get().to(apps::services))
         .route("/apps/{name}/config", web::get().to(apps::config))
+        .route("/apps/{name}/config/edit", web::get().to(apps::config_edit))
+        .route(
+            "/apps/{name}/config/reveal",
+            web::post().to(apps::config_reveal),
+        )
+        .route("/apps/{name}/config", web::post().to(apps::config_update))
         .route("/apps/{name}/logs", web::get().to(apps::logs))
         .route(
             "/apps/{name}/partials/overview",
@@ -135,6 +153,11 @@ pub fn build_app(
         .route(
             "/actions/runs/{id}/events",
             web::get().to(runs::action_events),
+        )
+        .route("/apps/{name}/logs/stream", web::get().to(logs::log_stream))
+        .route(
+            "/apps/{name}/activity",
+            web::get().to(activity::app_activity),
         )
         .service(
             web::resource("/apps/{name}/delete")
@@ -166,6 +189,10 @@ pub fn build_app(
         .route(
             "/services/{plugin}/{service}/logs",
             web::get().to(services::logs_page),
+        )
+        .route(
+            "/services/{plugin}/{service}/activity",
+            web::get().to(activity::service_activity),
         )
         .route(
             "/services/{plugin}/{service}/delete",

@@ -15,6 +15,9 @@ pub struct Settings {
     pub session_ttl_secs: u64,
     pub cookie_secure: bool,
     pub snapshot_refresh_secs: u64,
+    pub activity_ttl_secs: u64,
+    pub run_log_ttl_secs: u64,
+    pub reauth_ttl_secs: u64,
 }
 
 impl Settings {
@@ -84,6 +87,24 @@ impl Settings {
         if snapshot_refresh_secs == 0 {
             return Err(SettingsError::InvalidSnapshotRefresh("0".to_owned()));
         }
+        let activity_ttl_secs = match vars.get("ACTIVITY_TTL_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidActivityTtl(raw.clone()))?,
+            None => 7_776_000,
+        };
+        let reauth_ttl_secs = match vars.get("REAUTH_TTL_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidReauthTtl(raw.clone()))?,
+            None => 300,
+        };
+        let run_log_ttl_secs = match vars.get("RUN_LOG_TTL_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidRunLogTtl(raw.clone()))?,
+            None => 604_800,
+        };
         Ok(Self {
             port,
             database_url,
@@ -97,6 +118,9 @@ impl Settings {
             session_ttl_secs,
             cookie_secure,
             snapshot_refresh_secs,
+            activity_ttl_secs,
+            run_log_ttl_secs,
+            reauth_ttl_secs,
         })
     }
 }
@@ -115,6 +139,12 @@ pub enum SettingsError {
     InvalidCookieSecure(String),
     #[error("SNAPSHOT_REFRESH_SECS must be a positive integer of seconds, got `{0}`")]
     InvalidSnapshotRefresh(String),
+    #[error("ACTIVITY_TTL_SECS must be a valid u64, got `{0}`")]
+    InvalidActivityTtl(String),
+    #[error("RUN_LOG_TTL_SECS must be a valid u64, got `{0}`")]
+    InvalidRunLogTtl(String),
+    #[error("REAUTH_TTL_SECS must be a valid u64, got `{0}`")]
+    InvalidReauthTtl(String),
 }
 
 #[cfg(test)]
@@ -154,6 +184,9 @@ mod tests {
         assert_eq!(settings.session_ttl_secs, 604_800);
         assert!(!settings.cookie_secure);
         assert_eq!(settings.snapshot_refresh_secs, 1800);
+        assert_eq!(settings.activity_ttl_secs, 7_776_000);
+        assert_eq!(settings.run_log_ttl_secs, 604_800);
+        assert_eq!(settings.reauth_ttl_secs, 300);
     }
 
     #[test]
@@ -180,6 +213,9 @@ mod tests {
             ("SESSION_TTL_SECS", "86400"),
             ("COOKIE_SECURE", "true"),
             ("SNAPSHOT_REFRESH_SECS", "45"),
+            ("ACTIVITY_TTL_SECS", "86400"),
+            ("RUN_LOG_TTL_SECS", "3600"),
+            ("REAUTH_TTL_SECS", "60"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -201,6 +237,9 @@ mod tests {
         assert_eq!(settings.session_ttl_secs, 86_400);
         assert!(settings.cookie_secure);
         assert_eq!(settings.snapshot_refresh_secs, 45);
+        assert_eq!(settings.activity_ttl_secs, 86_400);
+        assert_eq!(settings.run_log_ttl_secs, 3_600);
+        assert_eq!(settings.reauth_ttl_secs, 60);
     }
 
     #[test]
@@ -254,5 +293,15 @@ mod tests {
         let err =
             Settings::from_map(&map(&[("SNAPSHOT_REFRESH_SECS", "0")])).expect_err("zero refresh");
         assert!(matches!(err, SettingsError::InvalidSnapshotRefresh(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_ttl_settings() {
+        let err = Settings::from_map(&map(&[("ACTIVITY_TTL_SECS", "soon")]))
+            .expect_err("invalid activity ttl");
+        assert!(matches!(err, SettingsError::InvalidActivityTtl(_)));
+        let err =
+            Settings::from_map(&map(&[("RUN_LOG_TTL_SECS", "soon")])).expect_err("invalid log ttl");
+        assert!(matches!(err, SettingsError::InvalidRunLogTtl(_)));
     }
 }

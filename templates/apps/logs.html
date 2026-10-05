@@ -3,7 +3,12 @@
 {% block app_content %}
 <div class="space-y-6">
   <div class="flex items-center justify-between">
-    <h3 class="text-sm font-medium text-white">Logs</h3>
+    <div class="flex items-center gap-2">
+      <h3 class="text-sm font-medium text-white">Logs</h3>
+      <span class="inline-flex items-center gap-2 rounded-full bg-slate-800 px-3 py-1 text-xs font-medium text-slate-400">
+        {{ live_tail_label }}
+      </span>
+    </div>
     <form hx-get="/apps/{{ name }}/partials/logs" hx-target="#app-panel" hx-swap="innerHTML"
           class="flex items-center gap-2">
       <label for="lines" class="text-sm text-slate-400">Lines</label>
@@ -16,6 +21,29 @@
       </button>
     </form>
   </div>
+
+  <div id="live-log-panel" class="hidden rounded-lg border border-slate-800 bg-slate-900/50 p-4"
+       data-app="{{ name }}">
+    <div class="mb-3 flex items-center justify-between">
+      <div class="flex items-center gap-1">
+        <button type="button" data-source="logs"
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">App</button>
+        <button type="button" data-source="nginx:access-logs"
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">nginx access</button>
+        <button type="button" data-source="nginx:error-logs"
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">nginx error</button>
+      </div>
+      <div class="flex items-center gap-2">
+        <button type="button" data-log-toggle
+                class="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500">Pause</button>
+        <button type="button" data-log-clear
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">Clear</button>
+      </div>
+    </div>
+    <pre data-live-log
+         class="h-96 overflow-auto whitespace-pre-wrap break-all bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-300"></pre>
+  </div>
+
   <div id="app-panel"
        hx-get="/apps/{{ name }}/partials/logs?lines={{ line_count }}"
        hx-trigger="load"
@@ -23,4 +51,5 @@
     {% include "partials/loading.html" %}
   </div>
 </div>
+<script src="/static/js/logs.js" defer></script>
 {% endblock %}

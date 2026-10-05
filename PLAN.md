@@ -268,6 +268,9 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS th
 | `COMMAND_TIMEOUT_SECS` | 30 | — | SSH exec timeout for read commands; mutating actions are unbounded |
 | `SNAPSHOT_REFRESH_SECS` | 1800 | — | background snapshot refresh interval (positive; 30 min) |
 | `COOKIE_SECURE` | false | true | Secure flag |
+| `ACTIVITY_TTL_SECS` | 7776000 (90d) | — | audit run retention |
+| `RUN_LOG_TTL_SECS` | 604800 (7d) | — | run-line retention (metadata outlives it) |
+| `REAUTH_TTL_SECS` | 300 | — | reveal/edit re-auth window |
 | `RUST_LOG` | `dokku_ui=debug,tower? n/a` | `info` | tracing filter |
 
 `Settings::from_env()` is a pure function of a `VarMap` (testable without process env); `main` feeds it `std::env`.
@@ -381,7 +384,7 @@ Coverage protection rails: `main.rs` stays trivial; anything nontrivial lives be
 
 ## 16. Post-v1 backlog (context, not scope)
 
-Config set/unset UI (re-auth to unmask), live log tailing (websockets/SSE), deployments & build logs, one-off `run` commands, user management/roles UI, audit log, login rate limiting, Let's Encrypt/certs UI, ssh-keys management, plugin screens, backup/export, i18n, themes.
+Deployments & build logs, one-off `run` commands, user management/roles UI, login rate limiting, Let's Encrypt/certs UI, ssh-keys management, plugin screens, backup/export, i18n, themes. (Config set/unset with re-auth reveal, live log tailing over SSE, durable audit + job queue + toasts, capability detection, and RBAC/re-auth seams landed in the P0 milestone — see `GAPS.md` §P0 status.)
 
 ### Deferred from App Detail v1
 

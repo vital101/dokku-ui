@@ -1,4 +1,5 @@
 pub mod app_pages;
+pub mod capabilities;
 pub mod client;
 pub mod dashboard;
 pub mod dns;
@@ -10,10 +11,14 @@ pub mod service_pages;
 pub mod snapshot;
 pub mod stats_pages;
 pub mod storage_pages;
+pub mod workers;
 
 pub use app_pages::{
     app_config, app_containers, app_formation, app_logs, app_resources, app_service_links,
     service_info,
+};
+pub use capabilities::{
+    CapabilitiesError, CapabilitiesStore, probe_capabilities, spawn_capabilities_refresher,
 };
 pub use client::{DokkuClient, DokkuError, DokkuOutput};
 pub use dashboard::{AppRow, DashboardData, dashboard_from_snapshot};
@@ -31,3 +36,7 @@ pub use snapshot::{
 };
 pub use stats_pages::{service_stats, storage_entries, volume_usage};
 pub use storage_pages::app_mounts;
+pub use workers::{
+    DEFAULT_MAX_ATTEMPTS, JOB_HEARTBEAT, JOB_LEASE_SECS, RETRY_BACKOFF_BASE_SECS,
+    RETRY_BACKOFF_MAX_SECS, WORKER_POLL, spawn_job_executor, spawn_worker,
+};

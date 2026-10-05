@@ -1,8 +1,9 @@
 use crate::domain::AppName;
+use crate::domain::capabilities::{CapabilityFamily, Requirement};
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
-use crate::domain::types::ScaleEntry;
+use crate::domain::types::{EnvVar, ScaleEntry};
 
 /// Fixed, read-only stats script executed inside a service container via
 /// `<plugin>:enter <service> sh -c <script>`. Emits `key=value` lines only;
@@ -163,9 +164,30 @@ pub enum DokkuCommand {
     ConfigShow {
         app: AppName,
     },
+    ConfigSet {
+        app: AppName,
+        vars: Vec<EnvVar>,
+    },
+    ConfigUnset {
+        app: AppName,
+        keys: Vec<String>,
+    },
     Logs {
         app: AppName,
         num_lines: u32,
+        follow: bool,
+    },
+    NginxAccessLogs {
+        app: AppName,
+        follow: bool,
+    },
+    NginxErrorLogs {
+        app: AppName,
+        follow: bool,
+    },
+    DokkuVersion,
+    Help {
+        family: CapabilityFamily,
     },
 }
 
@@ -341,12 +363,45 @@ impl DokkuCommand {
             DokkuCommand::ConfigShow { app } => {
                 vec!["config:show".into(), app.as_str().into()]
             }
-            DokkuCommand::Logs { app, num_lines } => vec![
-                "logs".into(),
-                app.as_str().into(),
-                "--num".into(),
-                num_lines.to_string(),
-            ],
+            DokkuCommand::ConfigSet { app, vars } => {
+                let mut argv = vec!["config:set".into(), app.as_str().into()];
+                argv.extend(vars.iter().map(|var| format!("{}={}", var.key, var.value)));
+                argv
+            }
+            DokkuCommand::ConfigUnset { app, keys } => {
+                let mut argv = vec!["config:unset".into(), app.as_str().into()];
+                argv.extend(keys.iter().cloned());
+                argv
+            }
+            DokkuCommand::Logs {
+                app,
+                num_lines,
+                follow,
+            } => {
+                let mut argv = vec!["logs".into(), app.as_str().into()];
+                if *follow {
+                    argv.push("--tail".into());
+                }
+                argv.push("--num".into());
+                argv.push(num_lines.to_string());
+                argv
+            }
+            DokkuCommand::NginxAccessLogs { app, follow } => {
+                let mut argv = vec!["nginx:access-logs".into(), app.as_str().into()];
+                if *follow {
+                    argv.push("-t".into());
+                }
+                argv
+            }
+            DokkuCommand::NginxErrorLogs { app, follow } => {
+                let mut argv = vec!["nginx:error-logs".into(), app.as_str().into()];
+                if *follow {
+                    argv.push("-t".into());
+                }
+                argv
+            }
+            DokkuCommand::DokkuVersion => vec!["--version".into()],
+            DokkuCommand::Help { family } => vec![family.help_command().into(), "--help".into()],
         }
     }
 
@@ -375,8 +430,40 @@ impl DokkuCommand {
             | DokkuCommand::ServiceExpose { .. }
             | DokkuCommand::ServiceUnexpose { .. }
             | DokkuCommand::StorageMount { .. }
-            | DokkuCommand::StorageUnmount { .. } => CommandTimeout::Indefinite,
+            | DokkuCommand::StorageUnmount { .. }
+            | DokkuCommand::Logs { follow: true, .. }
+            | DokkuCommand::NginxAccessLogs { follow: true, .. }
+            | DokkuCommand::NginxErrorLogs { follow: true, .. } => CommandTimeout::Indefinite,
             _ => CommandTimeout::Default,
+        }
+    }
+
+    /// Capability gate for this command, consulted by the capability framework
+    /// so handlers render explanatory states instead of failing at command
+    /// time. Exhaustive: adding a variant forces a requirement here.
+    pub fn requirement(&self) -> Requirement {
+        match self {
+            DokkuCommand::ServiceInfo { plugin, .. } | DokkuCommand::AppLinks { plugin, .. } => {
+                Requirement::Plugin {
+                    name: plugin.clone(),
+                }
+            }
+            DokkuCommand::ServiceList { plugin }
+            | DokkuCommand::ServiceCreate { plugin, .. }
+            | DokkuCommand::ServiceDestroy { plugin, .. }
+            | DokkuCommand::ServiceStart { plugin, .. }
+            | DokkuCommand::ServiceStop { plugin, .. }
+            | DokkuCommand::ServiceRestart { plugin, .. }
+            | DokkuCommand::ServiceLinks { plugin, .. }
+            | DokkuCommand::ServiceLink { plugin, .. }
+            | DokkuCommand::ServiceUnlink { plugin, .. }
+            | DokkuCommand::ServiceLogs { plugin, .. }
+            | DokkuCommand::ServiceExpose { plugin, .. }
+            | DokkuCommand::ServiceUnexpose { plugin, .. }
+            | DokkuCommand::ServiceStats { plugin, .. } => Requirement::Plugin {
+                name: plugin.as_str().to_owned(),
+            },
+            _ => Requirement::Core,
         }
     }
 }
@@ -656,6 +743,7 @@ mod tests {
             DokkuCommand::Logs {
                 app: app("myapp"),
                 num_lines: 200,
+                follow: false,
             },
             DokkuCommand::BuildsReport { app: app("myapp") },
             DokkuCommand::DomainsReport { app: app("myapp") },
@@ -712,7 +800,8 @@ mod tests {
         assert_eq!(
             DokkuCommand::Logs {
                 app: app("myapp"),
-                num_lines: 200
+                num_lines: 200,
+                follow: false,
             }
             .argv(),
             vec!["logs", "myapp", "--num", "200"]
@@ -993,5 +1082,104 @@ mod tests {
         assert_eq!(argv[4], "-c");
         assert!(argv[5].contains("du -sk /data"));
         assert!(argv[5].contains("df -Pk /data"));
+    }
+
+    #[test]
+    fn dokku_version_argv() {
+        assert_eq!(DokkuCommand::DokkuVersion.argv(), vec!["--version"]);
+    }
+
+    #[test]
+    fn help_argv_runs_the_family_command_with_help() {
+        assert_eq!(
+            DokkuCommand::Help {
+                family: crate::domain::capabilities::CapabilityFamily::Logs,
+            }
+            .argv(),
+            vec!["logs", "--help"]
+        );
+        assert_eq!(
+            DokkuCommand::Help {
+                family: crate::domain::capabilities::CapabilityFamily::NginxAccessLogs,
+            }
+            .argv(),
+            vec!["nginx:access-logs", "--help"]
+        );
+    }
+
+    #[test]
+    fn probe_commands_use_the_default_timeout() {
+        for command in [
+            DokkuCommand::DokkuVersion,
+            DokkuCommand::Help {
+                family: crate::domain::capabilities::CapabilityFamily::Logs,
+            },
+        ] {
+            assert_eq!(command.timeout(), CommandTimeout::Default, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn service_commands_require_their_plugin() {
+        assert_eq!(
+            DokkuCommand::ServiceList {
+                plugin: plugin("redis")
+            }
+            .requirement(),
+            Requirement::Plugin {
+                name: "redis".into()
+            }
+        );
+        assert_eq!(
+            DokkuCommand::ServiceInfo {
+                plugin: "postgres".into(),
+                service: "db".into(),
+            }
+            .requirement(),
+            Requirement::Plugin {
+                name: "postgres".into()
+            }
+        );
+        assert_eq!(
+            DokkuCommand::AppLinks {
+                plugin: "mongo".into(),
+                app: app("myapp"),
+            }
+            .requirement(),
+            Requirement::Plugin {
+                name: "mongo".into()
+            }
+        );
+        assert_eq!(
+            DokkuCommand::ServiceStats {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            }
+            .requirement(),
+            Requirement::Plugin {
+                name: "redis".into()
+            }
+        );
+    }
+
+    #[test]
+    fn core_commands_are_core_requirements() {
+        for command in [
+            DokkuCommand::AppsList,
+            DokkuCommand::AppsCreate { app: app("myapp") },
+            DokkuCommand::ConfigShow { app: app("myapp") },
+            DokkuCommand::Logs {
+                app: app("myapp"),
+                num_lines: 200,
+                follow: false,
+            },
+            DokkuCommand::StorageReport,
+            DokkuCommand::DokkuVersion,
+            DokkuCommand::Help {
+                family: crate::domain::capabilities::CapabilityFamily::Logs,
+            },
+        ] {
+            assert_eq!(command.requirement(), Requirement::Core, "{command:?}");
+        }
     }
 }

@@ -13,6 +13,7 @@ use common::{
 
 use dokku_ui::dokku::{DokkuClient, DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::AppName;
+use dokku_ui::domain::capabilities::CapabilityFamily;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::web::build_app;
 
@@ -321,4 +322,72 @@ async fn cold_start_serves_the_shared_row_without_ssh() {
     let body = get_body(resp).await;
     assert!(body.contains("alpha"), "{body}");
     assert!(body.contains("Running"), "{body}");
+}
+
+const DOKKU_VERSION: &str = include_str!("fixtures/dokku_version.txt");
+const LOGS_HELP: &str = include_str!("fixtures/logs_help.txt");
+
+fn capabilities_client() -> MockClient {
+    MockClient::new()
+        .stub(
+            DokkuCommand::DokkuVersion,
+            Ok(DokkuOutput::ok(DOKKU_VERSION)),
+        )
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(
+                "=====> Plugins\n  apps 0.38.4 enabled dokku core apps plugin\n  nginx-vhosts 0.38.4 enabled dokku core nginx-vhosts plugin\n",
+            )),
+        )
+        .stub(
+            DokkuCommand::Help {
+                family: CapabilityFamily::Logs,
+            },
+            Ok(DokkuOutput::ok(LOGS_HELP)),
+        )
+        .stub(
+            DokkuCommand::Help {
+                family: CapabilityFamily::NginxAccessLogs,
+            },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "unknown command".into(),
+            }),
+        )
+        .stub(
+            DokkuCommand::Help {
+                family: CapabilityFamily::NginxErrorLogs,
+            },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "unknown command".into(),
+            }),
+        )
+}
+
+#[tokio::test]
+async fn capabilities_cold_start_serves_the_shared_row_without_ssh() {
+    let (a, b, _dir) =
+        states_over_shared_db(Arc::new(capabilities_client()), Arc::new(no_ssh_client())).await;
+
+    let caps_a = a
+        .capabilities
+        .ensure_loaded()
+        .await
+        .expect("A probes the host");
+    assert!(caps_a.enabled_plugins.contains(&"nginx-vhosts".into()));
+
+    let caps_b = b
+        .capabilities
+        .ensure_loaded()
+        .await
+        .expect("B serves the shared row");
+    assert_eq!(
+        caps_b.dokku_version.map(|version| version.to_string()),
+        Some("0.38.4".to_owned())
+    );
+    assert_eq!(
+        caps_a.log_sources, caps_b.log_sources,
+        "both processes answer identically"
+    );
 }

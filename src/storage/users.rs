@@ -1,10 +1,13 @@
 use sqlx::SqlitePool;
 
+use crate::auth::rbac::Role;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
     pub id: i64,
     pub email: String,
     pub password_hash: String,
+    pub role: Role,
     pub created_at: i64,
 }
 
@@ -36,37 +39,23 @@ impl UsersRepo for SqliteUsersRepo {
     }
 
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, sqlx::Error> {
-        sqlx::query_as::<_, (i64, String, String, i64)>(
-            "SELECT id, email, password_hash, created_at FROM users WHERE email = ?",
+        sqlx::query_as::<_, (i64, String, String, String, i64)>(
+            "SELECT id, email, password_hash, role, created_at FROM users WHERE email = ?",
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await
-        .map(|row| {
-            row.map(|(id, email, password_hash, created_at)| User {
-                id,
-                email,
-                password_hash,
-                created_at,
-            })
-        })
+        .map(|row| row.map(user_from_row))
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<User>, sqlx::Error> {
-        sqlx::query_as::<_, (i64, String, String, i64)>(
-            "SELECT id, email, password_hash, created_at FROM users WHERE id = ?",
+        sqlx::query_as::<_, (i64, String, String, String, i64)>(
+            "SELECT id, email, password_hash, role, created_at FROM users WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map(|row| {
-            row.map(|(id, email, password_hash, created_at)| User {
-                id,
-                email,
-                password_hash,
-                created_at,
-            })
-        })
+        .map(|row| row.map(user_from_row))
     }
 
     async fn insert(&self, email: &str, password_hash: &str) -> Result<User, sqlx::Error> {
@@ -83,8 +72,21 @@ impl UsersRepo for SqliteUsersRepo {
             id,
             email: email.to_owned(),
             password_hash: password_hash.to_owned(),
+            role: Role::Admin,
             created_at,
         })
+    }
+}
+
+fn user_from_row(
+    (id, email, password_hash, role, created_at): (i64, String, String, String, i64),
+) -> User {
+    User {
+        id,
+        email,
+        password_hash,
+        role: Role::try_from(&role).unwrap_or(Role::Admin),
+        created_at,
     }
 }
 
@@ -113,6 +115,7 @@ mod tests {
             .expect("insert");
         assert_eq!(user.email, "admin@example.com");
         assert_eq!(user.password_hash, "hash");
+        assert_eq!(user.role, Role::Admin, "first users are admins");
         assert!(user.id > 0);
 
         assert_eq!(repo.count().await.expect("count"), 1);
@@ -171,5 +174,18 @@ mod tests {
         let (repo, _dir) = repo().await;
         repo.insert("a@b.com", "h1").await.expect("first insert");
         assert!(repo.insert("a@b.com", "h2").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unknown_role_rows_degrade_to_admin() {
+        let (repo, _dir) = repo().await;
+        let user = repo.insert("a@b.com", "h").await.expect("insert");
+        sqlx::query("UPDATE users SET role = 'root' WHERE id = ?")
+            .bind(user.id)
+            .execute(&repo.pool)
+            .await
+            .expect("tamper role");
+        let found = repo.find_by_id(user.id).await.expect("find").expect("some");
+        assert_eq!(found.role, Role::Admin, "corrupt role degrades safely");
     }
 }

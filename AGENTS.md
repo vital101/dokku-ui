@@ -53,6 +53,40 @@ Why not bare `cargo test`: `static/css/app.css` is a generated, gitignored artif
 - TDD is the working style; definition of done = tests green, `make lint` clean, `make coverage-gate` ≥ 90%.
 - Dev state lives in gitignored `dev-data/` (SQLite DB, SSH key, known_hosts); settings default to it (`src/settings.rs`). `SECRET_KEY` default is a committed dev value — never reuse it for prod.
 
+## P0 foundations (landed — invariants to keep)
+
+- **Every mutation is a persisted job** (`action_jobs`, migration `0006`):
+  handlers build validated `JobSpec` plans (`src/domain/job.rs`) and enqueue via
+  `fragments::enqueue_action_run`; an immediate executor claims **its own job
+  by id** (`claim_by_id` — never "the oldest", which in a same-second race
+  could be another process's and strand both), and the worker pool
+  (`dokku::spawn_worker` in `lib.rs`) reclaims expired leases cross-container.
+  Retries: transient `Connect`/`Timeout` only, exponential backoff; `Exit`
+  never; destructive specs `max_attempts=1`. Payloads rehydrate through the
+  newtype constructors, so tampered rows fail without touching the host.
+- **Audit**: `action_runs` carries actor/operation/target_kind/parent_run_id
+  (migration `0005`); run lines are redacted before persisting
+  (`domain::redact`, literal secrets + `KEY:`/URL-credential masking).
+  Retention: `ACTIVITY_TTL_SECS` (90d) / `RUN_LOG_TTL_SECS` (7d) settings.
+  Activity pages: `/activity` (+`?user=`), per-app, per-service.
+- **Toasts**: `GET /actions/toasts` polled from `base.html` every 5s; durable
+  per-user acks via `POST /actions/runs/{id}/ack` (migration `0008`).
+- **Capabilities** (`domain::capabilities`, migration `0007`): one shared
+  probe row (`dokku --version`, `plugin:list`, `<family> --help`); handlers
+  gate UI, never fail at command time. `DokkuCommand::requirement()` is
+  exhaustive — new variants must declare their gate.
+- **Config editing** (`domain::env_file`): `.env` parse/diff/validate. Values
+  must be single-line and quote-free (dokku's SSH wrapper re-splits with
+  `xargs -n 1`); reject anything else. Reveal/edit are gated by the re-auth
+  window (`session["reauth_until"]`, `REAUTH_TTL_SECS`), and revealed
+  responses carry `Cache-Control: no-store`.
+- **Live logs** (`web::logs::log_stream`, `static/js/logs.js`): one SSE stream
+  per viewer (`/apps/{name}/logs/stream?source=logs|nginx:access-logs|nginx:error-logs&tail=1`);
+  sources are capability-gated. When the browser disconnects, the stream drops
+  the mpsc receiver and `RusshClient`'s `is_closed()` poll aborts the SSH
+  channel with `DokkuError::StreamClosed` — **never** tear down the shared
+  session for a viewer disconnect (guarded in `run_command`).
+
 ## Deploy
 
 - Prod deploys via `git push dokku main` (the `dokku` git remote). The app must have `/app/data` storage-mounted (SQLite + SSH keys); healthcheck is `/healthz`; full runbook in `PLAN.md` §11.

@@ -36,7 +36,7 @@ impl ProcessState {
 }
 
 /// One process type's desired instance count, from `ps:scale --format json`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ScaleEntry {
     pub process_type: String,
     pub quantity: u32,
@@ -57,7 +57,7 @@ impl ScaleEntry {
 }
 
 /// Per-container runtime state, distilled from `ps:inspect` (sanitized docker inspect).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContainerDetails {
     pub id_short: String,
     pub name: String,
@@ -91,7 +91,7 @@ pub struct ServiceLink {
 /// Details for a single linked service, parsed from the plain-text
 /// `<plugin>:info <service>` report. The DSN is deliberately never parsed into
 /// this struct.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceInfo {
     pub plugin: String,
     pub service: String,
@@ -149,7 +149,7 @@ impl ServiceInfo {
 /// One bind mount from `storage:report`, keyed by its `host:container`
 /// locator so the same mount reported under several phases collapses into a
 /// single row. Empty options render as an em dash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Mount {
     pub host: String,
     pub container: String,
@@ -180,7 +180,7 @@ impl Mount {
 }
 
 /// Every mount an app declares, from the all-apps `storage:report` output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AppMounts {
     pub app: String,
     pub mounts: Vec<Mount>,
@@ -449,7 +449,7 @@ fn percent_rounded(percent: Option<f64>) -> Option<u32> {
 }
 
 /// A registered storage entry, from `storage:list-entries --format json`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StorageEntry {
     pub name: String,
     pub host_path: String,
@@ -493,7 +493,7 @@ impl BuildInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnvVar {
     pub key: String,
     pub value: String,
@@ -645,7 +645,7 @@ pub struct AppOverview {
     pub process_count: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LogLines(Vec<String>);
 
 impl LogLines {

@@ -1,5 +1,7 @@
 mod common;
 
+use std::sync::Arc;
+
 use actix_web::http::StatusCode;
 use actix_web::test;
 
@@ -23,6 +25,18 @@ fn redis() -> ServicePlugin {
 
 fn candid() -> ServiceName {
     ServiceName::try_from("candid").expect("service name")
+}
+
+/// Polls the mock client until the executor task has run `command` (jobs
+/// execute asynchronously now), failing after a short budget.
+async fn wait_for_call(client: &Arc<MockClient>, command: &DokkuCommand) {
+    for _ in 0..200 {
+        if client.calls().contains(command) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("command never called: {command:?}");
 }
 
 fn service_list_stub() -> MockClient {
@@ -473,15 +487,15 @@ async fn hx_service_start_returns_run_fragment_and_streams_output() {
 }
 
 #[tokio::test]
-async fn service_actions_succeed_flash_and_redirect_to_detail() {
-    for (path, command, flash) in [
+async fn service_actions_are_queued_flash_and_redirect_to_detail() {
+    for (path, command, verb) in [
         (
             "/services/redis/candid/start",
             DokkuCommand::ServiceStart {
                 plugin: redis(),
                 service: candid(),
             },
-            "Service &#39;candid&#39; started.",
+            "start",
         ),
         (
             "/services/redis/candid/stop",
@@ -489,7 +503,7 @@ async fn service_actions_succeed_flash_and_redirect_to_detail() {
                 plugin: redis(),
                 service: candid(),
             },
-            "Service &#39;candid&#39; stopped.",
+            "stop",
         ),
         (
             "/services/redis/candid/restart",
@@ -497,7 +511,7 @@ async fn service_actions_succeed_flash_and_redirect_to_detail() {
                 plugin: redis(),
                 service: candid(),
             },
-            "Service &#39;candid&#39; restarted.",
+            "restart",
         ),
     ] {
         let client = service_list_stub().stub(command.clone(), Ok(DokkuOutput::ok("")));
@@ -517,7 +531,7 @@ async fn service_actions_succeed_flash_and_redirect_to_detail() {
         assert_eq!(location(&resp), "/services/redis/candid", "{path}");
         let cookie = response_cookie(&resp).unwrap_or(cookie);
 
-        assert!(client.calls().contains(&command), "{path} called dokku");
+        wait_for_call(&client, &command).await;
 
         let resp = test::call_service(
             &app,
@@ -528,12 +542,15 @@ async fn service_actions_succeed_flash_and_redirect_to_detail() {
         )
         .await;
         let body = get_body(resp).await;
-        assert!(body.contains(flash), "{path} flash: {body}");
+        assert!(
+            body.contains(&format!("Queued: {verb} candid.")),
+            "{path} queued flash: {body}"
+        );
     }
 }
 
 #[tokio::test]
-async fn service_action_error_flashes_stderr_and_redirects() {
+async fn service_action_error_is_queued_and_fails_in_the_audit_trail() {
     let client = service_list_stub().stub(
         DokkuCommand::ServiceStart {
             plugin: redis(),
@@ -541,7 +558,7 @@ async fn service_action_error_flashes_stderr_and_redirects() {
         },
         Err(exit_error(1, "service is missing")),
     );
-    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
     let csrf = service_shell_csrf(&app, &cookie).await;
@@ -555,18 +572,30 @@ async fn service_action_error_flashes_stderr_and_redirects() {
     .await;
     let cookie = response_cookie(&resp).unwrap_or(cookie);
 
+    wait_for_call(
+        &client,
+        &DokkuCommand::ServiceStart {
+            plugin: redis(),
+            service: candid(),
+        },
+    )
+    .await;
+
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri("/services/redis/candid")
+            .uri("/services/redis/candid/activity")
             .cookie(cookie)
             .to_request(),
     )
     .await;
     let body = get_body(resp).await;
 
-    assert!(body.contains("Failed to start service"), "{body}");
-    assert!(body.contains("service is missing"), "{body}");
+    assert!(body.contains("service.start"), "{body}");
+    assert!(
+        body.contains("failed"),
+        "the failed run is in the audit trail: {body}"
+    );
 }
 
 #[tokio::test]
@@ -1176,7 +1205,7 @@ async fn destroy_service_non_htmx_requires_typed_name() {
 }
 
 #[tokio::test]
-async fn destroy_service_non_htmx_flashes_and_redirects_to_list() {
+async fn destroy_service_non_htmx_queues_and_redirects_to_list() {
     let client = service_list_stub().stub(
         DokkuCommand::ServiceDestroy {
             plugin: redis(),
@@ -1204,11 +1233,15 @@ async fn destroy_service_non_htmx_flashes_and_redirects_to_list() {
     assert_eq!(location(&resp), "/services/redis");
     let cookie = response_cookie(&resp).unwrap_or(cookie);
 
-    assert!(client.calls().contains(&DokkuCommand::ServiceDestroy {
-        plugin: redis(),
-        service: candid(),
-        force: true,
-    }));
+    wait_for_call(
+        &client,
+        &DokkuCommand::ServiceDestroy {
+            plugin: redis(),
+            service: candid(),
+            force: true,
+        },
+    )
+    .await;
 
     let resp = test::call_service(
         &app,
@@ -1219,10 +1252,7 @@ async fn destroy_service_non_htmx_flashes_and_redirects_to_list() {
     )
     .await;
     let body = get_body(resp).await;
-    assert!(
-        body.contains("Service &#39;candid&#39; destroyed."),
-        "{body}"
-    );
+    assert!(body.contains("Queued: destroy candid."), "{body}");
 }
 
 #[tokio::test]

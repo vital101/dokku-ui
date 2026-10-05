@@ -3,6 +3,9 @@ mod common;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use actix_web::body::MessageBody;
+use actix_web::cookie::Cookie;
+use actix_web::dev::ServiceResponse;
 use actix_web::http::StatusCode;
 use actix_web::test;
 
@@ -12,12 +15,15 @@ use common::{
 };
 
 use dokku_ui::dokku::{
-    DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient, SnapshotStore,
+    CapabilitiesStore, DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient,
+    SnapshotStore,
 };
 use dokku_ui::domain::AppName;
+use dokku_ui::domain::capabilities::CapabilityFamily;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
+use dokku_ui::storage::jobs::SqliteJobsRepo;
 use dokku_ui::storage::runs::SqliteRunsRepo;
 use dokku_ui::web::{AppState, build_app};
 
@@ -31,6 +37,9 @@ const PS_SCALE_FIXTURE: &str = include_str!("fixtures/ps_scale.txt");
 const PS_INSPECT_FIXTURE: &str = include_str!("fixtures/ps_inspect.json");
 const RESOURCE_REPORT_FIXTURE: &str = include_str!("fixtures/resource_report.txt");
 const POSTGRES_INFO_FIXTURE: &str = include_str!("fixtures/postgres_info.txt");
+const DOKKU_VERSION_FIXTURE: &str = include_str!("fixtures/dokku_version.txt");
+const PLUGIN_LIST_FIXTURE: &str = include_str!("fixtures/plugin_list.txt");
+const LOGS_HELP_FIXTURE: &str = include_str!("fixtures/logs_help.txt");
 
 fn apps_report() -> DokkuOutput {
     DokkuOutput::ok(r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned())
@@ -77,6 +86,8 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
     (
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
+            jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            capabilities: Arc::new(CapabilitiesStore::new(dokku.clone(), pool.clone())),
             db: pool,
             settings,
             dokku,
@@ -92,6 +103,69 @@ fn exit_error(code: i32, stderr: &str) -> DokkuError {
         code,
         stderr: stderr.to_owned(),
     }
+}
+
+/// Polls a GET until `needle` appears in the body (the job executor finishes
+/// the run asynchronously after the command itself has been called).
+async fn wait_for_body<S, B, E>(
+    app: &S,
+    uri: &str,
+    cookie: &Cookie<'static>,
+    needle: &str,
+) -> String
+where
+    S: actix_web::dev::Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    for _ in 0..200 {
+        let resp = test::call_service(
+            app,
+            test::TestRequest::get()
+                .uri(uri)
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        let body = get_body(resp).await;
+        if body.contains(needle) {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let resp = test::call_service(
+        app,
+        test::TestRequest::get()
+            .uri(uri)
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    get_body(resp).await
+}
+
+/// Polls the mock client until the executor task has run `command` (jobs
+/// execute asynchronously now), failing after a short budget.
+async fn wait_for_call(client: &Arc<MockClient>, command: &DokkuCommand) {
+    for _ in 0..200 {
+        if client.calls().contains(command) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("command never called: {command:?}");
+}
+
+fn urlencode(input: &str) -> String {
+    input
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'=' | b'\n' => {
+                vec![byte as char]
+            }
+            other => format!("%{other:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -127,6 +201,11 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         "/services/postgres/cache/partials/delete-confirm",
         "/services/postgres/cache/partials/stats",
         "/services/postgres/cache/delete",
+        "/activity",
+        "/apps/alpha/config/edit",
+        "/apps/alpha/activity",
+        "/apps/alpha/config/edit",
+        "/services/postgres/cache/activity",
         "/volumes",
         "/volumes/partials/list",
         "/volumes/partials/usage?entry=legacy-90db719326",
@@ -477,17 +556,32 @@ async fn restart_refreshes_that_apps_report() {
     .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let report_calls = client
-        .calls()
-        .iter()
-        .filter(|call| {
-            matches!(
-                call,
-                DokkuCommand::PsReport { app } if app.as_str() == "alpha"
-            )
-        })
-        .count();
-    assert_eq!(report_calls, 2, "initial load plus post-action refresh");
+    wait_for_call(
+        &client,
+        &DokkuCommand::PsRestart {
+            app: app_name("alpha"),
+        },
+    )
+    .await;
+    let report_calls = || {
+        client
+            .calls()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    DokkuCommand::PsReport { app } if app.as_str() == "alpha"
+                )
+            })
+            .count()
+    };
+    for _ in 0..200 {
+        if report_calls() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(report_calls(), 2, "initial load plus post-action refresh");
 }
 
 #[tokio::test]
@@ -581,7 +675,7 @@ async fn delete_confirm_renders_name_echo_field() {
 }
 
 #[tokio::test]
-async fn destroy_with_matching_echo_destroys_and_redirects_home() {
+async fn destroy_with_matching_echo_queues_destroy_and_redirects_home() {
     let (state, client, _dir) = harness(seeded_app_client()).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -614,10 +708,7 @@ async fn destroy_with_matching_echo_destroys_and_redirects_home() {
         app: app_name("alpha"),
         force: true,
     };
-    assert!(
-        client.calls().contains(&destroy),
-        "AppsDestroy called with force"
-    );
+    wait_for_call(&client, &destroy).await;
 
     let resp = test::call_service(
         &app,
@@ -628,7 +719,7 @@ async fn destroy_with_matching_echo_destroys_and_redirects_home() {
     )
     .await;
     let body = get_body(resp).await;
-    assert!(body.contains("App &#39;alpha&#39; destroyed."));
+    assert!(body.contains("Queued: destroy alpha."));
 }
 
 #[tokio::test]
@@ -679,8 +770,8 @@ async fn destroy_with_mismatched_echo_redirects_back_without_calling_dokku() {
 }
 
 #[tokio::test]
-async fn destroy_error_flashes_and_returns_to_confirm() {
-    let (state, _dir) = test_state_with_client(MockClient::new().stub(
+async fn destroy_error_is_queued_and_fails_in_the_audit_trail() {
+    let (state, client, _dir) = harness(MockClient::new().stub(
         DokkuCommand::AppsDestroy {
             app: app_name("alpha"),
             force: true,
@@ -712,20 +803,20 @@ async fn destroy_error_flashes_and_returns_to_confirm() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&resp), "/apps/alpha/delete");
+    assert_eq!(location(&resp), "/");
     let cookie = response_cookie(&resp).unwrap_or(cookie);
 
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/apps/alpha/delete")
-            .cookie(cookie)
-            .to_request(),
+    wait_for_call(
+        &client,
+        &DokkuCommand::AppsDestroy {
+            app: app_name("alpha"),
+            force: true,
+        },
     )
     .await;
-    let body = get_body(resp).await;
-    assert!(body.contains("Failed to destroy app"));
-    assert!(body.contains("gone"));
+
+    let body = wait_for_body(&app, "/activity", &cookie, "failed").await;
+    assert!(body.contains("app.destroy"), "{body}");
 }
 
 #[tokio::test]
@@ -779,35 +870,39 @@ async fn app_posts_without_valid_csrf_are_rejected() {
 }
 
 #[tokio::test]
-async fn actions_succeed_flash_and_redirect_to_show() {
-    for (path, command, flash) in [
+async fn actions_are_queued_flash_and_redirect_to_show() {
+    for (path, command, operation, flash) in [
         (
             "/apps/alpha/start",
             DokkuCommand::PsStart {
                 app: app_name("alpha"),
             },
-            "App &#39;alpha&#39; started.",
+            "app.start",
+            "Queued: start alpha.",
         ),
         (
             "/apps/alpha/stop",
             DokkuCommand::PsStop {
                 app: app_name("alpha"),
             },
-            "App &#39;alpha&#39; stopped.",
+            "app.stop",
+            "Queued: stop alpha.",
         ),
         (
             "/apps/alpha/restart",
             DokkuCommand::PsRestart {
                 app: app_name("alpha"),
             },
-            "App &#39;alpha&#39; restarted.",
+            "app.restart",
+            "Queued: restart alpha.",
         ),
         (
             "/apps/alpha/rebuild",
             DokkuCommand::PsRebuild {
                 app: app_name("alpha"),
             },
-            "App &#39;alpha&#39; rebuilt.",
+            "app.rebuild",
+            "Queued: rebuild alpha.",
         ),
     ] {
         let (state, client, _dir) =
@@ -836,24 +931,27 @@ async fn actions_succeed_flash_and_redirect_to_show() {
         assert_eq!(location(&resp), "/apps/alpha", "{path}");
         let cookie = response_cookie(&resp).unwrap_or(cookie);
 
-        assert!(client.calls().contains(&command), "{path} called dokku");
+        wait_for_call(&client, &command).await;
 
         let resp = test::call_service(
             &app,
             test::TestRequest::get()
                 .uri("/apps/alpha")
-                .cookie(cookie)
+                .cookie(cookie.clone())
                 .to_request(),
         )
         .await;
         let body = get_body(resp).await;
         assert!(body.contains(flash), "{path} flash");
+
+        let body = wait_for_body(&app, "/apps/alpha/activity", &cookie, "succeeded").await;
+        assert!(body.contains(operation), "{path} audit trail");
     }
 }
 
 #[tokio::test]
-async fn action_error_flashes_stderr_and_redirects_to_show() {
-    let (state, _dir) = test_state_with_client(seeded_app_client().stub(
+async fn action_error_is_queued_and_fails_in_the_audit_trail() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
         DokkuCommand::PsStart {
             app: app_name("alpha"),
         },
@@ -884,17 +982,27 @@ async fn action_error_flashes_stderr_and_redirects_to_show() {
     assert_eq!(location(&resp), "/apps/alpha");
     let cookie = response_cookie(&resp).unwrap_or(cookie);
 
+    wait_for_call(
+        &client,
+        &DokkuCommand::PsStart {
+            app: app_name("alpha"),
+        },
+    )
+    .await;
+
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
             .uri("/apps/alpha")
-            .cookie(cookie)
+            .cookie(cookie.clone())
             .to_request(),
     )
     .await;
     let body = get_body(resp).await;
-    assert!(body.contains("Failed to start app"));
-    assert!(body.contains("no such app"));
+    assert!(body.contains("Queued: start alpha."), "{body}");
+
+    let body = wait_for_body(&app, "/apps/alpha/activity", &cookie, "failed").await;
+    assert!(body.contains("app.start"), "{body}");
 }
 
 #[tokio::test]
@@ -1028,7 +1136,10 @@ async fn config_partial_renders_env_vars() {
     assert!(!body.contains("s3cr3t"), "value masked");
     assert!(body.contains("••••••••"), "masked values rendered");
     assert!(!body.contains("=====>"), "dokku header line skipped");
-    assert!(body.contains("Values are masked"));
+    assert!(
+        body.contains("Reveal values"),
+        "the reveal button is offered"
+    );
 }
 
 #[tokio::test]
@@ -1137,11 +1248,75 @@ async fn logs_shell_renders_lines_selector_and_panel() {
 }
 
 #[tokio::test]
+async fn logs_shell_shows_the_live_tail_badge_from_the_shared_capabilities_row() {
+    let (state, _client, _dir) = harness(
+        seeded_app_client()
+            .stub(
+                DokkuCommand::DokkuVersion,
+                Ok(DokkuOutput::ok(DOKKU_VERSION_FIXTURE)),
+            )
+            .stub(
+                DokkuCommand::PluginList,
+                Ok(DokkuOutput::ok(PLUGIN_LIST_FIXTURE)),
+            )
+            .stub(
+                DokkuCommand::Help {
+                    family: CapabilityFamily::Logs,
+                },
+                Ok(DokkuOutput::ok(LOGS_HELP_FIXTURE)),
+            ),
+    )
+    .await;
+    state
+        .capabilities
+        .ensure_loaded()
+        .await
+        .expect("probe capabilities");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Live tail: available"), "{body}");
+}
+
+#[tokio::test]
+async fn logs_shell_renders_unknown_live_tail_without_probe_data() {
+    let (state, _client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Live tail: unknown"),
+        "no probe row yet, so the badge is honest: {body}"
+    );
+}
+
+#[tokio::test]
 async fn logs_partial_defaults_to_200_lines_and_strips_ansi() {
     let (state, client, _dir) = harness(seeded_app_client().stub(
         DokkuCommand::Logs {
             app: app_name("alpha"),
             num_lines: 200,
+            follow: false,
         },
         Ok(DokkuOutput::ok(LOGS_FIXTURE)),
     ))
@@ -1166,7 +1341,8 @@ async fn logs_partial_defaults_to_200_lines_and_strips_ansi() {
     assert!(!body.contains('\x1b'), "ANSI escapes stripped");
     assert!(client.calls().contains(&DokkuCommand::Logs {
         app: app_name("alpha"),
-        num_lines: 200
+        num_lines: 200,
+        follow: false,
     }));
 }
 
@@ -1182,6 +1358,7 @@ async fn logs_partial_clamps_lines_parameter() {
         let command = DokkuCommand::Logs {
             app: app_name("alpha"),
             num_lines: expected,
+            follow: false,
         };
         let (state, client, _dir) =
             harness(seeded_app_client().stub(command.clone(), Ok(DokkuOutput::ok("")))).await;
@@ -1227,6 +1404,7 @@ async fn logs_empty_renders_empty_state() {
         DokkuCommand::Logs {
             app: app_name("alpha"),
             num_lines: 200,
+            follow: false,
         },
         Ok(DokkuOutput::ok("")),
     ))
@@ -1252,6 +1430,7 @@ async fn logs_fetch_error_renders_retry_fragment() {
         DokkuCommand::Logs {
             app: app_name("alpha"),
             num_lines: 50,
+            follow: false,
         },
         Err(exit_error(1, "boom")),
     ))
@@ -1545,7 +1724,7 @@ async fn scale_posts_formation_and_redirects_with_flash() {
     .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(location(&resp), "/apps/alpha/processes");
-    assert!(client.calls().contains(&scaled), "PsScaleSet called");
+    wait_for_call(&client, &scaled).await;
 
     let cookie = response_cookie(&resp).unwrap_or(cookie);
     let resp = test::call_service(
@@ -1557,7 +1736,7 @@ async fn scale_posts_formation_and_redirects_with_flash() {
     )
     .await;
     let body = get_body(resp).await;
-    assert!(body.contains("Scaled &#39;alpha&#39;."), "success flash");
+    assert!(body.contains("Queued: scale alpha."), "queued flash");
 }
 
 #[tokio::test]
@@ -1610,8 +1789,8 @@ async fn scale_rejects_out_of_range_value_without_calling_dokku() {
 }
 
 #[tokio::test]
-async fn scale_dokku_error_flashes_and_returns_to_processes() {
-    let (state, _client, _dir) = harness(processes_client().stub(
+async fn scale_dokku_error_is_queued_and_fails_in_the_audit_trail() {
+    let (state, client, _dir) = harness(processes_client().stub(
         DokkuCommand::PsScaleSet {
             app: app_name("alpha"),
             scales: vec![dokku_ui::domain::types::ScaleEntry::new("web", 2)],
@@ -1646,17 +1825,28 @@ async fn scale_dokku_error_flashes_and_returns_to_processes() {
     assert_eq!(location(&resp), "/apps/alpha/processes");
     let cookie = response_cookie(&resp).unwrap_or(cookie);
 
+    wait_for_call(
+        &client,
+        &DokkuCommand::PsScaleSet {
+            app: app_name("alpha"),
+            scales: vec![dokku_ui::domain::types::ScaleEntry::new("web", 2)],
+        },
+    )
+    .await;
+
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
             .uri("/apps/alpha/processes")
-            .cookie(cookie)
+            .cookie(cookie.clone())
             .to_request(),
     )
     .await;
     let body = get_body(resp).await;
-    assert!(body.contains("Failed to scale app"));
-    assert!(body.contains("cannot scale"));
+    assert!(body.contains("Queued: scale alpha."), "{body}");
+
+    let body = wait_for_body(&app, "/apps/alpha/activity", &cookie, "failed").await;
+    assert!(body.contains("app.scale"), "{body}");
 }
 
 #[tokio::test]
@@ -2223,4 +2413,228 @@ async fn action_events_404s_unknown_run() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "unknown run");
+}
+
+#[tokio::test]
+async fn config_reveal_requires_reauth_then_shows_values_no_store() {
+    let (state, _client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::ConfigShow {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok(CONFIG_FIXTURE)),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/apps/alpha")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        extract_csrf(&get_body(resp).await)
+    };
+
+    // Without a re-auth window the reveal bounces to /reauth.
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/alpha/config/reveal", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/reauth?next=/apps/alpha/config");
+
+    // Re-auth, then reveal shows the raw values with no-store.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=/apps/alpha/config")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let reauth_csrf = extract_csrf(&get_body(resp).await);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!("csrf_token={reauth_csrf}&password=correct-horse-battery&next=%2Fapps%2Falpha%2Fconfig"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/alpha/config/reveal", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("cache-control"),
+        Some(&actix_web::http::header::HeaderValue::from_static(
+            "no-store"
+        )),
+        "revealed values are never cached"
+    );
+    let body = get_body(resp).await;
+    assert!(body.contains("postgres://user:pass@host/db"), "{body}");
+    assert!(body.contains("s3cr3t"), "{body}");
+    assert!(!body.contains("••••••••"), "values are unmasked: {body}");
+
+    // The reveal is in the audit trail.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("config.reveal"), "{body}");
+}
+
+#[tokio::test]
+async fn config_edit_page_requires_reauth_and_enqueues_a_config_job() {
+    let (state, client, _dir) = harness(seeded_app_client().stub(
+        DokkuCommand::ConfigShow {
+            app: app_name("alpha"),
+        },
+        Ok(DokkuOutput::ok(CONFIG_FIXTURE)),
+    ))
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/apps/alpha")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        extract_csrf(&get_body(resp).await)
+    };
+
+    // The edit page is reauth-gated too.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config/edit")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/reauth?next=/apps/alpha/config/edit");
+
+    // Re-auth, then the edit page shows current values in the textarea.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=/apps/alpha/config/edit")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let reauth_csrf = extract_csrf(&get_body(resp).await);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!("csrf_token={reauth_csrf}&password=correct-horse-battery&next=%2Fapps%2Falpha%2Fconfig%2Fedit"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config/edit")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("SECRET_KEY=s3cr3t"), "{body}");
+    assert!(
+        body.contains("DATABASE_URL=postgres://user:pass@host/db"),
+        "{body}"
+    );
+
+    // Apply a batch: keep DATABASE_URL, change SECRET_KEY, drop DOKKU_PROXY_PORT.
+    let env = "DATABASE_URL=postgres://user:pass@host/db\nSECRET_KEY=brand-new\n";
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/alpha/config",
+            format!("csrf_token={csrf}&env={}", urlencode(env)),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/config")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Queued: config update for alpha."), "{body}");
+
+    wait_for_call(
+        &client,
+        &DokkuCommand::ConfigSet {
+            app: app_name("alpha"),
+            vars: vec![dokku_ui::domain::types::EnvVar {
+                key: "SECRET_KEY".into(),
+                value: "brand-new".into(),
+            }],
+        },
+    )
+    .await;
+    assert!(
+        client.calls().contains(&DokkuCommand::ConfigUnset {
+            app: app_name("alpha"),
+            keys: vec!["DOKKU_PROXY_PORT".into()],
+        }),
+        "the diff unsets dropped keys"
+    );
+    assert!(
+        client.calls().contains(&DokkuCommand::ConfigShow {
+            app: app_name("alpha"),
+        }),
+        "current config was read"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("config.set"), "{body}");
 }

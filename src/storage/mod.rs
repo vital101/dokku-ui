@@ -6,6 +6,8 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
+pub mod capabilities;
+pub mod jobs;
 pub mod runs;
 pub mod sessions;
 pub mod snapshots;
@@ -120,12 +122,12 @@ mod tests {
         let pool = connect(&url).await.expect("connect");
         let tables: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master WHERE type = 'table' \
-             AND name IN ('snapshots', 'action_runs', 'action_run_lines')",
+             AND name IN ('snapshots', 'action_runs', 'action_run_lines', 'capabilities', 'action_jobs')",
         )
         .fetch_all(&pool)
         .await
         .expect("query tables");
-        assert_eq!(tables.len(), 3);
+        assert_eq!(tables.len(), 5);
     }
 
     #[tokio::test]

@@ -11,10 +11,11 @@ use actix_web::http::header::{CONTENT_TYPE, LOCATION};
 use actix_web::test;
 
 use dokku_ui::auth::password::hash_password;
-use dokku_ui::dokku::{DokkuClient, FakeResolver, MockClient, SnapshotStore};
+use dokku_ui::dokku::{CapabilitiesStore, DokkuClient, FakeResolver, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
+use dokku_ui::storage::jobs::SqliteJobsRepo;
 use dokku_ui::storage::runs::SqliteRunsRepo;
 use dokku_ui::storage::users::{SqliteUsersRepo, UsersRepo};
 use dokku_ui::web::AppState;
@@ -51,6 +52,8 @@ pub async fn test_state_with_shared_client(
     (
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
+            jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            capabilities: Arc::new(CapabilitiesStore::new(dokku.clone(), pool.clone())),
             db: pool,
             settings,
             dokku,
@@ -105,6 +108,8 @@ pub async fn states_over_shared_db(
         ));
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
+            jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            capabilities: Arc::new(CapabilitiesStore::new(client.clone(), pool.clone())),
             db: pool.clone(),
             settings: settings.clone(),
             dokku: client,

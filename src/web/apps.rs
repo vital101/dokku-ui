@@ -13,13 +13,17 @@ use crate::dokku::{
 };
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
+use crate::domain::env_file::{config_diff, parse_env_file};
+use crate::domain::job::{AppAction as JobAppAction, JobSpec};
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
 use crate::domain::types::{EnvVar, ResourceReport, ServiceInfo};
 use crate::error::AppError;
+use crate::storage::runs::TargetKind;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
-    RunCompletion, RunRefresh, current_user, error_fragment, is_htmx, modal_error, start_action_run,
+    RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, error_fragment,
+    is_htmx, modal_error, run_synchronously, start_action_run,
 };
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
@@ -77,6 +81,7 @@ struct LogsPage<'a> {
     line_count: u32,
     min_lines: u32,
     max_lines: u32,
+    live_tail_label: String,
 }
 
 #[derive(Template)]
@@ -139,8 +144,10 @@ struct ServicesPartial<'a> {
 
 #[derive(Template)]
 #[template(path = "apps/partials/config.html")]
-struct ConfigPartial {
+struct ConfigPartial<'a> {
     vars: Vec<EnvVar>,
+    name: &'a str,
+    csrf_token: &'a str,
 }
 
 #[derive(Template)]
@@ -220,7 +227,17 @@ pub async fn create(
         }
     };
 
-    match state.dokku.exec(&DokkuCommand::AppsCreate { app }).await {
+    match run_synchronously(
+        &state,
+        &session,
+        &name,
+        "app.create",
+        TargetKind::App,
+        DokkuCommand::AppsCreate { app },
+        &format!("App '{name}' created."),
+    )
+    .await
+    {
         Ok(_) => {
             if let Err(err) = state.snapshot.refresh_app_reports(&name).await {
                 tracing::warn!(error = %err, "snapshot refresh after create failed");
@@ -356,7 +373,254 @@ pub async fn config_partial(
         Ok(vars) => vars,
         Err(err) => return error_fragment(&retry_url, &err.to_string()),
     };
-    render(&ConfigPartial { vars })
+    let csrf_token = ensure_csrf(&session).await?;
+    render(&ConfigPartial {
+        vars,
+        name: &name,
+        csrf_token: &csrf_token,
+    })
+}
+
+/// Reveals the config values under re-auth. Without a valid re-auth window the
+/// user is sent through `/reauth` first; with one, the unmasked table is
+/// returned (marked no-store so it never lingers in a cache).
+pub async fn config_reveal(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+    if !reauth_valid_here(&state, &session).await {
+        return Ok(see_other(&format!("/reauth?next=/apps/{name}/config")));
+    }
+    let retry_url = partial_url(&name, "config", None);
+    let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
+    };
+    let vars = match app_config(&*state.dokku, app).await {
+        Ok(vars) => vars,
+        Err(err) => return error_fragment(&retry_url, &err.to_string()),
+    };
+    record_reveal(&state, &session, &name).await;
+    let page = ConfigRevealedPartial { vars };
+    let mut response = render(&page)?;
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+#[derive(Template)]
+#[template(path = "apps/partials/config_revealed.html")]
+struct ConfigRevealedPartial {
+    vars: Vec<EnvVar>,
+}
+
+/// Records a `config.reveal` audit entry (best-effort, no lines).
+async fn record_reveal(state: &AppState, session: &Session, name: &str) {
+    let actor = crate::web::fragments::current_actor(state, session).await;
+    if let Ok(run_id) = state
+        .action_runs
+        .insert_with(&crate::storage::runs::NewRun {
+            subject: name.to_owned(),
+            operation: "config.reveal".to_owned(),
+            target_kind: crate::storage::runs::TargetKind::App,
+            actor,
+            parent_run_id: None,
+        })
+        .await
+    {
+        let _ = state
+            .action_runs
+            .finish(
+                &run_id,
+                &crate::storage::runs::RunOutcome {
+                    ok: true,
+                    message: "Config values revealed.".to_owned(),
+                    redirect: None,
+                },
+            )
+            .await;
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ConfigForm {
+    env: String,
+}
+
+#[derive(Template)]
+#[template(path = "apps/config_edit.html")]
+struct ConfigEditPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    name: &'a str,
+    active_tab: &'static str,
+    env: String,
+}
+
+/// The re-auth-gated edit page: shows the current values (revealed) in a
+/// `.env`-style textarea for batch set/unset.
+pub async fn config_edit(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<String>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let user = current_user(&state, &session).await?;
+    if !reauth_valid_here(&state, &session).await {
+        return Ok(see_other(&format!("/reauth?next=/apps/{name}/config/edit")));
+    }
+    state.snapshot.resolve_app(&name).await?;
+
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let (_snapshot, app) = state.snapshot.resolve_app(&name).await?;
+    let vars = app_config(&*state.dokku, app).await.unwrap_or_default();
+    let env = vars
+        .into_iter()
+        .map(|var| format!("{}={}", var.key, var.value))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let page = ConfigEditPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        name: &name,
+        active_tab: "config",
+        env,
+    };
+    let mut response = render(&page)?;
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+/// Applies a `.env`-style edit as a queued job: set + unset in one run, then
+/// the app restarts the way `config:set` does on this dokku generation.
+pub async fn config_update(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<ConfigForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    current_user(&state, &session).await?;
+    if !reauth_valid_here(&state, &session).await {
+        return Ok(see_other(&format!("/reauth?next=/apps/{name}/config/edit")));
+    }
+
+    let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            if is_htmx(&req) {
+                return modal_error(err.to_string());
+            }
+            return Err(err.into());
+        }
+    };
+    let current = match app_config(&*state.dokku, app).await {
+        Ok(vars) => vars,
+        Err(err) => {
+            if is_htmx(&req) {
+                return modal_error(format!("Failed to read current config: {err}"));
+            }
+            set_flash(
+                &session,
+                FlashLevel::Error,
+                format!("Failed to read current config: {err}"),
+            );
+            return Ok(see_other(&format!("/apps/{name}/config")));
+        }
+    };
+
+    let (desired, skipped) = parse_env_file(&form.0.env);
+    if skipped > 0 {
+        let message = format!("{skipped} line(s) could not be parsed and were skipped.");
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/config/edit")));
+    }
+    let (to_set, to_unset) = config_diff(&current, &desired);
+    if to_set.is_empty() && to_unset.is_empty() {
+        let message = "No changes to apply.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Success, message);
+        return Ok(see_other(&format!("/apps/{name}/config")));
+    }
+
+    let mut plan = Vec::new();
+    if !to_set.is_empty() {
+        plan.push(JobSpec::ConfigSet {
+            app: name.clone(),
+            vars: to_set,
+        });
+    }
+    if !to_unset.is_empty() {
+        plan.push(JobSpec::ConfigUnset {
+            app: name.clone(),
+            keys: to_unset,
+        });
+    }
+
+    let completion = RunCompletion {
+        success_message: format!("Config updated for '{name}'."),
+        redirect: None,
+        refresh: RunRefresh::Reports,
+    };
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: "config.set".to_owned(),
+                target_kind: crate::storage::runs::TargetKind::App,
+                title: format!("Updating config for {name}…"),
+                plan,
+                completion,
+                refresh_url: Some(format!("/apps/{name}/partials/config")),
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        &name,
+        "config.set",
+        crate::storage::runs::TargetKind::App,
+        &plan,
+        &completion,
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: config update for {name}."),
+    );
+    Ok(see_other(&format!("/apps/{name}/config")))
+}
+
+/// The re-auth window is in the session (see `src/auth/reauth.rs`).
+async fn reauth_valid_here(_state: &AppState, session: &Session) -> bool {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    match session.get::<i64>(crate::auth::reauth::REAUTH_UNTIL) {
+        Ok(Some(until)) => crate::auth::reauth::reauth_valid(now, until),
+        _ => false,
+    }
 }
 
 pub async fn logs(
@@ -372,6 +636,7 @@ pub async fn logs(
     let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
+    let live_tail_label = live_tail_label(&state).await;
     let page = LogsPage {
         email: &user.email,
         csrf_token: &csrf_token,
@@ -381,8 +646,24 @@ pub async fn logs(
         line_count: num_lines,
         min_lines: LOG_LINES_MIN,
         max_lines: LOG_LINES_MAX,
+        live_tail_label,
     };
     render(&page)
+}
+
+/// The live-tail badge on the logs page, straight from the shared capability
+/// row (zero SSH on this path; a cold start renders "unknown" until the probe
+/// publishes).
+async fn live_tail_label(state: &AppState) -> String {
+    let support = state
+        .capabilities
+        .current()
+        .await
+        .map(|caps| caps.supports_family(crate::domain::capabilities::CapabilityFamily::Logs));
+    format!(
+        "Live tail: {}",
+        support.map(|s| s.label()).unwrap_or("unknown".to_owned())
+    )
 }
 
 pub async fn logs_partial(
@@ -538,44 +819,49 @@ pub async fn scale(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &name,
-            format!("Scaling {name}…"),
-            DokkuCommand::PsScaleSet {
-                app,
-                scales: entries,
+            &session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: "app.scale".to_owned(),
+                target_kind: TargetKind::App,
+                title: format!("Scaling {name}…"),
+                plan: vec![JobSpec::AppScale {
+                    app: name.clone(),
+                    scales: entries,
+                }],
+                completion: RunCompletion {
+                    success_message: format!("Scaled '{name}'."),
+                    redirect: None,
+                    refresh: RunRefresh::Reports,
+                },
+                refresh_url: Some(format!("/apps/{name}/partials/processes")),
             },
-            RunCompletion {
-                success_message: format!("Scaled '{name}'."),
-                redirect: None,
-                refresh: RunRefresh::Reports,
-            },
-            Some(format!("/apps/{name}/partials/processes")),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::PsScaleSet {
-            app: app.clone(),
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        &name,
+        "app.scale",
+        TargetKind::App,
+        &[JobSpec::AppScale {
+            app: name.clone(),
             scales: entries,
-        })
-        .await
-    {
-        Ok(_) => {
-            if let Err(err) = state.snapshot.refresh_app_reports(app.as_str()).await {
-                tracing::warn!(error = %err, "snapshot refresh after scale failed");
-            }
-            set_flash(&session, FlashLevel::Success, format!("Scaled '{}'.", name));
-        }
-        Err(err) => {
-            set_flash(
-                &session,
-                FlashLevel::Error,
-                format!("Failed to scale app: {err}"),
-            );
-        }
-    }
+        }],
+        &RunCompletion {
+            success_message: format!("Scaled '{name}'."),
+            redirect: None,
+            refresh: RunRefresh::Reports,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: scale {name}."),
+    );
     Ok(see_other(&redirect_to))
 }
 
@@ -666,8 +952,8 @@ pub async fn destroy(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
 
-    let app = match AppName::try_from(name.clone()) {
-        Ok(app) => app,
+    match AppName::try_from(name.clone()) {
+        Ok(_) => {}
         Err(err) => {
             if is_htmx(&req) {
                 return modal_error(format!("Invalid app name: {err}"));
@@ -696,44 +982,44 @@ pub async fn destroy(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            &name,
-            format!("Deleting {name}…"),
-            DokkuCommand::AppsDestroy { app, force: true },
-            RunCompletion {
-                success_message: format!("App '{name}' destroyed."),
-                redirect: Some("/".to_owned()),
-                refresh: RunRefresh::All,
+            &session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: "app.destroy".to_owned(),
+                target_kind: TargetKind::App,
+                title: format!("Deleting {name}…"),
+                plan: vec![JobSpec::AppDestroy { app: name.clone() }],
+                completion: RunCompletion {
+                    success_message: format!("App '{name}' destroyed."),
+                    redirect: Some("/".to_owned()),
+                    refresh: RunRefresh::All,
+                },
+                refresh_url: None,
             },
-            None,
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::AppsDestroy { app, force: true })
-        .await
-    {
-        Ok(_) => {
-            if let Err(err) = state.snapshot.refresh().await {
-                tracing::warn!(error = %err, "snapshot refresh after destroy failed");
-            }
-            set_flash(
-                &session,
-                FlashLevel::Success,
-                format!("App '{}' destroyed.", name),
-            );
-            Ok(see_other("/"))
-        }
-        Err(err) => {
-            set_flash(
-                &session,
-                FlashLevel::Error,
-                format!("Failed to destroy app: {err}"),
-            );
-            Ok(see_other(&format!("/apps/{}/delete", name)))
-        }
-    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        &name,
+        "app.destroy",
+        TargetKind::App,
+        &[JobSpec::AppDestroy { app: name.clone() }],
+        &RunCompletion {
+            success_message: format!("App '{name}' destroyed."),
+            redirect: Some("/".to_owned()),
+            refresh: RunRefresh::All,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: destroy {name}."),
+    );
+    Ok(see_other("/"))
 }
 
 pub async fn delete_confirm_modal(
@@ -796,12 +1082,17 @@ impl AppAction {
         }
     }
 
-    fn command(self, app: AppName) -> DokkuCommand {
-        match self {
-            AppAction::Start => DokkuCommand::PsStart { app },
-            AppAction::Stop => DokkuCommand::PsStop { app },
-            AppAction::Restart => DokkuCommand::PsRestart { app },
-            AppAction::Rebuild => DokkuCommand::PsRebuild { app },
+    /// The serializable job form of this action (used by the queued run path).
+    fn job(self, app: &str) -> JobSpec {
+        let action = match self {
+            AppAction::Start => JobAppAction::Start,
+            AppAction::Stop => JobAppAction::Stop,
+            AppAction::Restart => JobAppAction::Restart,
+            AppAction::Rebuild => JobAppAction::Rebuild,
+        };
+        JobSpec::AppAction {
+            app: app.to_owned(),
+            action,
         }
     }
 }
@@ -867,8 +1158,8 @@ async fn process_action(
     name: String,
     action: AppAction,
 ) -> Result<HttpResponse, AppError> {
-    let app = match AppName::try_from(name.clone()) {
-        Ok(app) => app,
+    match AppName::try_from(name.clone()) {
+        Ok(_) => {}
         Err(err) => {
             if is_htmx(req) {
                 return modal_error(format!("Invalid app name: {err}"));
@@ -885,38 +1176,42 @@ async fn process_action(
     if is_htmx(req) {
         return start_action_run(
             state,
-            &name,
-            format!("{} {}…", action.present_participle(), name),
-            action.command(app),
-            RunCompletion {
-                success_message: format!("App '{name}' {}.", action.past_tense()),
-                redirect: None,
-                refresh: RunRefresh::Reports,
+            session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: format!("app.{}", action.verb()),
+                target_kind: TargetKind::App,
+                title: format!("{} {}…", action.present_participle(), name),
+                plan: vec![action.job(&name)],
+                completion: RunCompletion {
+                    success_message: format!("App '{name}' {}.", action.past_tense()),
+                    redirect: None,
+                    refresh: RunRefresh::Reports,
+                },
+                refresh_url: Some(format!("/apps/{name}/partials/overview")),
             },
-            Some(format!("/apps/{name}/partials/overview")),
         )
         .await;
     }
 
-    match state.dokku.exec(&action.command(app.clone())).await {
-        Ok(_) => {
-            if let Err(err) = state.snapshot.refresh_app_reports(app.as_str()).await {
-                tracing::warn!(error = %err, "snapshot refresh after action failed");
-            }
-            set_flash(
-                session,
-                FlashLevel::Success,
-                format!("App '{name}' {}.", action.past_tense()),
-            );
-            Ok(see_other(&format!("/apps/{name}")))
-        }
-        Err(err) => {
-            set_flash(
-                session,
-                FlashLevel::Error,
-                format!("Failed to {} app: {err}", action.verb()),
-            );
-            Ok(see_other(&format!("/apps/{name}")))
-        }
-    }
+    let _ = enqueue_action_run(
+        state,
+        session,
+        &name,
+        &format!("app.{}", action.verb()),
+        TargetKind::App,
+        &[action.job(&name)],
+        &RunCompletion {
+            success_message: format!("App '{name}' {}.", action.past_tense()),
+            redirect: None,
+            refresh: RunRefresh::Reports,
+        },
+    )
+    .await?;
+    set_flash(
+        session,
+        FlashLevel::Success,
+        format!("Queued: {} {name}.", action.verb()),
+    );
+    Ok(see_other(&format!("/apps/{name}")))
 }

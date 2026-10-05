@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Activity — Dokku UI{% endblock %}
+{% block heading %}Activity{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Activity</h3>
+      <form method="get" class="flex items-center gap-2">
+        <label for="user" class="text-sm text-slate-400">User</label>
+        <input id="user" type="text" name="user"
+               value="{% if let Some(user_filter) = user_filter %}{{ user_filter }}{% endif %}"
+               class="w-48 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
+        <button type="submit"
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Filter
+        </button>
+      </form>
+    </div>
+    {% include "partials/activity_table.html" %}
+  </div>
+</div>
+{% endblock %}

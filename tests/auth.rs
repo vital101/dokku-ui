@@ -291,3 +291,114 @@ async fn authenticated_unknown_route_renders_404() {
     let body = get_body(resp).await;
     assert!(body.contains("404"));
 }
+
+#[tokio::test]
+async fn reauth_form_renders_and_wrong_password_errors() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=/apps/alpha/config")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Verify your password"), "{body}");
+    let csrf = extract_csrf(&body);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!("csrf_token={csrf}&password=wrong-password&next=%2Fapps%2Falpha%2Fconfig"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Invalid password"), "{body}");
+}
+
+#[tokio::test]
+async fn reauth_with_the_correct_password_redirects_and_flashes() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=/")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!("csrf_token={csrf}&password=correct-horse-battery&next=%2F"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Verified"), "{body}");
+}
+
+#[tokio::test]
+async fn reauth_rejects_external_next_targets() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=https%3A%2F%2Fevil.example")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!(
+                "csrf_token={csrf}&password=correct-horse-battery&next=https%3A%2F%2Fevil.example"
+            ),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(
+        location(&resp),
+        "/",
+        "external next falls back to the dashboard"
+    );
+}

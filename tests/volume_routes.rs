@@ -257,7 +257,7 @@ async fn hx_volume_mount_streams_and_refreshes_list() {
 }
 
 #[tokio::test]
-async fn volume_mount_non_htmx_flashes_restart_note() {
+async fn volume_mount_non_htmx_queues_and_flashes() {
     let client = mounts_client().stub(
         DokkuCommand::StorageMount {
             app: app_name("alpha"),
@@ -296,11 +296,7 @@ async fn volume_mount_non_htmx_flashes_restart_note() {
     .await;
     let body = get_body(resp).await;
 
-    assert!(body.contains("Mounted"), "{body}");
-    assert!(
-        body.contains("restart alpha for the change to take effect"),
-        "{body}"
-    );
+    assert!(body.contains("Queued: mount volume into alpha."), "{body}");
 }
 
 #[tokio::test]
@@ -407,7 +403,10 @@ async fn volume_unmount_non_htmx_flashes_and_redirects() {
     )
     .await;
     let body = get_body(resp).await;
-    assert!(body.contains("Unmounted"), "{body}");
+    assert!(
+        body.contains("Queued: unmount volume from alpha."),
+        "{body}"
+    );
 }
 
 #[tokio::test]

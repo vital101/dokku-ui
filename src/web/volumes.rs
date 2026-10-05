@@ -7,14 +7,16 @@ use serde::Deserialize;
 
 use crate::dokku::{app_mounts, storage_entries, volume_usage};
 use crate::domain::AppName;
-use crate::domain::command::DokkuCommand;
+use crate::domain::job::JobSpec;
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::types::{AppMounts, StorageEntry};
 use crate::error::AppError;
+use crate::storage::runs::TargetKind;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
-    RunCompletion, RunRefresh, current_user, error_fragment, is_htmx, modal_error, start_action_run,
+    RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, error_fragment,
+    is_htmx, modal_error, start_action_run,
 };
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
@@ -259,47 +261,55 @@ pub async fn mount(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            app.as_str(),
-            format!("Mounting volume into {app}…"),
-            DokkuCommand::StorageMount {
-                app: app.clone(),
-                mount: mount.clone(),
+            &session,
+            &RunRequest {
+                subject: app.as_str().to_owned(),
+                operation: "volume.mount".to_owned(),
+                target_kind: TargetKind::Volume,
+                title: format!("Mounting volume into {app}…"),
+                plan: vec![JobSpec::VolumeMount {
+                    app: app.as_str().to_owned(),
+                    spec: mount.arg(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!(
+                        "Mounted '{}' — restart {app} for the change to take effect.",
+                        mount.arg()
+                    ),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(LIST_PARTIAL_URL.to_owned()),
             },
-            RunCompletion {
-                success_message: format!(
-                    "Mounted '{}' — restart {app} for the change to take effect.",
-                    mount.arg()
-                ),
-                redirect: None,
-                refresh: RunRefresh::None,
-            },
-            Some(LIST_PARTIAL_URL.to_owned()),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::StorageMount {
-            app: app.clone(),
-            mount: mount.clone(),
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!(
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        app.as_str(),
+        "volume.mount",
+        TargetKind::Volume,
+        &[JobSpec::VolumeMount {
+            app: app.as_str().to_owned(),
+            spec: mount.arg(),
+        }],
+        &RunCompletion {
+            success_message: format!(
                 "Mounted '{}' — restart {app} for the change to take effect.",
                 mount.arg()
             ),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to mount volume: {err}"),
-        ),
-    }
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: mount volume into {app}."),
+    );
     Ok(see_other("/volumes"))
 }
 
@@ -327,47 +337,55 @@ pub async fn unmount(
     if is_htmx(&req) {
         return start_action_run(
             &state,
-            app.as_str(),
-            format!("Unmounting volume from {app}…"),
-            DokkuCommand::StorageUnmount {
-                app: app.clone(),
-                mount: mount.clone(),
+            &session,
+            &RunRequest {
+                subject: app.as_str().to_owned(),
+                operation: "volume.unmount".to_owned(),
+                target_kind: TargetKind::Volume,
+                title: format!("Unmounting volume from {app}…"),
+                plan: vec![JobSpec::VolumeUnmount {
+                    app: app.as_str().to_owned(),
+                    locator: mount.arg(),
+                }],
+                completion: RunCompletion {
+                    success_message: format!(
+                        "Unmounted '{}' — restart {app} for the change to take effect.",
+                        mount.locator()
+                    ),
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                refresh_url: Some(LIST_PARTIAL_URL.to_owned()),
             },
-            RunCompletion {
-                success_message: format!(
-                    "Unmounted '{}' — restart {app} for the change to take effect.",
-                    mount.locator()
-                ),
-                redirect: None,
-                refresh: RunRefresh::None,
-            },
-            Some(LIST_PARTIAL_URL.to_owned()),
         )
         .await;
     }
 
-    match state
-        .dokku
-        .exec(&DokkuCommand::StorageUnmount {
-            app: app.clone(),
-            mount: mount.clone(),
-        })
-        .await
-    {
-        Ok(_) => set_flash(
-            &session,
-            FlashLevel::Success,
-            format!(
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        app.as_str(),
+        "volume.unmount",
+        TargetKind::Volume,
+        &[JobSpec::VolumeUnmount {
+            app: app.as_str().to_owned(),
+            locator: mount.arg(),
+        }],
+        &RunCompletion {
+            success_message: format!(
                 "Unmounted '{}' — restart {app} for the change to take effect.",
                 mount.locator()
             ),
-        ),
-        Err(err) => set_flash(
-            &session,
-            FlashLevel::Error,
-            format!("Failed to unmount volume: {err}"),
-        ),
-    }
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: unmount volume from {app}."),
+    );
     Ok(see_other("/volumes"))
 }
 

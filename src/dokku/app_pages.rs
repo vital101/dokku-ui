@@ -20,7 +20,13 @@ pub async fn app_logs(
     app: AppName,
     num_lines: u32,
 ) -> Result<LogLines, DokkuError> {
-    let output = client.exec(&DokkuCommand::Logs { app, num_lines }).await?;
+    let output = client
+        .exec(&DokkuCommand::Logs {
+            app,
+            num_lines,
+            follow: false,
+        })
+        .await?;
     Ok(parse_logs(&output.stdout))
 }
 
@@ -122,6 +128,7 @@ mod tests {
             DokkuCommand::Logs {
                 app: app("alpha"),
                 num_lines: 200,
+                follow: false,
             },
             Ok(DokkuOutput::ok(LOGS)),
         );
@@ -137,6 +144,7 @@ mod tests {
             DokkuCommand::Logs {
                 app: app("alpha"),
                 num_lines: 50,
+                follow: false,
             },
             Ok(DokkuOutput::ok("")),
         );
@@ -144,7 +152,8 @@ mod tests {
         app_logs(&client, app("alpha"), 50).await.expect("logs");
         assert!(client.calls().contains(&DokkuCommand::Logs {
             app: app("alpha"),
-            num_lines: 50
+            num_lines: 50,
+            follow: false,
         }));
     }
 

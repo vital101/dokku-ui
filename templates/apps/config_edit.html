@@ -1,0 +1,27 @@
+{% extends "apps/base_app.html" %}
+
+{% block app_content %}
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Edit environment variables</h3>
+    <p class="mt-2 text-sm text-slate-400">
+      Paste a <code class="font-mono">.env</code>-style listing. Keys you remove are unset;
+      lines that cannot be parsed are rejected. Values with single quotes or line breaks
+      cannot be set over SSH and are rejected.
+    </p>
+    <form method="post" action="/apps/{{ name }}/config" class="mt-4 space-y-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <textarea name="env" rows="14" spellcheck="false"
+                class="w-full rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs text-white">{{ env }}</textarea>
+      <div class="flex items-center justify-end gap-2">
+        <a href="/apps/{{ name }}/config"
+           class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">Cancel</a>
+        <button type="submit"
+                class="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500">
+          Apply changes
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,6 +1,10 @@
 <div class="space-y-6">
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
-    <h3 class="text-sm font-medium text-white">Environment variables</h3>
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Environment variables</h3>
+      <a href="/apps/{{ name }}/config/edit"
+         class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">Edit</a>
+    </div>
     {% if vars.is_empty() %}
     <p class="mt-4 text-sm text-slate-400">No environment variables set.</p>
     {% else %}
@@ -21,6 +25,15 @@
       </tbody>
     </table>
     {% endif %}
-    <p class="mt-4 text-xs text-slate-500">Values are masked. Editing config is not available in v1.</p>
+    <div class="mt-4 flex items-center gap-2">
+      <form method="post" action="/apps/{{ name }}/config/reveal" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit"
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Reveal values
+        </button>
+      </form>
+      <p class="text-xs text-slate-500">Revealing and editing require re-authentication.</p>
+    </div>
   </div>
 </div>

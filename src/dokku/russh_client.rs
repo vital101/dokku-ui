@@ -14,6 +14,8 @@ use crate::settings::Settings;
 use super::client::{DokkuClient, DokkuError, DokkuOutput};
 
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often a streaming channel checks whether its viewer dropped.
+const CHANNEL_POLL: Duration = Duration::from_millis(100);
 
 type Session = Arc<client::Handle<HostKeyHandler>>;
 
@@ -119,7 +121,11 @@ impl RusshClient {
         let output = match Self::exec_on_channel(channel, command, sink).await {
             Ok(output) => output,
             Err(err) => {
-                self.invalidate_if_current(&session).await;
+                // A viewer-disconnect abort is expected and specific to the
+                // channel; everything else suggests the session went stale.
+                if !matches!(err, DokkuError::StreamClosed) {
+                    self.invalidate_if_current(&session).await;
+                }
                 return Err(err);
             }
         };
@@ -139,24 +145,65 @@ impl RusshClient {
         let mut stdout = String::new();
         let mut stderr = String::new();
         let mut exit_code = -1;
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { data } => {
-                    let text = String::from_utf8_lossy(&data).into_owned();
-                    stdout.push_str(&text);
-                    if let Some(sink) = &sink {
-                        let _ = sink.send(text).await;
+        if let Some(sink) = &sink {
+            // Live streams (log tails): poll the channel for messages, but
+            // bound each wait with `CHANNEL_POLL` so the mpsc channel's
+            // closure is noticed — when the streaming viewer drops the
+            // receiver, `is_closed()` flips and we abort this channel. The
+            // shared session stays up for other commands.
+            loop {
+                match tokio::time::timeout(CHANNEL_POLL, channel.wait()).await {
+                    Ok(Some(msg)) => {
+                        // The viewer may have dropped while this message was
+                        // in flight; abort before forwarding anything more.
+                        if sink.is_closed() {
+                            // Dropping a russh channel sends nothing to the
+                            // remote — an explicit close is what ends the
+                            // remote tail process.
+                            let _ = channel.close().await;
+                            return Err(DokkuError::StreamClosed);
+                        }
+                        match msg {
+                            ChannelMsg::Data { data } => {
+                                let text = String::from_utf8_lossy(&data).into_owned();
+                                stdout.push_str(&text);
+                                let _ = sink.send(text).await;
+                            }
+                            ChannelMsg::ExtendedData { data, .. } => {
+                                let text = String::from_utf8_lossy(&data).into_owned();
+                                stderr.push_str(&text);
+                                let _ = sink.send(text).await;
+                            }
+                            ChannelMsg::ExitStatus { exit_status } => {
+                                exit_code = exit_status as i32
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        if sink.is_closed() {
+                            // Dropping a russh channel sends nothing to the
+                            // remote — an explicit close is what ends the
+                            // remote tail process.
+                            let _ = channel.close().await;
+                            return Err(DokkuError::StreamClosed);
+                        }
                     }
                 }
-                ChannelMsg::ExtendedData { data, .. } => {
-                    let text = String::from_utf8_lossy(&data).into_owned();
-                    stderr.push_str(&text);
-                    if let Some(sink) = &sink {
-                        let _ = sink.send(text).await;
+            }
+        } else {
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => {
+                        stdout.push_str(&String::from_utf8_lossy(&data));
                     }
+                    ChannelMsg::ExtendedData { data, .. } => {
+                        stderr.push_str(&String::from_utf8_lossy(&data));
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
+                    _ => {}
                 }
-                ChannelMsg::ExitStatus { exit_status } => exit_code = exit_status as i32,
-                _ => {}
             }
         }
 

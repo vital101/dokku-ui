@@ -71,6 +71,15 @@ impl server::Handler for FakeDokku {
                 session.data(channel, "1:M ready\n")?;
                 session.exit_status_request(channel, 0)?;
             }
+            // A follow-style command: writes, waits, writes again — the
+            // viewer-drop window.
+            "logs myapp --tail --num 200" => {
+                session.data(channel, "line one\n")?;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                session.data(channel, "line two\n")?;
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                session.exit_status_request(channel, 0)?;
+            }
             "ps:restart myapp" => {
                 session.data(channel, "-----> restarting\n")?;
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -140,6 +149,48 @@ async fn executes_command_and_reads_stdout() {
         parse_apps_list(&output.stdout),
         vec!["myapp".to_owned(), "api.internal".to_owned()]
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn viewer_disconnect_aborts_the_channel_but_keeps_the_session() {
+    let (addr, server, _connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+
+    // The viewer is gone before the stream starts — exactly what happens when
+    // a browser closes a live-log tab mid-tail. Dropping the receiver flips
+    // the client's `is_closed()`; the next poll aborts the channel.
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+    drop(rx);
+    let exec = tokio::spawn(async move {
+        let err = client
+            .exec_streaming(
+                &DokkuCommand::Logs {
+                    app: dokku_ui::domain::AppName::try_from("myapp").expect("app name"),
+                    num_lines: 200,
+                    follow: true,
+                },
+                tx,
+            )
+            .await;
+        // The shared session survives the abort: the next command still works.
+        let session_ok = matches!(&err, Err(dokku_ui::dokku::DokkuError::StreamClosed))
+            && client.exec(&DokkuCommand::AppsList).await.ok().is_some();
+        (err, session_ok)
+    });
+
+    let (err, session_ok) = exec.await.expect("exec finished");
+    assert!(
+        matches!(&err, Err(dokku_ui::dokku::DokkuError::StreamClosed)),
+        "{err:?}"
+    );
+    assert!(session_ok, "the shared session survives the channel abort");
 
     server.abort();
 }

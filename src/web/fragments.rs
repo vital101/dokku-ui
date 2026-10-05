@@ -1,12 +1,12 @@
-use std::time::Duration;
-
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse};
 use askama::Template;
 
+use crate::dokku::workers::{DEFAULT_MAX_ATTEMPTS, spawn_job_executor};
 use crate::domain::command::DokkuCommand;
+use crate::domain::job::{CompletionRefresh, CompletionSpec, JobPayload, JobSpec};
 use crate::error::AppError;
-use crate::storage::runs::RunOutcome;
+use crate::storage::runs::{Actor, NewRun, RunOutcome, TargetKind};
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::render::render;
@@ -54,6 +54,7 @@ pub(super) fn is_htmx(req: &HttpRequest) -> bool {
     req.headers().contains_key("HX-Request")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RunRefresh {
     Reports,
     All,
@@ -63,88 +64,178 @@ pub(super) enum RunRefresh {
     None,
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct RunCompletion {
     pub(super) success_message: String,
     pub(super) redirect: Option<String>,
     pub(super) refresh: RunRefresh,
 }
 
-/// How often the run task heartbeats while its command is in flight — an
-/// output-silent-but-alive build must never cross `ORPHAN_AFTER_SECS`.
-const RUN_HEARTBEAT: Duration = Duration::from_secs(60);
+/// The audit dimensions a handler declares when starting a run.
+#[derive(Debug, Clone)]
+pub(super) struct RunRequest {
+    /// Target name: app name, service name, or volume entry.
+    pub(super) subject: String,
+    /// Stable machine key, e.g. `app.restart`, `service.create`.
+    pub(super) operation: String,
+    pub(super) target_kind: TargetKind,
+    pub(super) title: String,
+    /// The commands to run, as a validated, serializable job plan.
+    pub(super) plan: Vec<JobSpec>,
+    pub(super) completion: RunCompletion,
+    pub(super) refresh_url: Option<String>,
+}
 
-/// Starts `command`, streaming its output into the persisted run line by line.
-/// On completion refreshes the snapshot and records the outcome the SSE
-/// stream delivers. Any process can serve the stream, not just this one.
-pub(super) fn spawn_run(
-    state: AppState,
-    subject: String,
-    run_id: String,
+/// Attributes the run to the session's user when possible; a missing or stale
+/// session degrades to a system run so the action itself never blocks on audit.
+pub(super) async fn current_actor(state: &AppState, session: &Session) -> Actor {
+    match current_user(state, session).await {
+        Ok(user) => Actor {
+            user_id: Some(user.id),
+            email: Some(user.email),
+        },
+        Err(_) => Actor {
+            user_id: None,
+            email: None,
+        },
+    }
+}
+
+fn completion_spec(completion: &RunCompletion) -> CompletionSpec {
+    let refresh = match completion.refresh {
+        RunRefresh::Reports => CompletionRefresh::Reports,
+        RunRefresh::All => CompletionRefresh::All,
+        RunRefresh::None => CompletionRefresh::None,
+    };
+    CompletionSpec {
+        success_message: completion.success_message.clone(),
+        redirect: completion.redirect.clone(),
+        refresh,
+    }
+}
+
+fn job_payload(plan: &[JobSpec], completion: &RunCompletion) -> JobPayload {
+    JobPayload {
+        plan: plan.to_vec(),
+        completion: completion_spec(completion),
+    }
+}
+
+fn max_attempts(plan: &[JobSpec]) -> usize {
+    if plan.iter().any(JobSpec::is_destructive) {
+        1
+    } else {
+        DEFAULT_MAX_ATTEMPTS
+    }
+}
+
+/// Registers a run + its job, spawns an executor for prompt execution, and
+/// returns the streaming modal fragment. The job is persisted in SQLite, so a
+/// dead process never loses it — another container's worker reclaims it.
+pub(super) async fn start_action_run(
+    state: &AppState,
+    session: &Session,
+    request: &RunRequest,
+) -> Result<HttpResponse, AppError> {
+    // A SQLite failure here must not return 4xx/5xx: htmx does not swap
+    // those, so the modal would spin forever. Render a 200 error card instead.
+    let run_id = match enqueue_action_run(
+        state,
+        session,
+        &request.subject,
+        &request.operation,
+        request.target_kind,
+        &request.plan,
+        &request.completion,
+    )
+    .await
+    {
+        Ok(run_id) => run_id,
+        Err(err) => return modal_error(err.to_string()),
+    };
+    render(&RunPartial {
+        run_url: format!("/actions/runs/{run_id}/events"),
+        title: request.title.clone(),
+        refresh_url: request.refresh_url.clone(),
+    })
+}
+
+/// Persists a run + its job and spawns an executor. Returns the run id. The
+/// no-JS paths call this directly and redirect with a "queued" flash.
+pub(super) async fn enqueue_action_run(
+    state: &AppState,
+    session: &Session,
+    subject: &str,
+    operation: &str,
+    target_kind: TargetKind,
+    plan: &[JobSpec],
+    completion: &RunCompletion,
+) -> Result<String, AppError> {
+    let actor = current_actor(state, session).await;
+    let run_id = state
+        .action_runs
+        .insert_with(&NewRun {
+            subject: subject.to_owned(),
+            operation: operation.to_owned(),
+            target_kind,
+            actor,
+            parent_run_id: None,
+        })
+        .await?;
+    let job_id = state
+        .jobs
+        .enqueue(&run_id, &job_payload(plan, completion), max_attempts(plan))
+        .await?;
+    spawn_job_executor(state.clone(), job_id.clone(), job_id);
+    Ok(run_id)
+}
+
+/// Runs a mutating command synchronously (the no-JS create paths, whose
+/// redirect target must already exist), recording a completed run for the
+/// audit trail with the command's stdout as its lines. Audit writes are
+/// best-effort: a failure to record never blocks the action.
+pub(super) async fn run_synchronously(
+    state: &AppState,
+    session: &Session,
+    subject: &str,
+    operation: &str,
+    target_kind: TargetKind,
     command: DokkuCommand,
-    completion: RunCompletion,
-) {
-    tokio::spawn(async move {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
-        let repo = state.action_runs.clone();
-        let line_run_id = run_id.clone();
-        let line_task = tokio::spawn(async move {
-            let mut seq = 0i64;
-            let mut partial = String::new();
-            while let Some(chunk) = rx.recv().await {
-                partial.push_str(&chunk);
-                while let Some(pos) = partial.find('\n') {
-                    let line: String = partial.drain(..=pos).collect();
-                    let line = line.trim_end_matches(['\n', '\r']).to_owned();
-                    if let Err(err) = repo.append_line(&line_run_id, seq as usize, &line).await {
-                        tracing::warn!(error = %err, "failed to persist run line");
-                    }
-                    seq += 1;
-                }
-            }
-            let rest = partial.trim_end_matches(['\n', '\r']);
-            if !rest.is_empty() {
-                if let Err(err) = repo.append_line(&line_run_id, seq as usize, rest).await {
-                    tracing::warn!(error = %err, "failed to persist run line");
-                }
-            }
-        });
+    success_message: &str,
+) -> Result<crate::dokku::DokkuOutput, crate::dokku::DokkuError> {
+    let actor = current_actor(state, session).await;
+    let mut run_id: Option<String> = None;
+    if let Ok(id) = state
+        .action_runs
+        .insert_with(&NewRun {
+            subject: subject.to_owned(),
+            operation: operation.to_owned(),
+            target_kind,
+            actor,
+            parent_run_id: None,
+        })
+        .await
+    {
+        run_id = Some(id);
+    } else {
+        tracing::warn!("failed to record audit run for {operation}");
+    }
 
-        let heartbeat_repo = state.action_runs.clone();
-        let heartbeat_run_id = run_id.clone();
-        let heartbeat = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(RUN_HEARTBEAT).await;
-                if let Err(err) = heartbeat_repo.touch(&heartbeat_run_id).await {
-                    tracing::warn!(error = %err, "run heartbeat failed");
+    let result = state.dokku.exec(&command).await;
+    if let Some(run_id) = run_id {
+        if let Ok(output) = &result {
+            for (seq, line) in output.stdout.lines().enumerate() {
+                if let Err(err) = state.action_runs.append_line(&run_id, seq, line, &[]).await {
+                    tracing::warn!(error = %err, "failed to persist audit line");
                 }
             }
-        });
-
-        let result = state.dokku.exec_streaming(&command, tx).await;
-        heartbeat.abort();
-        let _ = line_task.await;
-
-        let outcome = match result {
-            Ok(_) => {
-                match completion.refresh {
-                    RunRefresh::Reports => {
-                        if let Err(err) = state.snapshot.refresh_app_reports(&subject).await {
-                            tracing::warn!(error = %err, "snapshot refresh after action failed");
-                        }
-                    }
-                    RunRefresh::All => {
-                        if let Err(err) = state.snapshot.refresh().await {
-                            tracing::warn!(error = %err, "snapshot refresh after destroy failed");
-                        }
-                    }
-                    RunRefresh::None => {}
-                }
-                RunOutcome {
-                    ok: true,
-                    message: completion.success_message,
-                    redirect: completion.redirect,
-                }
-            }
+        }
+        let outcome = match &result {
+            Ok(_) => RunOutcome {
+                ok: true,
+                message: success_message.to_owned(),
+                redirect: None,
+            },
             Err(err) => RunOutcome {
                 ok: false,
                 message: err.to_string(),
@@ -152,33 +243,10 @@ pub(super) fn spawn_run(
             },
         };
         if let Err(err) = state.action_runs.finish(&run_id, &outcome).await {
-            tracing::warn!(error = %err, "failed to persist run outcome");
+            tracing::warn!(error = %err, "failed to persist audit outcome");
         }
-    });
-}
-
-/// Registers a run, spawns the command, and returns the streaming modal fragment.
-pub(super) async fn start_action_run(
-    state: &AppState,
-    subject: &str,
-    title: String,
-    command: DokkuCommand,
-    completion: RunCompletion,
-    refresh_url: Option<String>,
-) -> Result<HttpResponse, AppError> {
-    let run_id = state.action_runs.insert(subject).await?;
-    spawn_run(
-        state.clone(),
-        subject.to_owned(),
-        run_id.clone(),
-        command,
-        completion,
-    );
-    render(&RunPartial {
-        run_url: format!("/actions/runs/{run_id}/events"),
-        title,
-        refresh_url,
-    })
+    }
+    result
 }
 
 pub(super) async fn current_user(

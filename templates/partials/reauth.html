@@ -1,0 +1,20 @@
+<div data-modal-error class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+  <h3 class="text-sm font-medium text-white">Verify your password</h3>
+  {% if let Some(error) = error %}
+  <p class="mt-3 text-sm text-red-400">{{ error }}</p>
+  {% endif %}
+  <form class="mt-4 space-y-4"
+        hx-post="/reauth" hx-target="#modal-content" hx-swap="innerHTML" method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div>
+      <label for="reauth-password" class="mb-1 block text-sm text-slate-400">Password</label>
+      <input id="reauth-password" type="password" name="password" required autofocus
+             class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+    </div>
+    <button type="submit"
+            class="w-full rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+      Verify
+    </button>
+  </form>
+</div>

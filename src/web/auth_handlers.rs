@@ -49,7 +49,7 @@ pub struct SetupForm {
     confirm: String,
 }
 
-fn safe_next(next: &str) -> String {
+pub(super) fn safe_next(next: &str) -> String {
     if next.starts_with('/') && !next.starts_with("//") {
         next.to_owned()
     } else {
