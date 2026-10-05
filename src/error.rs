@@ -33,6 +33,10 @@ impl From<crate::dokku::snapshot::SnapshotError> for AppError {
         match err {
             crate::dokku::snapshot::SnapshotError::Dokku(dokku_err) => AppError::Dokku(dokku_err),
             crate::dokku::snapshot::SnapshotError::AppNotFound(_) => AppError::NotFound,
+            crate::dokku::snapshot::SnapshotError::Database(db_err) => AppError::Database(db_err),
+            crate::dokku::snapshot::SnapshotError::Serialize(err) => {
+                AppError::Internal(err.to_string())
+            }
         }
     }
 }

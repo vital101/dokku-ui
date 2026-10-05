@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PsReport {
     pub deployed: bool,
     pub running: bool,
@@ -7,13 +9,13 @@ pub struct PsReport {
     pub can_scale: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessStatus {
     pub process_type: String,
     pub state: ProcessState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProcessState {
     Running,
     Stopped,
@@ -80,7 +82,7 @@ pub struct ResourceReport {
 }
 
 /// A service (datastore) linked to an app.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceLink {
     pub plugin: String,
     pub service: String,
@@ -454,7 +456,7 @@ pub struct StorageEntry {
 }
 
 /// Summary of the most recent build for an app, from `builds:report --format json`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildInfo {
     pub status: String,
     pub exit_code: String,
@@ -566,7 +568,7 @@ impl AppHealth {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppInfo {
     pub name: String,
     pub created_at: String,
@@ -578,7 +580,7 @@ pub struct AppInfo {
     pub dns_record_exists: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageStatus {
     None,
     Built,

@@ -4,7 +4,7 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 
 use common::{
-    complete_setup, form_request, get_body, location, response_cookie,
+    complete_setup, form_request, get_body, location, response_cookie, run_url,
     test_state_with_shared_client,
 };
 
@@ -240,11 +240,11 @@ async fn hx_volume_mount_streams_and_refreshes_list() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = get_body(resp).await;
 
-    assert!(body.contains(r#"data-run-url="/actions/runs/1/events""#));
+    assert!(body.contains(r#"data-run-url="/actions/runs/"#), "{body}");
     assert!(body.contains(r#"data-refresh="/volumes/partials/list""#));
     assert!(body.contains("Mounting volume into alpha"));
 
-    let events = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let events = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(
         events.contains("event: line\ndata: -----> mounted"),
         "{events}"
@@ -332,7 +332,7 @@ async fn hx_volume_unmount_streams_with_the_locator() {
     let body = get_body(resp).await;
     assert!(body.contains("Unmounting volume from dokku-ui"));
 
-    let events = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let events = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(events.contains(r#""ok":true"#), "{events}");
     assert!(client.calls().contains(&DokkuCommand::StorageUnmount {
         app: app_name("dokku-ui"),

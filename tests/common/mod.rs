@@ -11,10 +11,11 @@ use actix_web::http::header::{CONTENT_TYPE, LOCATION};
 use actix_web::test;
 
 use dokku_ui::auth::password::hash_password;
-use dokku_ui::dokku::{ActionRuns, DokkuClient, FakeResolver, MockClient, SnapshotStore};
+use dokku_ui::dokku::{DokkuClient, FakeResolver, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
+use dokku_ui::storage::runs::SqliteRunsRepo;
 use dokku_ui::storage::users::{SqliteUsersRepo, UsersRepo};
 use dokku_ui::web::AppState;
 
@@ -45,18 +46,82 @@ pub async fn test_state_with_shared_client(
     let snapshot = Arc::new(SnapshotStore::with_resolver(
         dokku.clone(),
         Arc::new(FakeResolver::none()),
+        pool.clone(),
     ));
     (
         AppState {
+            action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
             db: pool,
             settings,
             dokku,
             snapshot,
-            action_runs: Arc::new(ActionRuns::new()),
         },
         client_arc,
         dir,
     )
+}
+
+/// Two fully independent `AppState`s sharing one SQLite database file and
+/// separate `MockClient`s — the same topology as two dokku containers behind
+/// the proxy. Used to prove horizontal-scalability invariants.
+pub struct TestStatePair {
+    pub a: AppState,
+    pub b: AppState,
+    pub client_a: Arc<MockClient>,
+    pub client_b: Arc<MockClient>,
+    pub _dir: tempfile::TempDir,
+}
+
+pub async fn test_state_pair(client_a: MockClient, client_b: MockClient) -> TestStatePair {
+    let client_a = Arc::new(client_a);
+    let client_b = Arc::new(client_b);
+    let (a, b, dir) = states_over_shared_db(client_a.clone(), client_b.clone()).await;
+    TestStatePair {
+        a,
+        b,
+        client_a,
+        client_b,
+        _dir: dir,
+    }
+}
+
+/// Two fully independent `AppState`s sharing one SQLite database file, built
+/// from arbitrary `DokkuClient`s (mock or wrapper). Same topology as two dokku
+/// containers behind the proxy.
+pub async fn states_over_shared_db(
+    client_a: Arc<dyn DokkuClient>,
+    client_b: Arc<dyn DokkuClient>,
+) -> (AppState, AppState, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let database_url = format!("sqlite://{}/pair.db", dir.path().display());
+    let pool = storage::connect(&database_url).await.expect("connect db");
+    let settings = Settings::from_map(&HashMap::new()).expect("default settings");
+
+    let make_state = |client: Arc<dyn DokkuClient>| {
+        let snapshot = Arc::new(SnapshotStore::with_resolver(
+            client.clone(),
+            Arc::new(FakeResolver::none()),
+            pool.clone(),
+        ));
+        AppState {
+            action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
+            db: pool.clone(),
+            settings: settings.clone(),
+            dokku: client,
+            snapshot,
+        }
+    };
+
+    (make_state(client_a), make_state(client_b), dir)
+}
+
+/// Extracts the `data-run-url` value from a run fragment response body.
+pub fn run_url(html: &str) -> String {
+    let marker = r#"data-run-url=""#;
+    let start = html.find(marker).expect("run url in fragment") + marker.len();
+    let rest = &html[start..];
+    let end = rest.find('"').expect("closing quote");
+    rest[..end].to_owned()
 }
 
 pub async fn seed_user(state: &AppState, email: &str, password: &str) {

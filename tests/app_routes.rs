@@ -7,17 +7,18 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 
 use common::{
-    complete_setup, extract_csrf, form_request, get_body, location, response_cookie, seed_user,
-    test_state, test_state_with_client,
+    complete_setup, extract_csrf, form_request, get_body, location, response_cookie, run_url,
+    seed_user, test_state, test_state_with_client,
 };
 
 use dokku_ui::dokku::{
-    ActionRuns, DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient, SnapshotStore,
+    DokkuClient, DokkuError, DokkuOutput, FakeResolver, MockClient, SnapshotStore,
 };
 use dokku_ui::domain::AppName;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
+use dokku_ui::storage::runs::SqliteRunsRepo;
 use dokku_ui::web::{AppState, build_app};
 
 fn app_name(name: &str) -> AppName {
@@ -71,14 +72,15 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
     let snapshot = Arc::new(SnapshotStore::with_resolver(
         dokku.clone(),
         Arc::new(FakeResolver::all()),
+        pool.clone(),
     ));
     (
         AppState {
+            action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
             db: pool,
             settings,
             dokku,
             snapshot,
-            action_runs: Arc::new(ActionRuns::new()),
         },
         client_arc,
         dir,
@@ -1963,8 +1965,9 @@ async fn hx_restart_returns_run_fragment_and_streams_output() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = get_body(resp).await;
+    let run_url = run_url(&body);
     assert!(
-        body.contains(r#"data-run-url="/actions/runs/1/events""#),
+        run_url.starts_with("/actions/runs/") && run_url.ends_with("/events"),
         "run fragment points at the SSE stream: {body}"
     );
     assert!(body.contains(r#"data-refresh="/apps/alpha/partials/overview""#));
@@ -1972,7 +1975,7 @@ async fn hx_restart_returns_run_fragment_and_streams_output() {
     assert!(body.contains("data-run-log"));
     assert!(!body.contains("<!doctype html>"), "fragment, not a page");
 
-    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, &run_url, &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         events.contains("event: line\ndata: -----> restarting\n\n"),
@@ -2017,7 +2020,7 @@ async fn hx_action_failure_streams_error_outcome() {
     let body = get_body(resp).await;
     assert!(body.contains("Starting alpha"), "{body}");
 
-    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(events.contains(r#""ok":false"#), "{events}");
     assert!(events.contains("no such app"), "{events}");
@@ -2085,7 +2088,7 @@ async fn hx_scale_returns_run_fragment_targeting_processes() {
     );
     assert!(body.contains("Scaling alpha"), "{body}");
 
-    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(events.contains(r#""ok":true"#), "{events}");
     assert!(events.contains("Scaled"), "{events}");
@@ -2157,7 +2160,7 @@ async fn hx_destroy_streams_and_redirects_home_on_done() {
         "destroy has no fragment to refresh"
     );
 
-    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(events.contains(r#""ok":true"#), "{events}");
     assert!(events.contains(r#""redirect":"/""#), "{events}");
@@ -2213,6 +2216,11 @@ async fn action_events_404s_unknown_run() {
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
 
-    let (status, _) = sse_events(&app, "/actions/runs/99/events", &cookie).await;
+    let (status, _) = sse_events(
+        &app,
+        &format!("/actions/runs/{}/events", "9".repeat(64)),
+        &cookie,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "unknown run");
 }

@@ -4,7 +4,7 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 
 use common::{
-    complete_setup, extract_csrf, form_request, get_body, location, response_cookie,
+    complete_setup, extract_csrf, form_request, get_body, location, response_cookie, run_url,
     test_state_with_shared_client,
 };
 
@@ -457,12 +457,12 @@ async fn hx_service_start_returns_run_fragment_and_streams_output() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = get_body(resp).await;
-    assert!(body.contains(r#"data-run-url="/actions/runs/1/events""#));
+    assert!(body.contains(r#"data-run-url="/actions/runs/"#), "{body}");
     assert!(body.contains(r#"data-refresh="/services/redis/candid/partials/overview""#));
     assert!(body.contains("Starting candid"));
     assert!(body.contains("data-run-log"));
 
-    let (status, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (status, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         events.contains("event: line\ndata: -----> starting"),
@@ -632,7 +632,7 @@ async fn hx_service_destroy_streams_and_redirects_to_list() {
     assert!(body.contains("Destroying candid"));
     assert!(!body.contains("data-refresh"), "destroy redirects instead");
 
-    let (_, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(
         events.contains(r#""redirect":"/services/redis""#),
         "{events}"
@@ -705,7 +705,7 @@ async fn hx_service_expose_and_unexpose_stream() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("Exposing candid"));
-    let (_, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(events.contains(r#""ok":true"#), "{events}");
 
     let csrf = service_shell_csrf(&app, &cookie).await;
@@ -721,7 +721,7 @@ async fn hx_service_expose_and_unexpose_stream() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("Unexposing candid"));
-    let (_, events) = sse_events(&app, "/actions/runs/2/events", &cookie).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(events.contains(r#""ok":true"#), "{events}");
 
     assert!(client.calls().contains(&DokkuCommand::ServiceExpose {
@@ -784,7 +784,7 @@ async fn hx_service_link_validates_app_and_streams() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("Linking candid to alpha"));
-    let (_, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(events.contains(r#""ok":true"#), "{events}");
 
     let csrf = service_shell_csrf(&app, &cookie).await;
@@ -800,7 +800,7 @@ async fn hx_service_link_validates_app_and_streams() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("Unlinking candid from alpha"));
-    let (_, events) = sse_events(&app, "/actions/runs/2/events", &cookie).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(events.contains(r#""ok":true"#), "{events}");
 
     assert!(client.calls().contains(&DokkuCommand::ServiceLink {
@@ -875,7 +875,7 @@ async fn hx_create_service_streams_and_redirects_to_detail() {
     assert!(body.contains("Creating cache"));
     assert!(!body.contains("data-refresh"), "create redirects instead");
 
-    let (_, events) = sse_events(&app, "/actions/runs/1/events", &cookie).await;
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
     assert!(
         events.contains("event: line\ndata: -----> pulling image"),
         "{events}"

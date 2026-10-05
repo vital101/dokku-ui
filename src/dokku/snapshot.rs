@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
@@ -12,14 +14,16 @@ use crate::domain::parse::{
     parse_ps_report, parse_service_plugins,
 };
 use crate::domain::types::{AppInfo, BuildInfo, ImageStatus, PsReport, ServiceLink};
+use crate::storage::snapshots::{SqliteSnapshots, StoredSnapshot, now_ms};
 
 use super::client::{DokkuClient, DokkuError};
 use super::dns::{DnsResolver, TokioResolver, dns_record_status};
 
 const MAX_CONCURRENT_REPORTS: usize = 4;
 
-/// In-memory, parsed view of the dokku host. A background task keeps this warm so
-/// request handlers never block on SSH; reads are an `Arc` clone.
+/// Parsed view of the dokku host, published to a shared SQLite row so every
+/// process serves the same data. A background task keeps it warm so request
+/// handlers never block on SSH; reads load and parse the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub fetched_at: Instant,
@@ -52,6 +56,10 @@ pub enum SnapshotError {
     Dokku(#[from] DokkuError),
     #[error("app `{0}` was not found")]
     AppNotFound(String),
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("snapshot serialization error: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 impl SnapshotError {
@@ -221,41 +229,128 @@ pub(super) async fn fetch_service_plugins(client: &dyn DokkuClient) -> Option<Ve
         .map(|output| parse_service_plugins(&output.stdout))
 }
 
-/// Owns the published snapshot. All mutations are serialized through `write_lock` so a
-/// background full refresh and a per-app refresh can never interleave and lose an update.
+/// JSON payload persisted in the singleton `snapshots` row. `fetched_at`
+/// travels as a separate epoch column so `age()` survives the round trip.
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotPayload {
+    apps: Vec<String>,
+    ps_reports: HashMap<String, Option<PsReport>>,
+    apps_reports: HashMap<String, Option<AppInfo>>,
+}
+
+fn now_epoch() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+fn stored_from_snapshot(snapshot: &Snapshot) -> Result<StoredSnapshot, serde_json::Error> {
+    let payload = SnapshotPayload {
+        apps: snapshot.apps.clone(),
+        ps_reports: snapshot.ps_reports.clone(),
+        apps_reports: snapshot.apps_reports.clone(),
+    };
+    let fetched_at = now_epoch().saturating_sub(snapshot.fetched_at.elapsed().as_secs() as i64);
+    Ok(StoredSnapshot::new(
+        serde_json::to_string(&payload)?,
+        fetched_at,
+    ))
+}
+
+fn snapshot_from_stored(stored: &StoredSnapshot) -> Result<Snapshot, serde_json::Error> {
+    let payload: SnapshotPayload = serde_json::from_str(&stored.data)?;
+    let elapsed = (now_epoch() - stored.fetched_at).max(0) as u64;
+    let fetched_at = Instant::now()
+        .checked_sub(Duration::from_secs(elapsed))
+        .unwrap_or_else(Instant::now);
+    Ok(Snapshot {
+        fetched_at,
+        apps: payload.apps,
+        ps_reports: payload.ps_reports,
+        apps_reports: payload.apps_reports,
+    })
+}
+
+fn empty_snapshot() -> Snapshot {
+    Snapshot {
+        fetched_at: Instant::now(),
+        apps: Vec::new(),
+        ps_reports: HashMap::new(),
+        apps_reports: HashMap::new(),
+    }
+}
+
+/// Publishes the snapshot to a singleton SQLite row every process reads, so a
+/// mutation on one container is visible to all. All SSH work happens before
+/// the row write; per-app patches run under a short `BEGIN IMMEDIATE` txn so
+/// concurrent patches from different processes never lose an update.
 pub struct SnapshotStore {
     client: Arc<dyn DokkuClient>,
     dns: Arc<dyn DnsResolver>,
-    current: RwLock<Option<Arc<Snapshot>>>,
+    snapshots: SqliteSnapshots,
     write_lock: Mutex<()>,
 }
 
 impl SnapshotStore {
-    pub fn new(client: Arc<dyn DokkuClient>) -> Self {
-        Self::with_resolver(client, Arc::new(TokioResolver::default()))
+    pub fn new(client: Arc<dyn DokkuClient>, pool: SqlitePool) -> Self {
+        Self::with_resolver(client, Arc::new(TokioResolver::default()), pool)
     }
 
-    pub fn with_resolver(client: Arc<dyn DokkuClient>, dns: Arc<dyn DnsResolver>) -> Self {
+    pub fn with_resolver(
+        client: Arc<dyn DokkuClient>,
+        dns: Arc<dyn DnsResolver>,
+        pool: SqlitePool,
+    ) -> Self {
         Self {
             client,
             dns,
-            current: RwLock::new(None),
+            snapshots: SqliteSnapshots::new(pool),
             write_lock: Mutex::new(()),
         }
     }
 
+    /// Reads the shared row. A corrupt row degrades to `None` (the next
+    /// `ensure_loaded` rebuilds it) and a load failure logs and degrades the
+    /// same way rather than taking the UI down.
     pub async fn current(&self) -> Option<Arc<Snapshot>> {
-        self.current.read().await.clone()
+        match self.snapshots.load().await {
+            Ok(Some(stored)) => match snapshot_from_stored(&stored) {
+                Ok(snapshot) => Some(Arc::new(snapshot)),
+                Err(err) => {
+                    tracing::warn!(error = %err, "snapshot row is corrupt; it will be rebuilt");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(error = %err, "snapshot load failed");
+                None
+            }
+        }
     }
 
-    pub async fn refresh(&self) -> Result<Arc<Snapshot>, DokkuError> {
+    /// Full rebuild, published to the shared row unless the row was modified
+    /// after this build started (a per-app patch from another process —
+    /// e.g. a restart that just completed — must not be clobbered with the
+    /// pre-action state this pass observed). Used by the background refresher
+    /// and the manual refresh button; a published pass is immediately
+    /// visible to every process.
+    pub async fn refresh(&self) -> Result<Arc<Snapshot>, SnapshotError> {
         let _guard = self.write_lock.lock().await;
-        self.refresh_locked().await
+        let build_started = now_ms();
+        let snapshot = build_snapshot(self.client.as_ref()).await?;
+        let stored = stored_from_snapshot(&snapshot)?;
+        if !self
+            .snapshots
+            .save_if_unmodified_since(&stored, build_started)
+            .await?
+        {
+            tracing::debug!("snapshot row was modified while refreshing; keeping the newer row");
+        }
+        Ok(Arc::new(snapshot))
     }
 
-    /// Cold-start path: if nothing is published yet, build one synchronously so the first
-    /// request still works (and still surfaces ssh failures like before).
-    pub async fn ensure_loaded(&self) -> Result<Arc<Snapshot>, DokkuError> {
+    /// Cold-start path: serve the shared row if any container has published
+    /// one (no SSH at all), otherwise build and publish.
+    pub async fn ensure_loaded(&self) -> Result<Arc<Snapshot>, SnapshotError> {
         if let Some(snapshot) = self.current().await {
             return Ok(snapshot);
         }
@@ -263,84 +358,111 @@ impl SnapshotStore {
         if let Some(snapshot) = self.current().await {
             return Ok(snapshot);
         }
-        self.refresh_locked().await
+        let build_started = now_ms();
+        let snapshot = build_snapshot(self.client.as_ref()).await?;
+        let stored = stored_from_snapshot(&snapshot)?;
+        if !self
+            .snapshots
+            .save_if_unmodified_since(&stored, build_started)
+            .await?
+        {
+            // Another container published (or healed the row) while we built;
+            // serve theirs.
+            if let Some(snapshot) = self.current().await {
+                return Ok(snapshot);
+            }
+        }
+        Ok(Arc::new(snapshot))
     }
 
     /// Refreshes a single app (or removes it if dokku no longer lists it), including
     /// the build/domain/link detail pass. Used by the on-demand overview fragment and
-    /// as the live fallback when an app is not in the snapshot.
-    pub async fn refresh_app(&self, name: &str) -> Result<(), DokkuError> {
+    /// as the live fallback when an app is not in the snapshot. The patch applies to
+    /// the latest shared row, so sibling apps refreshed by other processes survive.
+    pub async fn refresh_app(&self, name: &str) -> Result<(), SnapshotError> {
         self.refresh_app_inner(name, true).await
     }
 
     /// Cheap variant for mutating actions: syncs only `ps:report`/`apps:report` state
     /// so the dashboard reflects the change. The heavy per-app details are fetched by
     /// the overview fragment when the page is (re)loaded, not here.
-    pub async fn refresh_app_reports(&self, name: &str) -> Result<(), DokkuError> {
+    pub async fn refresh_app_reports(&self, name: &str) -> Result<(), SnapshotError> {
         self.refresh_app_inner(name, false).await
     }
 
-    async fn refresh_app_inner(&self, name: &str, details: bool) -> Result<(), DokkuError> {
+    async fn refresh_app_inner(&self, name: &str, details: bool) -> Result<(), SnapshotError> {
         let _guard = self.write_lock.lock().await;
 
         let output = self.client.exec(&DokkuCommand::AppsList).await?;
         let names = parse_apps_list(&output.stdout);
+        let still_listed = names.iter().any(|listed| listed == name);
 
-        if !names.iter().any(|listed| listed == name) {
-            self.mutate(|snapshot| {
-                snapshot.apps.retain(|app| app != name);
-                snapshot.ps_reports.remove(name);
-                snapshot.apps_reports.remove(name);
-            })
-            .await;
-            return Ok(());
-        }
-
-        let (ps, info) = match AppName::try_from(name.to_owned()) {
-            Ok(app) => {
-                let ps = self
-                    .client
-                    .exec(&DokkuCommand::PsReport { app: app.clone() })
-                    .await
-                    .ok()
-                    .and_then(|output| parse_ps_report(&output.stdout).ok());
-                let mut info = self
-                    .client
-                    .exec(&DokkuCommand::AppsReport { app: app.clone() })
-                    .await
-                    .ok()
-                    .and_then(|output| parse_apps_report(&output.stdout, name));
-                if details {
-                    if let Some(info) = info.as_mut() {
-                        let plugins = fetch_service_plugins(self.client.as_ref()).await;
-                        let details = fetch_one_details(
-                            self.client.as_ref(),
-                            self.dns.as_ref(),
-                            &app,
-                            plugins.as_deref(),
-                        )
-                        .await;
-                        info.image_status = details.image_status;
-                        info.last_build = details.last_build;
-                        info.links = details.links;
-                        info.domains = details.domains;
-                        info.dns_record_exists = details.dns_record_exists;
+        let (ps, info) = if still_listed {
+            match AppName::try_from(name.to_owned()) {
+                Ok(app) => {
+                    let ps = self
+                        .client
+                        .exec(&DokkuCommand::PsReport { app: app.clone() })
+                        .await
+                        .ok()
+                        .and_then(|output| parse_ps_report(&output.stdout).ok());
+                    let mut info = self
+                        .client
+                        .exec(&DokkuCommand::AppsReport { app: app.clone() })
+                        .await
+                        .ok()
+                        .and_then(|output| parse_apps_report(&output.stdout, name));
+                    if details {
+                        if let Some(info) = info.as_mut() {
+                            let plugins = fetch_service_plugins(self.client.as_ref()).await;
+                            let details = fetch_one_details(
+                                self.client.as_ref(),
+                                self.dns.as_ref(),
+                                &app,
+                                plugins.as_deref(),
+                            )
+                            .await;
+                            info.image_status = details.image_status;
+                            info.last_build = details.last_build;
+                            info.links = details.links;
+                            info.domains = details.domains;
+                            info.dns_record_exists = details.dns_record_exists;
+                        }
                     }
+                    (ps, info)
                 }
-                (ps, info)
+                Err(_) => (None, None),
             }
-            Err(_) => (None, None),
+        } else {
+            (None, None)
         };
 
-        self.mutate(|snapshot| {
-            if !snapshot.contains(name) {
-                snapshot.apps.push(name.to_owned());
-                snapshot.apps.sort();
-            }
-            snapshot.ps_reports.insert(name.to_owned(), ps);
-            snapshot.apps_reports.insert(name.to_owned(), info);
-        })
-        .await;
+        self.snapshots
+            .patch(|current| {
+                let mut snapshot = match current {
+                    Some(stored) => snapshot_from_stored(&stored).unwrap_or_else(|err| {
+                        tracing::warn!(error = %err, "snapshot row is corrupt; patching from empty");
+                        empty_snapshot()
+                    }),
+                    None => empty_snapshot(),
+                };
+                if still_listed {
+                    if !snapshot.contains(name) {
+                        snapshot.apps.push(name.to_owned());
+                        snapshot.apps.sort();
+                    }
+                    snapshot.ps_reports.insert(name.to_owned(), ps);
+                    snapshot.apps_reports.insert(name.to_owned(), info);
+                } else {
+                    snapshot.apps.retain(|app| app != name);
+                    snapshot.ps_reports.remove(name);
+                    snapshot.apps_reports.remove(name);
+                }
+                stored_from_snapshot(&snapshot)
+                    .map(|stored| (stored, ()))
+                    .map_err(|err| sqlx::Error::AnyDriverError(Box::new(err)))
+            })
+            .await?;
         Ok(())
     }
 
@@ -359,31 +481,6 @@ impl SnapshotStore {
             Some(app) => Ok((snapshot, app)),
             None => Err(SnapshotError::AppNotFound(name.to_owned())),
         }
-    }
-
-    async fn refresh_locked(&self) -> Result<Arc<Snapshot>, DokkuError> {
-        let snapshot = build_snapshot(self.client.as_ref()).await?;
-        let snapshot = Arc::new(snapshot);
-        *self.current.write().await = Some(snapshot.clone());
-        Ok(snapshot)
-    }
-
-    async fn mutate<F>(&self, edit: F)
-    where
-        F: FnOnce(&mut Snapshot),
-    {
-        let mut guard = self.current.write().await;
-        let mut next = match guard.as_ref() {
-            Some(snapshot) => (**snapshot).clone(),
-            None => Snapshot {
-                fetched_at: Instant::now(),
-                apps: Vec::new(),
-                ps_reports: HashMap::new(),
-                apps_reports: HashMap::new(),
-            },
-        };
-        edit(&mut next);
-        *guard = Some(Arc::new(next));
     }
 }
 
@@ -501,6 +598,24 @@ mod tests {
             .count()
     }
 
+    async fn store_with(client: Arc<dyn DokkuClient>) -> (SnapshotStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let url = format!("sqlite://{}/snapshot.db", dir.path().display());
+        let pool = crate::storage::connect(&url).await.expect("connect");
+        (
+            SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()), pool),
+            dir,
+        )
+    }
+
+    /// A second store over the same database file, standing in for another
+    /// container sharing the mounted volume.
+    async fn second_store(client: Arc<dyn DokkuClient>, dir: &tempfile::TempDir) -> SnapshotStore {
+        let url = format!("sqlite://{}/snapshot.db", dir.path().display());
+        let pool = crate::storage::connect(&url).await.expect("connect");
+        SnapshotStore::with_resolver(client, Arc::new(crate::dokku::FakeResolver::all()), pool)
+    }
+
     #[tokio::test]
     async fn build_snapshot_assembles_apps_and_reports() {
         let client = crate::dokku::MockClient::new()
@@ -605,12 +720,11 @@ mod tests {
         let client = Arc::new(
             crate::dokku::MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"]))),
         );
-        let store = SnapshotStore::new(client.clone());
+        let (store, _dir) = store_with(client.clone()).await;
 
-        assert!(store.current().await.is_none());
         let first = store.ensure_loaded().await.expect("first");
         let second = store.ensure_loaded().await.expect("second");
-        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.apps, second.apps, "second load served the shared row");
         assert_eq!(count(&client, &DokkuCommand::AppsList), 1);
     }
 
@@ -623,14 +737,14 @@ mod tests {
             list_calls: Mutex::new(0),
             good: good.clone(),
         });
-        let store = SnapshotStore::new(client);
+        let (store, _dir) = store_with(client).await;
 
         store.refresh().await.expect("first refresh");
         let before = store.current().await.expect("snapshot");
 
         assert!(store.refresh().await.is_err(), "second refresh fails");
         let after = store.current().await.expect("still published");
-        assert!(Arc::ptr_eq(&before, &after), "last good snapshot retained");
+        assert_eq!(before.apps, after.apps, "last good snapshot retained");
     }
 
     #[tokio::test]
@@ -647,7 +761,7 @@ mod tests {
                     Ok(apps_report()),
                 ),
         );
-        let store = SnapshotStore::new(client.clone());
+        let (store, _dir) = store_with(client.clone()).await;
         store.ensure_loaded().await.expect("load");
 
         store.refresh_app("alpha").await.expect("refresh app");
@@ -684,7 +798,7 @@ mod tests {
             reports: Arc::new(reports),
             calls: Mutex::new(Vec::new()),
         });
-        let store = SnapshotStore::new(client);
+        let (store, _dir) = store_with(client).await;
         store.ensure_loaded().await.expect("load");
         assert!(store.current().await.expect("snap").contains("alpha"));
 
@@ -706,7 +820,7 @@ mod tests {
         let client = Arc::new(
             crate::dokku::MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"]))),
         );
-        let store = SnapshotStore::new(client);
+        let (store, _dir) = store_with(client).await;
 
         let (snapshot, resolved) = store.resolve_app("alpha").await.expect("resolved");
 
@@ -722,7 +836,7 @@ mod tests {
             reports: Arc::new(crate::dokku::MockClient::new()),
             calls: Mutex::new(Vec::new()),
         });
-        let store = SnapshotStore::new(client.clone());
+        let (store, _dir) = store_with(client.clone()).await;
         store.ensure_loaded().await.expect("load");
 
         let err = store.resolve_app("ghost").await.expect_err("not found");
@@ -742,7 +856,8 @@ mod tests {
         let client = Arc::new(
             crate::dokku::MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"]))),
         );
-        let store = Arc::new(SnapshotStore::new(client));
+        let (store, _dir) = store_with(client).await;
+        let store = Arc::new(store);
         let handle = spawn_refresher(store.clone(), Duration::from_millis(10));
 
         for _ in 0..50 {
@@ -758,10 +873,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_app_fetches_details_for_that_app() {
         let client = Arc::new(details_client());
-        let store = SnapshotStore::with_resolver(
-            client.clone(),
-            Arc::new(crate::dokku::FakeResolver::all()),
-        );
+        let (store, _dir) = store_with(client.clone()).await;
         store.ensure_loaded().await.expect("load");
 
         store.refresh_app("alpha").await.expect("refresh app");
@@ -801,10 +913,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_app_reports_skips_the_detail_pass() {
         let client = Arc::new(details_client());
-        let store = SnapshotStore::with_resolver(
-            client.clone(),
-            Arc::new(crate::dokku::FakeResolver::all()),
-        );
+        let (store, _dir) = store_with(client.clone()).await;
         store.ensure_loaded().await.expect("load");
 
         store
@@ -832,6 +941,167 @@ mod tests {
             ),
             0,
             "no app links on the cheap pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_row_is_visible_to_a_second_store() {
+        let client_a = Arc::new(
+            crate::dokku::MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"]))),
+        );
+        let (store_a, dir) = store_with(client_a.clone()).await;
+        store_a.refresh().await.expect("refresh");
+
+        let client_b = Arc::new(crate::dokku::MockClient::new());
+        let store_b = second_store(client_b.clone(), &dir).await;
+
+        let snapshot = store_b.current().await.expect("shared row");
+        assert!(snapshot.contains("alpha"));
+        assert!(
+            client_b.calls().is_empty(),
+            "second store served the row without any dokku calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_app_patches_without_losing_sibling_apps() {
+        let seeded = crate::dokku::MockClient::new()
+            .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha", "beta"])))
+            .stub(
+                DokkuCommand::PsReport { app: app("alpha") },
+                Ok(ps_report(true, true, 1)),
+            )
+            .stub(
+                DokkuCommand::PsReport { app: app("beta") },
+                Ok(ps_report(false, true, 1)),
+            )
+            .stub(
+                DokkuCommand::AppsReport { app: app("alpha") },
+                Ok(apps_report()),
+            )
+            .stub(
+                DokkuCommand::AppsReport { app: app("beta") },
+                Ok(apps_report()),
+            );
+        let (store_a, dir) = store_with(Arc::new(seeded)).await;
+        store_a.refresh().await.expect("full refresh");
+
+        let patcher = crate::dokku::MockClient::new()
+            .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha", "beta"])))
+            .stub(
+                DokkuCommand::PsReport { app: app("alpha") },
+                Ok(ps_report(false, true, 0)),
+            )
+            .stub(
+                DokkuCommand::AppsReport { app: app("alpha") },
+                Ok(apps_report()),
+            );
+        let store_b = second_store(Arc::new(patcher), &dir).await;
+        store_b.refresh_app("alpha").await.expect("patch alpha");
+
+        let snapshot = store_b.current().await.expect("row");
+        assert!(snapshot.contains("beta"), "sibling app survives the patch");
+        assert_eq!(
+            snapshot.ps_report("alpha").map(|r| r.running),
+            Some(false),
+            "patched app reflects the new state"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_refresh_yields_to_a_row_modified_after_its_build_started() {
+        let running = crate::dokku::MockClient::new()
+            .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"])))
+            .stub(
+                DokkuCommand::PsReport { app: app("alpha") },
+                Ok(ps_report(true, true, 1)),
+            )
+            .stub(
+                DokkuCommand::AppsReport { app: app("alpha") },
+                Ok(apps_report()),
+            );
+        let (store_a, dir) = store_with(Arc::new(running)).await;
+        store_a.refresh().await.expect("full pass");
+
+        let patcher = crate::dokku::MockClient::new()
+            .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"])))
+            .stub(
+                DokkuCommand::PsReport { app: app("alpha") },
+                Ok(ps_report(false, true, 0)),
+            )
+            .stub(
+                DokkuCommand::AppsReport { app: app("alpha") },
+                Ok(apps_report()),
+            );
+        let store_b = second_store(Arc::new(patcher), &dir).await;
+        store_b.refresh_app("alpha").await.expect("patch");
+
+        // Forge the row as modified after any build that could still be
+        // running, exactly as a patch landing mid-build would be.
+        let url = format!("sqlite://{}/snapshot.db", dir.path().display());
+        let pool = crate::storage::connect(&url).await.expect("connect");
+        sqlx::query("UPDATE snapshots SET updated_at = ? WHERE id = 1")
+            .bind(crate::storage::snapshots::now_ms() + 60_000)
+            .execute(&pool)
+            .await
+            .expect("forge modification");
+
+        store_a.refresh().await.expect("second full pass");
+        let snapshot = store_a.current().await.expect("row");
+        assert_eq!(
+            snapshot.ps_report("alpha").map(|report| report.running),
+            Some(false),
+            "the patch survives the full refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_row_is_rebuilt_on_next_load() {
+        let client = Arc::new(
+            crate::dokku::MockClient::new().stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"]))),
+        );
+        let (store, dir) = store_with(client).await;
+        store.refresh().await.expect("refresh");
+
+        let url = format!("sqlite://{}/snapshot.db", dir.path().display());
+        let pool = crate::storage::connect(&url).await.expect("connect");
+        sqlx::query("UPDATE snapshots SET data = 'not json' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("corrupt row");
+
+        assert!(
+            store.current().await.is_none(),
+            "corrupt row degrades to none"
+        );
+        let snapshot = store.ensure_loaded().await.expect("rebuild");
+        assert!(snapshot.contains("alpha"));
+        assert!(store.current().await.is_some(), "row healed");
+    }
+
+    #[tokio::test]
+    async fn snapshot_survives_a_storage_round_trip() {
+        let client = Arc::new(
+            crate::dokku::MockClient::new()
+                .stub(DokkuCommand::AppsList, Ok(apps_list(&["alpha"])))
+                .stub(
+                    DokkuCommand::PsReport { app: app("alpha") },
+                    Ok(ps_report(true, true, 2)),
+                )
+                .stub(
+                    DokkuCommand::AppsReport { app: app("alpha") },
+                    Ok(apps_report()),
+                ),
+        );
+        let (store, _dir) = store_with(client).await;
+        let first = store.refresh().await.expect("refresh");
+        let second = store.current().await.expect("reload");
+        assert_eq!(first.apps, second.apps);
+        assert_eq!(first.ps_reports, second.ps_reports);
+        assert_eq!(first.apps_reports, second.apps_reports);
+        assert!(
+            second.age() < Duration::from_secs(5),
+            "age is reconstructed from the stored fetch time"
         );
     }
 

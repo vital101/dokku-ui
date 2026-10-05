@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use std::time::Duration;
 
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse};
 use askama::Template;
 
-use crate::dokku::{ActionRun, RunOutcome};
 use crate::domain::command::DokkuCommand;
 use crate::error::AppError;
+use crate::storage::runs::RunOutcome;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::render::render;
@@ -69,42 +69,66 @@ pub(super) struct RunCompletion {
     pub(super) refresh: RunRefresh,
 }
 
-/// Starts `command`, streaming its output into `run` line by line. On completion
-/// refreshes the snapshot and records the outcome the SSE stream delivers.
+/// How often the run task heartbeats while its command is in flight — an
+/// output-silent-but-alive build must never cross `ORPHAN_AFTER_SECS`.
+const RUN_HEARTBEAT: Duration = Duration::from_secs(60);
+
+/// Starts `command`, streaming its output into the persisted run line by line.
+/// On completion refreshes the snapshot and records the outcome the SSE
+/// stream delivers. Any process can serve the stream, not just this one.
 pub(super) fn spawn_run(
     state: AppState,
-    run: Arc<ActionRun>,
+    subject: String,
+    run_id: String,
     command: DokkuCommand,
     completion: RunCompletion,
 ) {
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
-        let line_run = run.clone();
+        let repo = state.action_runs.clone();
+        let line_run_id = run_id.clone();
         let line_task = tokio::spawn(async move {
+            let mut seq = 0i64;
             let mut partial = String::new();
             while let Some(chunk) = rx.recv().await {
                 partial.push_str(&chunk);
                 while let Some(pos) = partial.find('\n') {
                     let line: String = partial.drain(..=pos).collect();
-                    line_run
-                        .append_line(line.trim_end_matches(['\n', '\r']).to_owned())
-                        .await;
+                    let line = line.trim_end_matches(['\n', '\r']).to_owned();
+                    if let Err(err) = repo.append_line(&line_run_id, seq as usize, &line).await {
+                        tracing::warn!(error = %err, "failed to persist run line");
+                    }
+                    seq += 1;
                 }
             }
             let rest = partial.trim_end_matches(['\n', '\r']);
             if !rest.is_empty() {
-                line_run.append_line(rest.to_owned()).await;
+                if let Err(err) = repo.append_line(&line_run_id, seq as usize, rest).await {
+                    tracing::warn!(error = %err, "failed to persist run line");
+                }
+            }
+        });
+
+        let heartbeat_repo = state.action_runs.clone();
+        let heartbeat_run_id = run_id.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(RUN_HEARTBEAT).await;
+                if let Err(err) = heartbeat_repo.touch(&heartbeat_run_id).await {
+                    tracing::warn!(error = %err, "run heartbeat failed");
+                }
             }
         });
 
         let result = state.dokku.exec_streaming(&command, tx).await;
+        heartbeat.abort();
         let _ = line_task.await;
 
         let outcome = match result {
             Ok(_) => {
                 match completion.refresh {
                     RunRefresh::Reports => {
-                        if let Err(err) = state.snapshot.refresh_app_reports(&run.app).await {
+                        if let Err(err) = state.snapshot.refresh_app_reports(&subject).await {
                             tracing::warn!(error = %err, "snapshot refresh after action failed");
                         }
                     }
@@ -127,7 +151,9 @@ pub(super) fn spawn_run(
                 redirect: None,
             },
         };
-        run.finish(outcome).await;
+        if let Err(err) = state.action_runs.finish(&run_id, &outcome).await {
+            tracing::warn!(error = %err, "failed to persist run outcome");
+        }
     });
 }
 
@@ -140,10 +166,16 @@ pub(super) async fn start_action_run(
     completion: RunCompletion,
     refresh_url: Option<String>,
 ) -> Result<HttpResponse, AppError> {
-    let run = state.action_runs.insert(subject).await;
-    spawn_run(state.clone(), run.clone(), command, completion);
+    let run_id = state.action_runs.insert(subject).await?;
+    spawn_run(
+        state.clone(),
+        subject.to_owned(),
+        run_id.clone(),
+        command,
+        completion,
+    );
     render(&RunPartial {
-        run_url: format!("/actions/runs/{}/events", run.id),
+        run_url: format!("/actions/runs/{run_id}/events"),
         title,
         refresh_url,
     })
