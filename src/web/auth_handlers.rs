@@ -11,7 +11,7 @@ use crate::storage::instance_settings::{InstanceSettingsRepo, SqliteInstanceSett
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
-use crate::web::flash::{FlashLevel, set_flash};
+use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::render::{redirect, render, see_other};
 use crate::web::state::AppState;
 
@@ -22,6 +22,7 @@ struct LoginPage<'a> {
     error: Option<&'a str>,
     csrf_token: &'a str,
     banner: Option<&'a str>,
+    flash: Option<&'a FlashMessage>,
 }
 
 #[derive(Template)]
@@ -91,11 +92,13 @@ pub async fn login_form(
     let csrf_token = ensure_csrf(&session).await?;
     let next = safe_next(&query.next);
     let banner = login_banner(&state).await;
+    let flash = take_flash(&session);
     let page = LoginPage {
         next: &next,
         error: None,
         csrf_token: &csrf_token,
         banner: banner.as_deref(),
+        flash: flash.as_ref(),
     };
     render(&page)
 }
@@ -119,11 +122,13 @@ pub async fn login_submit(
         let csrf_token = ensure_csrf(&session).await?;
         let next = safe_next(&form.next);
         let banner = login_banner(&state).await;
+        let flash = take_flash(&session);
         let page = LoginPage {
             next: &next,
             error: Some("Invalid email or password"),
             csrf_token: &csrf_token,
             banner: banner.as_deref(),
+            flash: flash.as_ref(),
         };
         return render(&page);
     }

@@ -325,6 +325,11 @@ pub enum DokkuCommand {
     LetsencryptCronJob {
         add: bool,
     },
+    LetsencryptSet {
+        app: AppName,
+        property: String,
+        value: Option<String>,
+    },
     CertsReport {
         app: Option<AppName>,
     },
@@ -800,6 +805,21 @@ impl DokkuCommand {
                 let flag = if *add { "--add" } else { "--remove" };
                 vec!["letsencrypt:cron-job".into(), flag.into()]
             }
+            DokkuCommand::LetsencryptSet {
+                app,
+                property,
+                value,
+            } => {
+                let mut argv = vec![
+                    "letsencrypt:set".into(),
+                    app.as_str().into(),
+                    property.clone(),
+                ];
+                if let Some(value) = value {
+                    argv.push(value.clone());
+                }
+                argv
+            }
             DokkuCommand::CertsReport { app } => {
                 let mut argv = vec!["certs:report".into()];
                 if let Some(app) = app {
@@ -908,6 +928,7 @@ impl DokkuCommand {
             | DokkuCommand::LetsencryptRevoke { .. }
             | DokkuCommand::LetsencryptCleanup { .. }
             | DokkuCommand::LetsencryptCronJob { .. }
+            | DokkuCommand::LetsencryptSet { .. }
             | DokkuCommand::Logs { follow: true, .. }
             | DokkuCommand::NginxAccessLogs { follow: true, .. }
             | DokkuCommand::NginxErrorLogs { follow: true, .. } => CommandTimeout::Indefinite,
@@ -957,7 +978,8 @@ impl DokkuCommand {
             | DokkuCommand::LetsencryptDisable { .. }
             | DokkuCommand::LetsencryptRevoke { .. }
             | DokkuCommand::LetsencryptCleanup { .. }
-            | DokkuCommand::LetsencryptCronJob { .. } => Requirement::Plugin {
+            | DokkuCommand::LetsencryptCronJob { .. }
+            | DokkuCommand::LetsencryptSet { .. } => Requirement::Plugin {
                 name: "letsencrypt".to_owned(),
             },
             _ => Requirement::Core,
@@ -1261,6 +1283,11 @@ mod tests {
             DokkuCommand::LetsencryptRevoke { app: app("myapp") },
             DokkuCommand::LetsencryptCleanup { app: app("myapp") },
             DokkuCommand::LetsencryptCronJob { add: true },
+            DokkuCommand::LetsencryptSet {
+                app: app("myapp"),
+                property: "email".into(),
+                value: Some("ops@example.com".into()),
+            },
         ] {
             assert_eq!(
                 command.requirement(),
@@ -1301,6 +1328,24 @@ mod tests {
         assert_eq!(
             DokkuCommand::LetsencryptCronJob { add: false }.argv(),
             vec!["letsencrypt:cron-job", "--remove"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptSet {
+                app: app("myapp"),
+                property: "email".into(),
+                value: Some("ops@example.com".into()),
+            }
+            .argv(),
+            vec!["letsencrypt:set", "myapp", "email", "ops@example.com"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptSet {
+                app: app("myapp"),
+                property: "staging".into(),
+                value: Some("true".into()),
+            }
+            .argv(),
+            vec!["letsencrypt:set", "myapp", "staging", "true"]
         );
         assert_eq!(
             DokkuCommand::CertsReport { app: None }.argv(),

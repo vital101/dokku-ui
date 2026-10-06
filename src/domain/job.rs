@@ -18,7 +18,7 @@ use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
 use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
-use crate::domain::tls::LetsencryptAction;
+use crate::domain::tls::{LetsencryptAction, is_valid_letsencrypt_email};
 use crate::domain::types::{EnvVar, ScaleEntry};
 
 /// Serializable description of one queued mutation. Rehydrating through
@@ -199,6 +199,11 @@ pub enum JobSpec {
     LetsencryptAction {
         app: String,
         action: LetsencryptAction,
+    },
+    LetsencryptSet {
+        app: String,
+        property: String,
+        value: Option<String>,
     },
     LetsencryptCronJob {
         add: bool,
@@ -667,6 +672,55 @@ impl JobSpec {
             }
             JobSpec::LetsencryptCronJob { add } => {
                 Ok(vec![DokkuCommand::LetsencryptCronJob { add: *add }])
+            }
+            JobSpec::LetsencryptSet {
+                app,
+                property,
+                value,
+            } => {
+                let app = parse_app(app)?;
+                let value = value.clone().filter(|value| !value.trim().is_empty());
+                let property = match property.as_str() {
+                    "email" => {
+                        let Some(email) = value.as_deref() else {
+                            return Err(JobSpecError::Invalid(
+                                "letsencrypt email is required".to_owned(),
+                            ));
+                        };
+                        if !is_valid_letsencrypt_email(email) {
+                            return Err(JobSpecError::Invalid(format!(
+                                "invalid letsencrypt email `{email}`"
+                            )));
+                        }
+                        "email"
+                    }
+                    "staging" => {
+                        match value.as_deref() {
+                            Some("true") | Some("false") => {}
+                            Some(other) => {
+                                return Err(JobSpecError::Invalid(format!(
+                                    "invalid letsencrypt staging value `{other}`"
+                                )));
+                            }
+                            None => {
+                                return Err(JobSpecError::Invalid(
+                                    "letsencrypt staging requires a value".to_owned(),
+                                ));
+                            }
+                        }
+                        "staging"
+                    }
+                    other => {
+                        return Err(JobSpecError::Invalid(format!(
+                            "invalid letsencrypt property `{other}`"
+                        )));
+                    }
+                };
+                Ok(vec![DokkuCommand::LetsencryptSet {
+                    app,
+                    property: property.to_owned(),
+                    value,
+                }])
             }
             JobSpec::VolumeMount { app, spec } => {
                 let app = parse_app(app)?;
@@ -1614,6 +1668,66 @@ mod tests {
                 .expect("commands"),
             vec![DokkuCommand::LetsencryptCronJob { add: true }]
         );
+        assert_eq!(
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "email".into(),
+                value: Some("ops@example.com".into()),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::LetsencryptSet {
+                app: app("alpha"),
+                property: "email".into(),
+                value: Some("ops@example.com".into()),
+            }]
+        );
+        assert_eq!(
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "staging".into(),
+                value: Some("true".into()),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::LetsencryptSet {
+                app: app("alpha"),
+                property: "staging".into(),
+                value: Some("true".into()),
+            }]
+        );
+        for tampered in [
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "root-password".into(),
+                value: Some("x".into()),
+            },
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "email".into(),
+                value: Some("not-an-email".into()),
+            },
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "email".into(),
+                value: Some("o'brien@example.com".into()),
+            },
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "staging".into(),
+                value: Some("yes".into()),
+            },
+            JobSpec::LetsencryptSet {
+                app: "alpha".into(),
+                property: "staging".into(),
+                value: None,
+            },
+        ] {
+            assert!(
+                tampered.to_commands().is_err(),
+                "tampered {tampered:?} must be rejected"
+            );
+        }
         assert!(
             JobSpec::LetsencryptAction {
                 app: "Bad_App".into(),

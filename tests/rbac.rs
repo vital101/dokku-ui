@@ -450,17 +450,15 @@ async fn password_change_flow() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&resp), "/password");
+    assert_eq!(location(&resp), "/login", "signed out everywhere");
 
     let resp = test::call_service(
         &app,
-        test::TestRequest::post()
-            .uri("/logout")
-            .cookie(admin.clone())
-            .to_request(),
+        test::TestRequest::get().uri("/").cookie(admin).to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location(&resp), "/login", "the old cookie is revoked");
 
     let cookie = login(&app, "admin@example.com", "new-password-123").await;
     let resp = test::call_service(
@@ -472,6 +470,43 @@ async fn password_change_flow() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn password_change_revokes_other_sessions() {
+    let (state, _dir) = test_state().await;
+    seed_user(&state, "admin@example.com", "correct-horse-battery").await;
+    let app = test::init_service(build_app(state)).await;
+
+    let first = login(&app, "admin@example.com", "correct-horse-battery").await;
+    let second = login(&app, "admin@example.com", "correct-horse-battery").await;
+
+    let csrf = csrf_for(&app, "/password", &first).await;
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/password",
+            format!(
+                "csrf_token={csrf}&current_password=correct-horse-battery&password=new-password-123&confirm=new-password-123"
+            ),
+        )
+        .cookie(first)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/login");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/")
+            .cookie(second)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location(&resp), "/login", "the other session is revoked");
 }
 
 #[tokio::test]

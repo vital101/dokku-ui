@@ -285,6 +285,139 @@ async fn hx_letsencrypt_actions_stream_with_audit() {
 }
 
 #[tokio::test]
+async fn hx_letsencrypt_set_streams_and_rejects_bad_input() {
+    let client = with_capabilities(seeded_app_client())
+        .stub(
+            DokkuCommand::LetsencryptSet {
+                app: app_name("alpha"),
+                property: "email".into(),
+                value: Some("ops@example.com".into()),
+            },
+            Ok(DokkuOutput::ok("")),
+        )
+        .stub(
+            DokkuCommand::LetsencryptSet {
+                app: app_name("alpha"),
+                property: "staging".into(),
+                value: Some("true".into()),
+            },
+            Ok(DokkuOutput::ok("")),
+        );
+    let (state, client, _dir) = harness(client).await;
+    state
+        .capabilities
+        .ensure_loaded()
+        .await
+        .expect("capabilities");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    for (body, expected) in [
+        (
+            format!("csrf_token={csrf}&email=not-an-email"),
+            "valid email",
+        ),
+        (
+            format!("csrf_token={csrf}&email=o%27brien%40example.com"),
+            "valid email",
+        ),
+        (
+            format!("csrf_token={csrf}&email=&staging="),
+            "Provide an email",
+        ),
+        (
+            format!("csrf_token={csrf}&email=&staging=yes"),
+            "valid staging",
+        ),
+    ] {
+        let resp = test::call_service(
+            &app,
+            hx_form_request("/apps/alpha/tls/set", body)
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let html = get_body(resp).await;
+        assert!(html.contains(expected), "{expected}: {html}");
+    }
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::LetsencryptSet { .. })),
+        "invalid input never reaches dokku"
+    );
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/tls/set",
+            format!("csrf_token={csrf}&email=ops%40example.com&staging=true"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = get_body(resp).await;
+    assert!(
+        html.contains(r#"data-refresh="/apps/alpha/partials/tls""#),
+        "{html}"
+    );
+    let (_, events) = sse_events(&app, &run_url(&html), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::LetsencryptSet {
+            app: app_name("alpha"),
+            property: "email".into(),
+            value: Some("ops@example.com".into()),
+        }) && client.calls().contains(&DokkuCommand::LetsencryptSet {
+            app: app_name("alpha"),
+            property: "staging".into(),
+            value: Some("true".into()),
+        }),
+        "both properties reach dokku"
+    );
+}
+
+#[tokio::test]
+async fn hx_letsencrypt_set_rejects_invalid_app_name() {
+    let client = with_capabilities(seeded_app_client());
+    let (state, client, _dir) = harness(client).await;
+    state
+        .capabilities
+        .ensure_loaded()
+        .await
+        .expect("capabilities");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/Bad_App/tls/set",
+            format!("csrf_token={csrf}&staging=true"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Invalid app name"), "{body}");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::LetsencryptSet { .. })),
+        "an invalid app name never reaches dokku"
+    );
+}
+
+#[tokio::test]
 async fn hx_cron_job_add_and_remove_stream() {
     let client = with_capabilities(seeded_app_client())
         .stub(
@@ -349,8 +482,22 @@ async fn tls_actions_reject_when_plugin_missing() {
     let resp = test::call_service(
         &app,
         hx_form_request("/apps/alpha/tls/enable", format!("csrf_token={csrf}"))
-            .cookie(cookie)
+            .cookie(cookie.clone())
             .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("not available on this host"), "{body}");
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/tls/set",
+            format!("csrf_token={csrf}&staging=true"),
+        )
+        .cookie(cookie)
+        .to_request(),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);

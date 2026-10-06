@@ -1,45 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Log in - Dokku UI</title>
+  <title>Reset password - Dokku UI</title>
   <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/js/theme.js"></script>
 </head>
 <body class="flex min-h-screen items-center justify-center bg-slate-950">
   <div class="w-full max-w-sm">
     <h1 class="mb-6 text-center text-2xl font-semibold text-white">Dokku UI</h1>
-    {% if let Some(flash) = flash %}
-    <div class="mb-4 rounded-md border px-4 py-3 text-sm {{ flash.level.css_class() }}">
-      {{ flash.message }}
-    </div>
-    {% endif %}
-    {% if let Some(banner) = banner %}
-    <div class="mb-4 rounded-md border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-400">
-      {{ banner }}
-    </div>
-    {% endif %}
     {% if let Some(error) = error %}
     <div class="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
       {{ error }}
     </div>
     {% endif %}
-    <form method="post" action="/login" class="space-y-4 rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <form method="post" action="/reset/{{ token }}" class="space-y-4 rounded-lg border border-slate-800 bg-slate-900/50 p-6">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="next" value="{{ next }}">
       <div>
-        <label for="email" class="mb-1 block text-sm font-medium text-slate-300">Email</label>
-        <input id="email" name="email" type="email" required autofocus
+        <label for="password" class="mb-1 block text-sm font-medium text-slate-300">New password</label>
+        <input id="password" name="password" type="password" required minlength="12" autofocus
                class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none">
+        <p class="mt-1 text-xs text-slate-500">At least 12 characters.</p>
       </div>
       <div>
-        <label for="password" class="mb-1 block text-sm font-medium text-slate-300">Password</label>
-        <input id="password" name="password" type="password" required
+        <label for="confirm" class="mb-1 block text-sm font-medium text-slate-300">Confirm new password</label>
+        <input id="confirm" name="confirm" type="password" required minlength="12"
                class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none">
       </div>
       <button type="submit"
               class="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500">
-        Log in
+        Set password
       </button>
     </form>
   </div>

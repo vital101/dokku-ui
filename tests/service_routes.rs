@@ -1423,6 +1423,105 @@ async fn destroy_service_non_htmx_queues_and_redirects_to_list() {
 }
 
 #[tokio::test]
+async fn destroy_is_blocked_while_the_service_has_linked_apps() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceLinks {
+            plugin: redis(),
+            service: candid(),
+        },
+        Ok(DokkuOutput::ok("web\nworker\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/destroy",
+            format!("csrf_token={csrf}&name=candid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+    assert!(body.contains("web, worker"), "{body}");
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/destroy",
+            format!("csrf_token={csrf}&name=candid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/services/redis/candid");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::ServiceDestroy { .. })),
+        "a linked service is never destroyed"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Unlink these apps first"), "{body}");
+}
+
+#[tokio::test]
+async fn destroy_fails_closed_when_the_link_check_fails() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceLinks {
+            plugin: redis(),
+            service: candid(),
+        },
+        Err(exit_error(1, "links boom")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/destroy",
+            format!("csrf_token={csrf}&name=candid"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Could not verify service links"), "{body}");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::ServiceDestroy { .. })),
+        "destroy must not run when links cannot be verified"
+    );
+}
+
+#[tokio::test]
 async fn service_stats_partial_renders_resource_labels() {
     let client = MockClient::new().stub(
         DokkuCommand::ServiceStats {

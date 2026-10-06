@@ -3,10 +3,14 @@ use actix_web::{HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
 
+use crate::auth::csrf::generate_token;
 use crate::auth::password::{hash_password, verify_password};
 use crate::auth::rbac::{Role, can_delete_user, can_set_role};
-use crate::domain::{Email, Password};
+use crate::domain::{Email, Password, RESET_TTL_SECS, hash_token, reset_url};
 use crate::error::AppError;
+use crate::storage::instance_settings::{InstanceSettingsRepo, SqliteInstanceSettingsRepo};
+use crate::storage::password_resets::{PasswordResetsRepo, SqlitePasswordResetsRepo};
+use crate::storage::sessions::SqliteSessionStore;
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
@@ -41,6 +45,16 @@ struct AdminNavPartial {
 }
 
 #[derive(Template)]
+#[template(path = "users/reset_link.html")]
+struct ResetLinkPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    target_email: &'a str,
+    link: &'a str,
+}
+
+#[derive(Template)]
 #[template(path = "auth/password.html")]
 struct PasswordPage<'a> {
     email: &'a str,
@@ -64,6 +78,9 @@ pub struct SetRoleForm {
 
 #[derive(Deserialize)]
 pub struct DeleteUserForm {}
+
+#[derive(Deserialize)]
+pub struct ResetLinkForm {}
 
 #[derive(Deserialize)]
 pub struct ChangePasswordForm {
@@ -301,6 +318,63 @@ pub async fn delete(
     Ok(see_other("/users"))
 }
 
+/// Generates a one-time password reset link for a user. The plaintext token is
+/// rendered once and never stored; only its hash lives in SQLite.
+pub async fn reset_link(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<i64>,
+    _form: CsrfForm<ResetLinkForm>,
+) -> Result<HttpResponse, AppError> {
+    let id = path.into_inner();
+    let user = current_user(&state, &session).await?;
+    let target = SqliteUsersRepo::new(state.db.clone())
+        .find_by_id(id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let settings = SqliteInstanceSettingsRepo::new(state.db.clone())
+        .load()
+        .await?;
+    let Some(public_url) = settings.public_url else {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            "Set a public URL in instance settings before generating reset links.",
+        );
+        return Ok(see_other("/users"));
+    };
+
+    let token = generate_token();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    SqlitePasswordResetsRepo::new(state.db.clone())
+        .create(target.id, &hash_token(&token), now, now + RESET_TTL_SECS)
+        .await?;
+    // A reset is the recovery path for a compromised account: drop every
+    // existing session for the target so a copied cookie stops working.
+    SqliteSessionStore::new(state.db.clone())
+        .delete_user_sessions(target.id)
+        .await?;
+
+    let link = reset_url(&public_url, &token);
+    let csrf_token = ensure_csrf(&session).await?;
+    let flash = take_flash(&session);
+    let page = ResetLinkPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        target_email: &target.email,
+        link: &link,
+    };
+    // The link is a one-time bearer credential; keep it out of caches.
+    let mut response = render(&page)?;
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
 pub async fn password_form(
     state: web::Data<AppState>,
     session: Session,
@@ -358,8 +432,18 @@ pub async fn password_submit(
     let hash = hash_password(&new_password)?;
     let repo = SqliteUsersRepo::new(state.db.clone());
     repo.update_password_hash(user.id, &hash).await?;
-    set_flash(&session, FlashLevel::Success, "Password updated.");
-    Ok(see_other("/password"))
+    // Sign out everywhere: the current cookie is revoked with the rest, and a
+    // fresh session carries the flash to the sign-in page.
+    SqliteSessionStore::new(state.db.clone())
+        .delete_user_sessions(user.id)
+        .await?;
+    session.renew();
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        "Password updated. Sign in again with your new password.",
+    );
+    Ok(see_other("/login"))
 }
 
 #[cfg(test)]

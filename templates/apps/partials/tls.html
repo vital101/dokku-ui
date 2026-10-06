@@ -78,6 +78,39 @@
     {% endif %}
   </div>
 
+  {% if letsencrypt_available %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Let's Encrypt settings</h3>
+    <p class="mt-1 text-sm text-slate-400">
+      Registration email and the ACME staging directory. Leave a field untouched to keep it.
+    </p>
+    <form hx-post="/apps/{{ name }}/tls/set" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 grid gap-4 sm:grid-cols-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="letsencrypt-email" class="block text-sm font-medium text-slate-300">Email</label>
+        <input id="letsencrypt-email" name="email" type="email" placeholder="you@example.com"
+               class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm">
+      </div>
+      <div>
+        <label for="letsencrypt-staging" class="block text-sm font-medium text-slate-300">Staging</label>
+        <select id="letsencrypt-staging" name="staging"
+                class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white sm:text-sm">
+          <option value="">Keep current</option>
+          <option value="false">Production (false)</option>
+          <option value="true">Staging (true)</option>
+        </select>
+      </div>
+      <div class="sm:col-span-2">
+        <button type="submit"
+                class="app-action rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+          Save settings
+        </button>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <div class="flex items-center justify-between">
       <div>

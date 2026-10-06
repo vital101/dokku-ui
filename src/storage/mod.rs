@@ -9,6 +9,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 pub mod capabilities;
 pub mod instance_settings;
 pub mod jobs;
+pub mod password_resets;
 pub mod runs;
 pub mod sessions;
 pub mod snapshots;

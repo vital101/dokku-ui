@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block heading %}Password reset link{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h2 class="text-sm font-semibold text-white">Reset link for {{ target_email }}</h2>
+    <p class="mt-1 text-xs text-slate-500">
+      Share this one-time link out of band. It expires in 24 hours and stops working after
+      the password is set. Only its hash is stored, so it cannot be shown again.
+    </p>
+    <div class="mt-4 break-all rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-200">
+      {{ link }}
+    </div>
+    <div class="mt-4 flex items-center gap-3">
+      <a href="/users" class="rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">Back to users</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

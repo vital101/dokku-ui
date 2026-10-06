@@ -14,6 +14,7 @@ mod instance_settings;
 mod logs;
 mod pages;
 mod palette;
+mod password_reset;
 mod reauth;
 mod render;
 mod runs;
@@ -129,6 +130,12 @@ pub fn build_app(
         )
         .route("/users/{id}/role", web::post().to(users::set_role))
         .route("/users/{id}/delete", web::post().to(users::delete))
+        .route("/users/{id}/reset", web::post().to(users::reset_link))
+        .service(
+            web::resource("/reset/{token}")
+                .route(web::get().to(password_reset::form))
+                .route(web::post().to(password_reset::submit)),
+        )
         .route("/partials/admin-nav", web::get().to(users::admin_nav))
         .service(
             web::resource("/settings")
@@ -246,6 +253,7 @@ pub fn build_app(
             "/apps/{name}/tls/cron-job/remove",
             web::post().to(tls::cron_job_remove),
         )
+        .route("/apps/{name}/tls/set", web::post().to(tls::set))
         .route("/apps/{name}/cron", web::get().to(cron::page))
         .route("/apps/{name}/partials/cron", web::get().to(cron::partial))
         .route("/apps/{name}/cron/run", web::post().to(cron::run))

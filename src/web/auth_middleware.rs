@@ -99,6 +99,7 @@ fn is_public_path(path: &str) -> bool {
         || path == "/favicon.ico"
         || path.starts_with("/static/")
         || path.starts_with("/webhooks/")
+        || path.starts_with("/reset/")
 }
 
 #[cfg(test)]
@@ -114,6 +115,7 @@ mod tests {
             "/favicon.ico",
             "/static/css/app.css",
             "/webhooks/github/myapp",
+            "/reset/aabbccdd",
         ] {
             assert!(is_public_path(path), "{path} should be public");
         }
@@ -128,6 +130,7 @@ mod tests {
             "/logout",
             "/static.txt",
             "/webhooks",
+            "/reset",
             "/xwebhooks/github/myapp",
         ] {
             assert!(!is_public_path(path), "{path} should be private");

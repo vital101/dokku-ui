@@ -16,6 +16,21 @@ impl SqliteSessionStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    /// Deletes every session whose stored state belongs to `user_id`,
+    /// returning how many were removed. Password changes and admin resets use
+    /// this to revoke a possibly-copied cookie; sessions without a
+    /// `user_id` key (pre-login) are never touched.
+    pub async fn delete_user_sessions(&self, user_id: i64) -> Result<u64, sqlx::Error> {
+        let deleted = sqlx::query(
+            "DELETE FROM sessions WHERE CAST(json_extract(data, '$.user_id') AS TEXT) = ?",
+        )
+        .bind(user_id.to_string())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deleted)
+    }
 }
 
 fn now_epoch() -> i64 {
@@ -228,5 +243,32 @@ mod tests {
             .expect("row");
         let parsed: HashMap<String, String> = serde_json::from_str(&row.0).expect("json");
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_user_sessions_removes_only_that_user() {
+        let (store, _dir) = store().await;
+        let first = store
+            .save(state(&[("user_id", "7")]), &ttl())
+            .await
+            .expect("save");
+        let second = store
+            .save(state(&[("user_id", "7")]), &ttl())
+            .await
+            .expect("save");
+        let other = store
+            .save(state(&[("user_id", "8")]), &ttl())
+            .await
+            .expect("save");
+        let anonymous = store
+            .save(state(&[("csrf_token", "x")]), &ttl())
+            .await
+            .expect("save");
+
+        assert_eq!(store.delete_user_sessions(7).await.expect("purge"), 2);
+        assert!(store.load(&first).await.expect("load").is_none());
+        assert!(store.load(&second).await.expect("load").is_none());
+        assert!(store.load(&other).await.expect("load").is_some());
+        assert!(store.load(&anonymous).await.expect("load").is_some());
     }
 }

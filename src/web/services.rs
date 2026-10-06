@@ -847,6 +847,36 @@ pub async fn destroy(
         return Ok(see_other(&format!("/services/{plugin}/{service}/delete")));
     }
 
+    // Pro blocks destroying a linked service (unlinking unsets env vars and
+    // restarts the app). Fail closed when the check itself cannot run.
+    let linked = match service_linked_apps(&*state.dokku, plugin, &service).await {
+        Ok(links) => links,
+        Err(err) => {
+            let message = format!("Could not verify service links: {err}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&detail_url(plugin, &service)));
+        }
+    };
+    if !linked.is_empty() {
+        let message = format!(
+            "Unlink {} first: {}. Destroying the service would break those apps.",
+            if linked.len() == 1 {
+                "this app"
+            } else {
+                "these apps"
+            },
+            linked.join(", ")
+        );
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&detail_url(plugin, &service)));
+    }
+
     let list_url = format!("/services/{plugin}");
     if is_htmx(&req) {
         return start_action_run(

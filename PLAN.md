@@ -606,3 +606,38 @@ Until then the Deploy tab exposes the SSH push URL, which needs no host changes.
   server-side 403 is authoritative; the Users/Settings nav is htmx-gated),
   REST JSON:API/JWT/Swagger/batch ops, multi-server, reverse-proxy auth, SSH
   keys, teams, plugin management, git HTTP, DSN reveal, reset links.
+
+## 22. P3 follow-up (implemented)
+
+- **Password reset links** (`migrations/0012_password_resets.sql`): tokens are
+  `auth::csrf::generate_token()` values rendered once and stored as SHA-256
+  hashes (`domain::password_reset`); `create` invalidates the user's previous
+  unused links and garbage-collects used/expired rows, `consume` is a single
+  atomic `UPDATE … RETURNING` (single-use, 24h TTL) that runs *before* the
+  password write, so a DB failure after consumption simply requires a new link.
+  Admins POST `/users/{id}/reset` − requires the instance public URL, otherwise
+  a flash error − and share the resulting `/reset/{token}` link out of band;
+  the rendered link page is `Cache-Control: no-store`. `/reset/{token}` is
+  public in the auth middleware (`/reset/` prefix), uses the session CSRF flow,
+  and a successful reset flashes on `/login`.
+- **Session revocation**: `SqliteSessionStore::delete_user_sessions(user_id)`
+  deletes every session whose state carries that `user_id`
+  (`json_extract(data,'$.user_id')`). Self-service password changes purge all
+  of the user's sessions and re-issue a fresh flash-bearing session (sign out
+  everywhere); generating an admin reset link purges the target's sessions at
+  link-creation time, so a copied cookie dies immediately. Anonymous
+  pre-login sessions are never touched.
+- **Destroy-while-linked guard** (`src/web/services.rs`): `service.destroy`
+  fetches `<plugin>:links` after the typed-name check and refuses with the
+  linked app list; a link-check failure refuses too (fail closed). The check
+  runs at enqueue time, so an app linked in the small window before the
+  immediate executor claims the job can still be destroyed; an execution-time
+  precondition is the Pro-parity follow-up.
+- **`letsencrypt:set`**: `DokkuCommand::LetsencryptSet` + `JobSpec` arm
+  (`email` must pass `is_valid_letsencrypt_email` — `Email` rules plus no `'`,
+  which dokku's SSH `xargs` re-split cannot carry; `staging` requires an
+  explicit `true`/`false` because plugin 0.20.4 has no clear form), an audited
+  run from the TLS tab, and re-validation at job rehydration.
+- **Not in this increment**: SSH-key management, teams, plugin management,
+  REST JSON:API/JWT/Swagger, multi-server, reverse-proxy auth, git HTTP,
+  DSN reveal.

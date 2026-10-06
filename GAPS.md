@@ -107,7 +107,8 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | Cron tab (list, run-now, suspend/resume individual & app-wide) | ✅ | ✅ | `cron:list --format json` + run/suspend/resume (P1) |
 | HTTP basic auth (users + allowed IPs) | ✅ | ✅ | `http-auth` plugin, `Plugin`-gated (P1); passwords redacted from run lines |
 | Multi-user accounts + roles | ✅ | ✅ | Own SQLite RBAC: `admin`/`operator`/`viewer`, enforced per request in the auth middleware; Users screen (P3 increment) |
-| Self-service password change | ✅ | ✅ | Current-password verification + policy; reset tokens/links still missing |
+| Self-service password change | ✅ | ✅ | Current-password verification + policy |
+| Password reset links | ✅ | ✅ | Admin-generated one-time link (24h, single-use) built from the instance public URL; only the SHA-256 hash is stored, link pages are `no-store`, and both a reset and a self-service change revoke the user's other sessions |
 | Queued-job toasts / "deleting" states | ✅ | ✅ | Durable per-user toasts (P0) + dashboard "deleting…" badge from in-flight destroy runs |
 | Advanced service create (image/version, env, extra args) | ✅ | ✅ | 1.x plugin flags `--image`/`--image-version`/`--custom-env`/`--config-options`; env values redacted |
 | Instance settings (public URL, login banner, app filter, TTLs) | ✅ | ✅ | Admin `/settings` page persisted in shared SQLite; TTL overrides applied at prune time |
@@ -116,7 +117,7 @@ webhooks, multi-server, reverse-proxy auth, operating).
 
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
-| Let's Encrypt (email, staging/prod, status/expiry, disable) | ◐ | ✅ | Status/expiry, enable/disable/revoke/cleanup, and server-wide auto-renew are in the TLS tab; `letsencrypt:set` (email/staging) not exposed yet |
+| Let's Encrypt (email, staging/prod, status/expiry, disable) | ✅ | ✅ | Status/expiry, enable/disable/revoke/cleanup, server-wide auto-renew, and `letsencrypt:set` email/staging on the TLS tab |
 | Manual certificate upload / activate | ❌ | ✅ | Deferred: PEM cannot survive the SSH argv re-split; design note in `PLAN.md` §20 covers a stdin-tarball client capability |
 | Server-wide auto-renew cron toggle | ✅ | ✅ | `letsencrypt:cron-job --add/--remove`; no status query on plugin 0.20.4, so the card is action-only |
 | k3s cert-manager integration | ❌ | ✅ | Environment-specific; divergent unless host runs k3s |
@@ -135,7 +136,7 @@ webhooks, multi-server, reverse-proxy auth, operating).
 
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
-| Service lifecycle + link/unlink | ✅ | ✅ | Pro blocks destroy while linked; ours does not |
+| Service lifecycle + link/unlink | ✅ | ✅ | Destroy is blocked while apps are linked (fail-closed when the link check cannot run); the check is at enqueue time — an execution-time precondition is the follow-up |
 | Service create advanced options (image/tag, env, extra args) | ✅ | ✅ | `--image`/`--image-version`/`--custom-env`/`--config-options`, source-verified against the installed 1.x plugin generation |
 | Connection string / credential reveal | ❌ deliberate | ✅ | **Open policy decision** — test asserts DSNs never surface |
 | Service Activity tab | ✅ | ✅ | `/services/{plugin}/{service}/activity` |
@@ -390,8 +391,29 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
   "deleting…" badge from unfinished destroy runs.
 - **Still open in P3**: REST JSON:API + JWT + Swagger + batch operations,
   multi-server, reverse-proxy auth, SSH-key management, teams/scoped grants,
-  plugin management (companion helper), git HTTP server, DSN reveal policy,
-  password reset links, service destroy-while-linked guard.
+  plugin management (companion helper), git HTTP server, DSN reveal policy.
+
+## P3 follow-up (implemented)
+
+- **Password reset links**: migration `0012_password_resets.sql`; bearers are
+  64-hex tokens shown once and stored as SHA-256 hashes, single-use with a
+  24-hour expiry, and invalidated when a newer link is generated for the same
+  user. Admins generate links from `/users` (requires the instance public
+  URL); `/reset/{token}` is a public route using the normal session CSRF flow,
+  a successful reset flashes on the sign-in page, link pages are `no-store`,
+  and both a reset and a self-service change purge the user's other sessions
+  (killing a copied cookie).
+- **Destroy-while-linked guard**: `service.destroy` checks `<plugin>:links`
+  first and refuses with the linked app list; a failed link check fails closed
+  (never destroy when links are unknown). The check runs when the job is
+  enqueued — an app linked in the millisecond window before the executor
+  claims the job can still be destroyed; execution-time precondition tracked
+  as follow-up.
+- **`letsencrypt:set`**: email and staging are editable from the TLS tab as
+  audited runs (`letsencrypt:set <app> <property> [value]`), re-validated at
+  job rehydration; blank fields are left untouched. The email must also be
+  free of single quotes because it travels as SSH argv (the `xargs` re-split
+  cannot carry them).
 
 ## Refreshing this document
 

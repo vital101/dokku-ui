@@ -13,6 +13,7 @@ pub mod job;
 pub mod mount_spec;
 pub mod parse;
 pub mod password;
+pub mod password_reset;
 pub mod redact;
 pub mod resource;
 pub mod service_create;
@@ -45,6 +46,7 @@ pub use job::{
 pub use mount_spec::{MountSpec, MountSpecError};
 pub use parse::{LOG_LINES_DEFAULT, LOG_LINES_MAX, LOG_LINES_MIN, ParseError, clamp_log_lines};
 pub use password::{Password, PasswordError};
+pub use password_reset::{RESET_TTL_SECS, hash_token, is_plausible_token, reset_url};
 pub use redact::{MASK, redact_line};
 pub use resource::{is_valid_process_type, is_valid_resource_value};
 pub use service_create::{ServiceCreateOptions, ServiceCreateOptionsError};

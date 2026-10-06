@@ -1,6 +1,7 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, web};
 use askama::Template;
+use serde::Deserialize;
 
 use crate::dokku::format_age;
 use crate::domain::AppName;
@@ -8,7 +9,7 @@ use crate::domain::capabilities::Support;
 use crate::domain::command::DokkuCommand;
 use crate::domain::job::JobSpec;
 use crate::domain::parse::{parse_certs_report, parse_letsencrypt_active, parse_letsencrypt_list};
-use crate::domain::tls::LetsencryptAction;
+use crate::domain::tls::{LetsencryptAction, is_valid_letsencrypt_email};
 use crate::domain::types::{LetsencryptEntry, SslReport};
 use crate::error::AppError;
 use crate::storage::runs::TargetKind;
@@ -395,5 +396,109 @@ fn reject(
         return modal_error(message);
     }
     set_flash(session, FlashLevel::Error, message.to_owned());
+    Ok(see_other(&format!("/apps/{name}/tls")))
+}
+
+#[derive(Deserialize)]
+pub struct SetForm {
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    staging: String,
+}
+
+/// Applies `letsencrypt:set` for the registration email and/or the staging
+/// flag. Fields left blank are not touched; clearing staging is not exposed
+/// because the UI only offers explicit true/false.
+pub async fn set(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<SetForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    if letsencrypt_support(&state).await != Support::Supported {
+        return reject(
+            &session,
+            &req,
+            &name,
+            "The letsencrypt plugin is not available on this host.",
+        );
+    }
+    if let Err(err) = AppName::try_from(name.clone()) {
+        return reject(&session, &req, &name, &format!("Invalid app name: {err}"));
+    }
+    let form = form.0;
+    let email = form.email.trim().to_owned();
+
+    let mut plan = Vec::new();
+    if !email.is_empty() {
+        if !is_valid_letsencrypt_email(&email) {
+            return reject(&session, &req, &name, "Enter a valid email address.");
+        }
+        plan.push(JobSpec::LetsencryptSet {
+            app: name.clone(),
+            property: "email".to_owned(),
+            value: Some(email),
+        });
+    }
+    match form.staging.as_str() {
+        "" => {}
+        "true" | "false" => plan.push(JobSpec::LetsencryptSet {
+            app: name.clone(),
+            property: "staging".to_owned(),
+            value: Some(form.staging.clone()),
+        }),
+        _ => return reject(&session, &req, &name, "Pick a valid staging value."),
+    }
+    if plan.is_empty() {
+        return reject(
+            &session,
+            &req,
+            &name,
+            "Provide an email or a staging value to update.",
+        );
+    }
+
+    let operation = "letsencrypt.set".to_owned();
+    let completion = RunCompletion {
+        success_message: "Let's Encrypt settings saved.".to_owned(),
+        redirect: None,
+        refresh: RunRefresh::None,
+    };
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: name.clone(),
+                operation,
+                target_kind: TargetKind::App,
+                title: "Saving Let's Encrypt settings…".to_owned(),
+                plan,
+                completion,
+                redactions: Vec::new(),
+                refresh_url: Some(partial_url(&name)),
+            },
+        )
+        .await;
+    }
+    enqueue_action_run(
+        &state,
+        &session,
+        &name,
+        &operation,
+        TargetKind::App,
+        &plan,
+        &completion,
+        &[],
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        "Queued: save Let's Encrypt settings.",
+    );
     Ok(see_other(&format!("/apps/{name}/tls")))
 }
