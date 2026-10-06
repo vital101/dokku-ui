@@ -5,6 +5,7 @@ mod auth_middleware;
 mod build;
 mod cron;
 mod csrf_form;
+mod deploy;
 mod domains;
 mod favicon;
 mod flash;
@@ -17,8 +18,10 @@ mod runs;
 mod security_headers;
 mod services;
 mod state;
+mod tls;
 mod toasts;
 mod volumes;
+mod webhooks;
 
 use actix_session::SessionMiddleware;
 use actix_session::config::{PersistentSession, TtlExtensionPolicy};
@@ -170,6 +173,52 @@ pub fn build_app(
         .route(
             "/apps/{name}/build/builder",
             web::post().to(build::builder_set),
+        )
+        .route("/apps/{name}/deploy", web::get().to(deploy::page))
+        .route(
+            "/apps/{name}/partials/deploy",
+            web::get().to(deploy::partial),
+        )
+        .route(
+            "/apps/{name}/partials/failed-logs",
+            web::get().to(deploy::failed_logs_partial),
+        )
+        .route(
+            "/apps/{name}/deploy/branch",
+            web::post().to(deploy::set_branch),
+        )
+        .route("/apps/{name}/deploy/sync", web::post().to(deploy::sync))
+        .route(
+            "/apps/{name}/deploy/from-image",
+            web::post().to(deploy::from_image),
+        )
+        .route(
+            "/apps/{name}/deploy/from-archive",
+            web::post().to(deploy::from_archive),
+        )
+        .route("/apps/{name}/webhooks", web::post().to(webhooks::save))
+        .route(
+            "/apps/{name}/webhooks/remove",
+            web::post().to(webhooks::remove),
+        )
+        .route(
+            "/apps/{name}/webhooks/reveal",
+            web::post().to(webhooks::reveal),
+        )
+        .route("/webhooks/github/{app}", web::post().to(webhooks::receive))
+        .route("/apps/{name}/tls", web::get().to(tls::page))
+        .route("/apps/{name}/partials/tls", web::get().to(tls::partial))
+        .route("/apps/{name}/tls/enable", web::post().to(tls::enable))
+        .route("/apps/{name}/tls/disable", web::post().to(tls::disable))
+        .route("/apps/{name}/tls/revoke", web::post().to(tls::revoke))
+        .route("/apps/{name}/tls/cleanup", web::post().to(tls::cleanup))
+        .route(
+            "/apps/{name}/tls/cron-job/add",
+            web::post().to(tls::cron_job_add),
+        )
+        .route(
+            "/apps/{name}/tls/cron-job/remove",
+            web::post().to(tls::cron_job_remove),
         )
         .route("/apps/{name}/cron", web::get().to(cron::page))
         .route("/apps/{name}/partials/cron", web::get().to(cron::partial))

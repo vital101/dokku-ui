@@ -1,6 +1,7 @@
 use crate::domain::AppName;
 use crate::domain::capabilities::{CapabilityFamily, Requirement};
 use crate::domain::domain_name::DomainName;
+use crate::domain::git::GitBuildMode;
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
@@ -280,10 +281,59 @@ pub enum DokkuCommand {
         app: AppName,
         keys: Vec<String>,
     },
+    GitReport {
+        app: AppName,
+    },
+    GitPublicKey,
+    GitSet {
+        app: AppName,
+        property: String,
+        value: Option<String>,
+    },
+    GitSync {
+        app: AppName,
+        repo: String,
+        git_ref: Option<String>,
+        build_mode: GitBuildMode,
+    },
+    GitFromImage {
+        app: AppName,
+        image: String,
+    },
+    GitFromArchive {
+        app: AppName,
+        archive_url: String,
+    },
+    LetsencryptList,
+    LetsencryptActive {
+        app: AppName,
+    },
+    LetsencryptEnable {
+        app: AppName,
+    },
+    LetsencryptDisable {
+        app: AppName,
+    },
+    LetsencryptRevoke {
+        app: AppName,
+    },
+    LetsencryptCleanup {
+        app: AppName,
+    },
+    LetsencryptCronJob {
+        add: bool,
+    },
+    CertsReport {
+        app: Option<AppName>,
+    },
     Logs {
         app: AppName,
         num_lines: u32,
         follow: bool,
+        process: Option<String>,
+    },
+    LogsFailed {
+        app: AppName,
     },
     NginxAccessLogs {
         app: AppName,
@@ -663,18 +713,95 @@ impl DokkuCommand {
                 argv.extend(keys.iter().cloned());
                 argv
             }
+            DokkuCommand::GitReport { app } => {
+                vec!["git:report".into(), app.as_str().into()]
+            }
+            DokkuCommand::GitPublicKey => vec!["git:public-key".into()],
+            DokkuCommand::GitSet {
+                app,
+                property,
+                value,
+            } => {
+                let mut argv = vec!["git:set".into(), app.as_str().into(), property.clone()];
+                if let Some(value) = value {
+                    argv.push(value.clone());
+                }
+                argv
+            }
+            DokkuCommand::GitSync {
+                app,
+                repo,
+                git_ref,
+                build_mode,
+            } => {
+                // `git:sync [--build|--build-if-changes] <app> <repo> [<ref>]`:
+                // the build flag comes before the app name.
+                let mut argv = vec!["git:sync".into()];
+                if let Some(flag) = build_mode.flag() {
+                    argv.push(flag.into());
+                }
+                argv.push(app.as_str().into());
+                argv.push(repo.clone());
+                if let Some(git_ref) = git_ref {
+                    argv.push(git_ref.clone());
+                }
+                argv
+            }
+            DokkuCommand::GitFromImage { app, image } => {
+                vec!["git:from-image".into(), app.as_str().into(), image.clone()]
+            }
+            DokkuCommand::GitFromArchive { app, archive_url } => vec![
+                "git:from-archive".into(),
+                app.as_str().into(),
+                archive_url.clone(),
+            ],
+            DokkuCommand::LetsencryptList => vec!["letsencrypt:list".into()],
+            DokkuCommand::LetsencryptActive { app } => {
+                vec!["letsencrypt:active".into(), app.as_str().into()]
+            }
+            DokkuCommand::LetsencryptEnable { app } => {
+                vec!["letsencrypt:enable".into(), app.as_str().into()]
+            }
+            DokkuCommand::LetsencryptDisable { app } => {
+                vec!["letsencrypt:disable".into(), app.as_str().into()]
+            }
+            DokkuCommand::LetsencryptRevoke { app } => {
+                vec!["letsencrypt:revoke".into(), app.as_str().into()]
+            }
+            DokkuCommand::LetsencryptCleanup { app } => {
+                vec!["letsencrypt:cleanup".into(), app.as_str().into()]
+            }
+            DokkuCommand::LetsencryptCronJob { add } => {
+                let flag = if *add { "--add" } else { "--remove" };
+                vec!["letsencrypt:cron-job".into(), flag.into()]
+            }
+            DokkuCommand::CertsReport { app } => {
+                let mut argv = vec!["certs:report".into()];
+                if let Some(app) = app {
+                    argv.push(app.as_str().into());
+                }
+                argv
+            }
             DokkuCommand::Logs {
                 app,
                 num_lines,
                 follow,
+                process,
             } => {
                 let mut argv = vec!["logs".into(), app.as_str().into()];
                 if *follow {
                     argv.push("--tail".into());
                 }
+                if let Some(process) = process {
+                    argv.push("--ps".into());
+                    argv.push(process.clone());
+                }
                 argv.push("--num".into());
                 argv.push(num_lines.to_string());
                 argv
+            }
+            DokkuCommand::LogsFailed { app } => {
+                vec!["logs:failed".into(), app.as_str().into()]
             }
             DokkuCommand::NginxAccessLogs { app, follow } => {
                 let mut argv = vec!["nginx:access-logs".into(), app.as_str().into()];
@@ -748,6 +875,14 @@ impl DokkuCommand {
             | DokkuCommand::BuildpacksRemove { .. }
             | DokkuCommand::BuildpacksClear { .. }
             | DokkuCommand::BuilderSet { .. }
+            | DokkuCommand::GitSync { .. }
+            | DokkuCommand::GitFromImage { .. }
+            | DokkuCommand::GitFromArchive { .. }
+            | DokkuCommand::LetsencryptEnable { .. }
+            | DokkuCommand::LetsencryptDisable { .. }
+            | DokkuCommand::LetsencryptRevoke { .. }
+            | DokkuCommand::LetsencryptCleanup { .. }
+            | DokkuCommand::LetsencryptCronJob { .. }
             | DokkuCommand::Logs { follow: true, .. }
             | DokkuCommand::NginxAccessLogs { follow: true, .. }
             | DokkuCommand::NginxErrorLogs { follow: true, .. } => CommandTimeout::Indefinite,
@@ -790,6 +925,15 @@ impl DokkuCommand {
             | DokkuCommand::HttpAuthAddUser { .. }
             | DokkuCommand::HttpAuthRemoveUser { .. } => Requirement::Plugin {
                 name: "http-auth".to_owned(),
+            },
+            DokkuCommand::LetsencryptList
+            | DokkuCommand::LetsencryptActive { .. }
+            | DokkuCommand::LetsencryptEnable { .. }
+            | DokkuCommand::LetsencryptDisable { .. }
+            | DokkuCommand::LetsencryptRevoke { .. }
+            | DokkuCommand::LetsencryptCleanup { .. }
+            | DokkuCommand::LetsencryptCronJob { .. } => Requirement::Plugin {
+                name: "letsencrypt".to_owned(),
             },
             _ => Requirement::Core,
         }
@@ -1084,6 +1228,66 @@ mod tests {
                 name: "http-auth".into()
             }
         );
+        for command in [
+            DokkuCommand::LetsencryptList,
+            DokkuCommand::LetsencryptActive { app: app("myapp") },
+            DokkuCommand::LetsencryptEnable { app: app("myapp") },
+            DokkuCommand::LetsencryptDisable { app: app("myapp") },
+            DokkuCommand::LetsencryptRevoke { app: app("myapp") },
+            DokkuCommand::LetsencryptCleanup { app: app("myapp") },
+            DokkuCommand::LetsencryptCronJob { add: true },
+        ] {
+            assert_eq!(
+                command.requirement(),
+                Requirement::Plugin {
+                    name: "letsencrypt".into()
+                },
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tls_argv() {
+        assert_eq!(
+            DokkuCommand::LetsencryptList.argv(),
+            vec!["letsencrypt:list"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptActive { app: app("myapp") }.argv(),
+            vec!["letsencrypt:active", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptEnable { app: app("myapp") }.argv(),
+            vec!["letsencrypt:enable", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptRevoke { app: app("myapp") }.argv(),
+            vec!["letsencrypt:revoke", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptCleanup { app: app("myapp") }.argv(),
+            vec!["letsencrypt:cleanup", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptCronJob { add: true }.argv(),
+            vec!["letsencrypt:cron-job", "--add"]
+        );
+        assert_eq!(
+            DokkuCommand::LetsencryptCronJob { add: false }.argv(),
+            vec!["letsencrypt:cron-job", "--remove"]
+        );
+        assert_eq!(
+            DokkuCommand::CertsReport { app: None }.argv(),
+            vec!["certs:report"]
+        );
+        assert_eq!(
+            DokkuCommand::CertsReport {
+                app: Some(app("myapp"))
+            }
+            .argv(),
+            vec!["certs:report", "myapp"]
+        );
     }
 
     #[test]
@@ -1323,6 +1527,7 @@ mod tests {
                 app: app("myapp"),
                 num_lines: 200,
                 follow: false,
+                process: None,
             },
             DokkuCommand::BuildsReport { app: app("myapp") },
             DokkuCommand::DomainsReport { app: app("myapp") },
@@ -1381,9 +1586,132 @@ mod tests {
                 app: app("myapp"),
                 num_lines: 200,
                 follow: false,
+                process: None
             }
             .argv(),
             vec!["logs", "myapp", "--num", "200"]
+        );
+    }
+
+    #[test]
+    fn logs_argv_uses_the_ps_flag_when_filtering() {
+        assert_eq!(
+            DokkuCommand::Logs {
+                app: app("myapp"),
+                num_lines: 200,
+                follow: true,
+                process: Some("web".into()),
+            }
+            .argv(),
+            vec!["logs", "myapp", "--tail", "--ps", "web", "--num", "200"]
+        );
+    }
+
+    #[test]
+    fn logs_failed_argv() {
+        assert_eq!(
+            DokkuCommand::LogsFailed { app: app("myapp") }.argv(),
+            vec!["logs:failed", "myapp"]
+        );
+    }
+
+    #[test]
+    fn git_read_argv() {
+        assert_eq!(
+            DokkuCommand::GitReport { app: app("myapp") }.argv(),
+            vec!["git:report", "myapp"]
+        );
+        assert_eq!(DokkuCommand::GitPublicKey.argv(), vec!["git:public-key"]);
+    }
+
+    #[test]
+    fn git_set_argv_sets_and_clears() {
+        assert_eq!(
+            DokkuCommand::GitSet {
+                app: app("myapp"),
+                property: "deploy-branch".into(),
+                value: Some("main".into()),
+            }
+            .argv(),
+            vec!["git:set", "myapp", "deploy-branch", "main"]
+        );
+        assert_eq!(
+            DokkuCommand::GitSet {
+                app: app("myapp"),
+                property: "deploy-branch".into(),
+                value: None,
+            }
+            .argv(),
+            vec!["git:set", "myapp", "deploy-branch"]
+        );
+    }
+
+    #[test]
+    fn git_sync_argv_puts_the_build_flag_first() {
+        assert_eq!(
+            DokkuCommand::GitSync {
+                app: app("myapp"),
+                repo: "https://github.com/org/repo.git".into(),
+                git_ref: Some("main".into()),
+                build_mode: GitBuildMode::Build,
+            }
+            .argv(),
+            vec![
+                "git:sync",
+                "--build",
+                "myapp",
+                "https://github.com/org/repo.git",
+                "main"
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::GitSync {
+                app: app("myapp"),
+                repo: "git@github.com:org/repo.git".into(),
+                git_ref: None,
+                build_mode: GitBuildMode::BuildIfChanges,
+            }
+            .argv(),
+            vec![
+                "git:sync",
+                "--build-if-changes",
+                "myapp",
+                "git@github.com:org/repo.git"
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::GitSync {
+                app: app("myapp"),
+                repo: "https://github.com/org/repo.git".into(),
+                git_ref: None,
+                build_mode: GitBuildMode::NoBuild,
+            }
+            .argv(),
+            vec!["git:sync", "myapp", "https://github.com/org/repo.git"]
+        );
+    }
+
+    #[test]
+    fn git_image_and_archive_argv() {
+        assert_eq!(
+            DokkuCommand::GitFromImage {
+                app: app("myapp"),
+                image: "ghcr.io/org/app:v1".into(),
+            }
+            .argv(),
+            vec!["git:from-image", "myapp", "ghcr.io/org/app:v1"]
+        );
+        assert_eq!(
+            DokkuCommand::GitFromArchive {
+                app: app("myapp"),
+                archive_url: "https://example.com/app.tar.gz".into(),
+            }
+            .argv(),
+            vec![
+                "git:from-archive",
+                "myapp",
+                "https://example.com/app.tar.gz"
+            ]
         );
     }
 
@@ -1751,6 +2079,7 @@ mod tests {
                 app: app("myapp"),
                 num_lines: 200,
                 follow: false,
+                process: None,
             },
             DokkuCommand::StorageReport,
             DokkuCommand::DokkuVersion,

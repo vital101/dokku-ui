@@ -47,6 +47,7 @@ fn is_public_path(path: &str) -> bool {
         || path == "/setup"
         || path == "/favicon.ico"
         || path.starts_with("/static/")
+        || path.starts_with("/webhooks/")
 }
 
 #[cfg(test)]
@@ -61,6 +62,7 @@ mod tests {
             "/setup",
             "/favicon.ico",
             "/static/css/app.css",
+            "/webhooks/github/myapp",
         ] {
             assert!(is_public_path(path), "{path} should be public");
         }
@@ -68,7 +70,15 @@ mod tests {
 
     #[test]
     fn private_paths_are_identified() {
-        for path in ["/", "/apps", "/apps/myapp", "/logout", "/static.txt"] {
+        for path in [
+            "/",
+            "/apps",
+            "/apps/myapp",
+            "/logout",
+            "/static.txt",
+            "/webhooks",
+            "/xwebhooks/github/myapp",
+        ] {
             assert!(!is_public_path(path), "{path} should be private");
         }
     }

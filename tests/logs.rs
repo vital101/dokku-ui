@@ -23,19 +23,11 @@ const LOGS_HELP: &str = include_str!("fixtures/logs_help.txt");
 fn live_logs_client() -> MockClient {
     MockClient::new()
         .stub(
-            DokkuCommand::Logs {
-                app: app_name("alpha"),
-                num_lines: 200,
-                follow: true,
-            },
+            DokkuCommand::Logs { app: app_name("alpha"), num_lines: 200, follow: true, process: None },
             Ok(DokkuOutput::ok("2026-01-01T00:00:00Z app[web.1]: booting\n2026-01-01T00:00:01Z app[web.1]: ready\n")),
         )
         .stub(
-            DokkuCommand::Logs {
-                app: app_name("alpha"),
-                num_lines: 200,
-                follow: false,
-            },
+            DokkuCommand::Logs { app: app_name("alpha"), num_lines: 200, follow: false, process: None },
             Ok(DokkuOutput::ok("2026-01-01T00:00:00Z app[web.1]: booting\n")),
         )
         .stub(
@@ -127,6 +119,7 @@ async fn log_stream_follows_app_logs_over_sse() {
             app: app_name("alpha"),
             num_lines: 200,
             follow: true,
+            process: None
         }),
         "the follow command ran"
     );
@@ -175,6 +168,7 @@ async fn log_stream_without_probe_data_serves_without_gating() {
         app: app_name("alpha"),
         num_lines: 200,
         follow: true,
+        process: None
     }));
 }
 
@@ -198,5 +192,62 @@ async fn log_stream_tail_zero_is_a_bounded_snapshot() {
         app: app_name("alpha"),
         num_lines: 200,
         follow: false,
+        process: None
     }));
+}
+
+#[tokio::test]
+async fn log_stream_process_filter_uses_the_ps_flag() {
+    let client = live_logs_client().stub(
+        DokkuCommand::Logs {
+            app: app_name("alpha"),
+            num_lines: 200,
+            follow: true,
+            process: Some("web".into()),
+        },
+        Ok(DokkuOutput::ok(
+            "2026-01-01T00:00:00Z app[web.1]: booting\n",
+        )),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs/stream?source=logs&tail=1&process=web")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("booting"), "{body}");
+    assert!(
+        client.calls().contains(&DokkuCommand::Logs {
+            app: app_name("alpha"),
+            num_lines: 200,
+            follow: true,
+            process: Some("web".into()),
+        }),
+        "the filtered follow command ran"
+    );
+}
+
+#[tokio::test]
+async fn log_stream_rejects_invalid_process_filters() {
+    let (state, _client, _dir) = test_state_with_shared_client(live_logs_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/logs/stream?source=logs&tail=1&process=web.1")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

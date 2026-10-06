@@ -8,11 +8,16 @@ use crate::domain::command::DokkuCommand;
 use crate::domain::cron::is_valid_cron_id;
 use crate::domain::domain_name::DomainName;
 use crate::domain::env_file::{is_valid_config_key, is_valid_config_value};
+use crate::domain::git::{
+    DEPLOY_BRANCH_PROPERTY, GitBuildMode, is_valid_archive_url, is_valid_git_ref,
+    is_valid_git_remote, is_valid_image_ref,
+};
 use crate::domain::http_auth::is_valid_username;
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
+use crate::domain::tls::LetsencryptAction;
 use crate::domain::types::{EnvVar, ScaleEntry};
 
 /// Serializable description of one queued mutation. Rehydrating through
@@ -168,6 +173,32 @@ pub enum JobSpec {
     ConfigUnset {
         app: String,
         keys: Vec<String>,
+    },
+    GitSet {
+        app: String,
+        property: String,
+        value: Option<String>,
+    },
+    GitSync {
+        app: String,
+        repo: String,
+        git_ref: Option<String>,
+        build_mode: GitBuildMode,
+    },
+    GitFromImage {
+        app: String,
+        image: String,
+    },
+    GitFromArchive {
+        app: String,
+        archive_url: String,
+    },
+    LetsencryptAction {
+        app: String,
+        action: LetsencryptAction,
+    },
+    LetsencryptCronJob {
+        add: bool,
     },
     VolumeMount {
         app: String,
@@ -525,6 +556,103 @@ impl JobSpec {
                     app,
                     keys: keys.clone(),
                 }])
+            }
+            JobSpec::GitSet {
+                app,
+                property,
+                value,
+            } => {
+                let app = parse_app(app)?;
+                if property != DEPLOY_BRANCH_PROPERTY {
+                    return Err(JobSpecError::Invalid(format!(
+                        "invalid git property `{property}`"
+                    )));
+                }
+                let value = match value {
+                    None => None,
+                    Some(value) if value.trim().is_empty() => None,
+                    Some(value) => {
+                        if !is_valid_git_ref(value) {
+                            return Err(JobSpecError::Invalid(format!(
+                                "invalid deploy branch `{value}`"
+                            )));
+                        }
+                        Some(value.clone())
+                    }
+                };
+                Ok(vec![DokkuCommand::GitSet {
+                    app,
+                    property: property.clone(),
+                    value,
+                }])
+            }
+            JobSpec::GitSync {
+                app,
+                repo,
+                git_ref,
+                build_mode,
+            } => {
+                let app = parse_app(app)?;
+                if !is_valid_git_remote(repo) {
+                    return Err(JobSpecError::Invalid(format!(
+                        "invalid git remote `{repo}`"
+                    )));
+                }
+                let git_ref = match git_ref {
+                    None => None,
+                    Some(git_ref) if git_ref.trim().is_empty() => None,
+                    Some(git_ref) => {
+                        if !is_valid_git_ref(git_ref) {
+                            return Err(JobSpecError::Invalid(format!(
+                                "invalid git ref `{git_ref}`"
+                            )));
+                        }
+                        Some(git_ref.clone())
+                    }
+                };
+                Ok(vec![DokkuCommand::GitSync {
+                    app,
+                    repo: repo.clone(),
+                    git_ref,
+                    build_mode: *build_mode,
+                }])
+            }
+            JobSpec::GitFromImage { app, image } => {
+                let app = parse_app(app)?;
+                if !is_valid_image_ref(image) {
+                    return Err(JobSpecError::Invalid(format!(
+                        "invalid image ref `{image}`"
+                    )));
+                }
+                Ok(vec![DokkuCommand::GitFromImage {
+                    app,
+                    image: image.clone(),
+                }])
+            }
+            JobSpec::GitFromArchive { app, archive_url } => {
+                let app = parse_app(app)?;
+                if !is_valid_archive_url(archive_url) {
+                    return Err(JobSpecError::Invalid(format!(
+                        "invalid archive url `{archive_url}`"
+                    )));
+                }
+                Ok(vec![DokkuCommand::GitFromArchive {
+                    app,
+                    archive_url: archive_url.clone(),
+                }])
+            }
+            JobSpec::LetsencryptAction { app, action } => {
+                let app = parse_app(app)?;
+                let command = match action {
+                    LetsencryptAction::Enable => DokkuCommand::LetsencryptEnable { app },
+                    LetsencryptAction::Disable => DokkuCommand::LetsencryptDisable { app },
+                    LetsencryptAction::Revoke => DokkuCommand::LetsencryptRevoke { app },
+                    LetsencryptAction::Cleanup => DokkuCommand::LetsencryptCleanup { app },
+                };
+                Ok(vec![command])
+            }
+            JobSpec::LetsencryptCronJob { add } => {
+                Ok(vec![DokkuCommand::LetsencryptCronJob { add: *add }])
             }
             JobSpec::VolumeMount { app, spec } => {
                 let app = parse_app(app)?;
@@ -1246,6 +1374,204 @@ mod tests {
                 app: app("alpha"),
                 keys: vec!["GONE".into()],
             }]
+        );
+    }
+
+    #[test]
+    fn git_set_spec_rehydrates_and_revalidates() {
+        assert_eq!(
+            JobSpec::GitSet {
+                app: "alpha".into(),
+                property: "deploy-branch".into(),
+                value: Some("main".into()),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::GitSet {
+                app: app("alpha"),
+                property: "deploy-branch".into(),
+                value: Some("main".into()),
+            }]
+        );
+        assert_eq!(
+            JobSpec::GitSet {
+                app: "alpha".into(),
+                property: "deploy-branch".into(),
+                value: None,
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::GitSet {
+                app: app("alpha"),
+                property: "deploy-branch".into(),
+                value: None,
+            }]
+        );
+        assert_eq!(
+            JobSpec::GitSet {
+                app: "alpha".into(),
+                property: "deploy-branch".into(),
+                value: Some("  ".into()),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::GitSet {
+                app: app("alpha"),
+                property: "deploy-branch".into(),
+                value: None,
+            }],
+            "blank values clear like an omitted value"
+        );
+        assert!(
+            JobSpec::GitSet {
+                app: "alpha".into(),
+                property: "keep-git-dir".into(),
+                value: Some("true".into()),
+            }
+            .to_commands()
+            .is_err(),
+            "unknown git properties are rejected"
+        );
+        assert!(
+            JobSpec::GitSet {
+                app: "alpha".into(),
+                property: "deploy-branch".into(),
+                value: Some("it's".into()),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid branch names are rejected"
+        );
+    }
+
+    #[test]
+    fn git_deploy_specs_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::GitSync {
+                app: "alpha".into(),
+                repo: "https://github.com/org/repo.git".into(),
+                git_ref: Some("main".into()),
+                build_mode: GitBuildMode::BuildIfChanges,
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::GitSync {
+                app: app("alpha"),
+                repo: "https://github.com/org/repo.git".into(),
+                git_ref: Some("main".into()),
+                build_mode: GitBuildMode::BuildIfChanges,
+            }]
+        );
+        assert_eq!(
+            JobSpec::GitFromImage {
+                app: "alpha".into(),
+                image: "ghcr.io/org/app:v1".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::GitFromImage {
+                app: app("alpha"),
+                image: "ghcr.io/org/app:v1".into(),
+            }]
+        );
+        assert_eq!(
+            JobSpec::GitFromArchive {
+                app: "alpha".into(),
+                archive_url: "https://example.com/app.tar.gz".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::GitFromArchive {
+                app: app("alpha"),
+                archive_url: "https://example.com/app.tar.gz".into(),
+            }]
+        );
+        assert!(
+            JobSpec::GitSync {
+                app: "alpha".into(),
+                repo: "github.com/org/repo".into(),
+                git_ref: None,
+                build_mode: GitBuildMode::NoBuild,
+            }
+            .to_commands()
+            .is_err(),
+            "scheme-less remotes are rejected"
+        );
+        assert!(
+            JobSpec::GitSync {
+                app: "alpha".into(),
+                repo: "https://github.com/org/repo.git".into(),
+                git_ref: Some("it's".into()),
+                build_mode: GitBuildMode::Build,
+            }
+            .to_commands()
+            .is_err(),
+            "quote-carrying refs are rejected"
+        );
+        assert!(
+            JobSpec::GitFromImage {
+                app: "alpha".into(),
+                image: "it's".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "quote-carrying images are rejected"
+        );
+        assert!(
+            JobSpec::GitFromArchive {
+                app: "alpha".into(),
+                archive_url: "ftp://example.com/app.tar.gz".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "non-http archives are rejected"
+        );
+    }
+
+    #[test]
+    fn letsencrypt_specs_rehydrate_and_revalidate() {
+        for (action, expected) in [
+            (
+                LetsencryptAction::Enable,
+                DokkuCommand::LetsencryptEnable { app: app("alpha") },
+            ),
+            (
+                LetsencryptAction::Disable,
+                DokkuCommand::LetsencryptDisable { app: app("alpha") },
+            ),
+            (
+                LetsencryptAction::Revoke,
+                DokkuCommand::LetsencryptRevoke { app: app("alpha") },
+            ),
+            (
+                LetsencryptAction::Cleanup,
+                DokkuCommand::LetsencryptCleanup { app: app("alpha") },
+            ),
+        ] {
+            assert_eq!(
+                JobSpec::LetsencryptAction {
+                    app: "alpha".into(),
+                    action,
+                }
+                .to_commands()
+                .expect("commands"),
+                vec![expected]
+            );
+        }
+        assert_eq!(
+            JobSpec::LetsencryptCronJob { add: true }
+                .to_commands()
+                .expect("commands"),
+            vec![DokkuCommand::LetsencryptCronJob { add: true }]
+        );
+        assert!(
+            JobSpec::LetsencryptAction {
+                app: "Bad_App".into(),
+                action: LetsencryptAction::Enable,
+            }
+            .to_commands()
+            .is_err(),
+            "tampered app names are rejected"
         );
     }
 

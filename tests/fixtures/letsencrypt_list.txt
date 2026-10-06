@@ -1,0 +1,11 @@
+-----> App name           Certificate Expiry        Time before expiry        Time before renewal      
+oneiric                   2026-11-18 05:25:41       42d, 19h, 3m, 14s         12d, 19h, 3m, 14s        
+docs-kernl                2026-11-19 05:25:43       43d, 19h, 3m, 16s         13d, 19h, 3m, 16s        
+nannymud                  2026-11-20 05:25:42       44d, 19h, 3m, 15s         14d, 19h, 3m, 15s        
+starwars                  2026-11-20 05:26:05       44d, 19h, 3m, 38s         14d, 19h, 3m, 38s        
+candid                    2026-11-29 05:25:39       53d, 19h, 3m, 12s         23d, 19h, 3m, 12s        
+alethos-mcp               2026-12-06 05:25:46       60d, 19h, 3m, 19s         30d, 19h, 3m, 19s        
+recycledair               2026-12-15 05:25:49       69d, 19h, 3m, 22s         39d, 19h, 3m, 22s        
+openrouter-logs           2026-12-19 05:25:38       73d, 19h, 3m, 11s         43d, 19h, 3m, 11s        
+kernl-analytics           2026-12-25 05:25:42       79d, 19h, 3m, 15s         49d, 19h, 3m, 15s        
+dokku-ui                  2027-01-01 11:30:37       87d, 1h, 8m, 10s          57d, 1h, 8m, 10s         

@@ -21,6 +21,14 @@
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "build" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Build
   </a>
+  <a href="/apps/{{ name }}/deploy"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "deploy" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Deploy
+  </a>
+  <a href="/apps/{{ name }}/tls"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "tls" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    TLS
+  </a>
   <a href="/apps/{{ name }}/services"
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "services" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Services

@@ -1,0 +1,16 @@
+<div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+  <div class="flex items-center justify-between">
+    <h3 class="text-sm font-medium text-white">Failed deploy logs</h3>
+    <button type="button"
+            hx-get="/apps/{{ name }}/partials/failed-logs" hx-target="#failed-logs-panel" hx-swap="innerHTML"
+            class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+      Refresh
+    </button>
+  </div>
+  {% if lines.is_empty() %}
+  <p class="mt-4 text-sm text-slate-400">No failed deploy logs.</p>
+  {% else %}
+  <pre class="mt-4 max-h-96 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-4 text-xs leading-relaxed text-slate-300">{% for line in lines %}{{ line }}
+{% endfor %}</pre>
+  {% endif %}
+</div>

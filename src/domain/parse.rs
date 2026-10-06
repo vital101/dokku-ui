@@ -1,8 +1,9 @@
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::types::{
     AppInfo, AppMounts, BuildInfo, BuilderReport, ContainerDetails, CronTask, DomainsReport,
-    EnvVar, ImageStatus, LogLines, Mount, ProcessState, ProcessStatus, PsReport, ResourceReport,
-    ScaleEntry, ServiceInfo, ServiceStats, StorageEntry, VolumeUsage,
+    EnvVar, GitReport, ImageStatus, LetsencryptEntry, LogLines, Mount, ProcessState, ProcessStatus,
+    PsReport, ResourceReport, ScaleEntry, ServiceInfo, ServiceStats, SslReport, StorageEntry,
+    VolumeUsage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -124,12 +125,150 @@ pub fn parse_builder_report(output: &str) -> BuilderReport {
     report
 }
 
+/// `dokku git:report <app>` plain text -> typed view. Lines look like
+/// `Git computed deploy branch:    main`; the `Git ` prefix and padding are
+/// stripped. The sha value is only accepted when it looks like a hex commit
+/// (the report prints the literal `HEAD` on unborn refs); `last updated at`
+/// is the deploy-branch ref mtime in unix seconds, formatted to UTC.
+pub fn parse_git_report(output: &str) -> GitReport {
+    let mut report = GitReport::default();
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_lowercase();
+        let key = key.strip_prefix("git ").unwrap_or(&key).to_owned();
+        let value = normalize_report_value(value);
+        match key.as_str() {
+            "deploy branch" => report.deploy_branch = value,
+            "computed deploy branch" => report.computed_deploy_branch = value,
+            "sha" => {
+                if (7..=64).contains(&value.len()) && value.chars().all(|c| c.is_ascii_hexdigit()) {
+                    report.sha = value;
+                }
+            }
+            "source image" => report.source_image = value,
+            "last updated at" => report.last_updated_at = format_created_at(&value),
+            _ => {}
+        }
+    }
+    report
+}
+
+/// `dokku git:public-key` -> the public key line. The host prints a warning
+/// block and exits 1 when no deploy key exists, so anything that is not an
+/// ssh key line yields `None` (the caller renders the guidance state).
+pub fn parse_git_public_key(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .map(|line| line.trim().to_owned())
+        .find(|line| line.starts_with("ssh-") && line.contains(' '))
+}
+
+/// `letsencrypt:list` -> secured apps with expiry info. The output is a
+/// fixed-width table under a `-----> App name …` banner; columns are separated
+/// by runs of two or more spaces because the expiry and countdown cells
+/// themselves contain single spaces.
+pub fn parse_letsencrypt_list(output: &str) -> Vec<LetsencryptEntry> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("----->") || line.starts_with("=====>") {
+                return None;
+            }
+            let columns = split_padded_columns(line);
+            if columns.len() < 4 {
+                return None;
+            }
+            Some(LetsencryptEntry {
+                app: columns[0].to_owned(),
+                expires_at: columns[1].to_owned(),
+                renews_in: columns[2].to_owned(),
+                renewal_in: columns[3].to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn split_padded_columns(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut columns = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b' ' && i + 1 < bytes.len() && bytes[i + 1] == b' ' {
+            let column = line[start..i].trim();
+            if !column.is_empty() {
+                columns.push(column);
+            }
+            while i < bytes.len() && bytes[i] == b' ' {
+                i += 1;
+            }
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    let last = line[start..].trim();
+    if !last.is_empty() {
+        columns.push(last);
+    }
+    columns
+}
+
+/// `letsencrypt:active <app>` -> whether the app has an active certificate.
+/// The plugin prints the literal `true`/`false` and exits 0 either way.
+pub fn parse_letsencrypt_active(output: &str) -> bool {
+    output.lines().map(str::trim).any(|line| line == "true")
+}
+
+/// `certs:report [<app>]` -> the first `=====> <app> ssl information` section
+/// (callers pass a single app). Values are prose/plain; malformed output
+/// yields `None`.
+pub fn parse_certs_report(output: &str) -> Option<SslReport> {
+    let mut report: Option<SslReport> = None;
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.starts_with("=====> ") {
+            if report.is_some() {
+                break;
+            }
+            report = Some(SslReport::default());
+            continue;
+        }
+        let Some(current) = report.as_mut() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_lowercase();
+        let value = normalize_report_value(value);
+        match key.strip_prefix("ssl ").unwrap_or("") {
+            "enabled" => current.enabled = value == "true",
+            "hostnames" => current.hostnames = value,
+            "issuer" => current.issuer = value,
+            "expires at" => current.expires_at = value,
+            "starts at" => current.starts_at = value,
+            "subject" => current.subject = value,
+            "verified" => current.verified = value,
+            _ => {}
+        }
+    }
+    report
+}
+
 /// `dokku cron:list <app> --format json` -> scheduled tasks. A malformed
 /// response yields an empty list (the caller renders an empty state).
 pub fn parse_cron_tasks(json: &str) -> Vec<CronTask> {
     serde_json::from_str::<Vec<CronTask>>(json).unwrap_or_default()
 }
-
 /// `dokku domains:report <app> --format json` -> the app's vhost hostnames.
 pub fn parse_domains_report(json: &str) -> Vec<String> {
     parse_domains_detail(json)
@@ -639,6 +778,22 @@ pub fn parse_logs(output: &str) -> LogLines {
     LogLines::new(output.lines().map(strip_ansi).collect())
 }
 
+/// `logs:failed <app>` -> the last failed deploy log. The `=====> <app> failed
+/// deploy logs` header and dokku `----->` banners are dropped; everything
+/// else (including `remote: !` error lines) is kept. No failed deploy ⇒ empty.
+pub fn parse_logs_failed(output: &str) -> LogLines {
+    LogLines::new(
+        output
+            .lines()
+            .map(strip_ansi)
+            .filter(|line| {
+                let line = line.trim();
+                !line.starts_with("=====>") && !line.starts_with("----->")
+            })
+            .collect(),
+    )
+}
+
 pub const LOG_LINES_DEFAULT: u32 = 200;
 pub const LOG_LINES_MIN: u32 = 10;
 pub const LOG_LINES_MAX: u32 = 1000;
@@ -708,6 +863,178 @@ mod tests {
     const VOLUME_USAGE: &str = include_str!("../../tests/fixtures/volume_usage.txt");
     const LIST_ENTRIES: &str = include_str!("../../tests/fixtures/list_entries.json");
     const BUILDER_REPORT: &str = include_str!("../../tests/fixtures/builder_report.txt");
+    const GIT_REPORT: &str = include_str!("../../tests/fixtures/git_report.txt");
+    const GIT_REPORT_NOT_DEPLOYED: &str =
+        include_str!("../../tests/fixtures/git_report_not_deployed.txt");
+    const GIT_REPORT_FRESH: &str = include_str!("../../tests/fixtures/git_report_fresh.txt");
+    const GIT_REPORT_SYNCED: &str = include_str!("../../tests/fixtures/git_report_synced.txt");
+    const GIT_PUBLIC_KEY_MISSING: &str =
+        include_str!("../../tests/fixtures/git_public_key_missing.txt");
+    const LETSENCRYPT_LIST: &str = include_str!("../../tests/fixtures/letsencrypt_list.txt");
+    const LETSENCRYPT_ACTIVE_TRUE: &str =
+        include_str!("../../tests/fixtures/letsencrypt_active_true.txt");
+    const LETSENCRYPT_ACTIVE_FALSE: &str =
+        include_str!("../../tests/fixtures/letsencrypt_active_false.txt");
+    const CERTS_REPORT: &str = include_str!("../../tests/fixtures/certs_report.txt");
+    const CERTS_REPORT_APP: &str = include_str!("../../tests/fixtures/certs_report_app.txt");
+    const CERTS_REPORT_DISABLED: &str =
+        include_str!("../../tests/fixtures/certs_report_disabled.txt");
+    const LOGS_FAILED: &str = include_str!("../../tests/fixtures/logs_failed.txt");
+    const LOGS_FAILED_POPULATED: &str =
+        include_str!("../../tests/fixtures/logs_failed_populated.txt");
+
+    #[test]
+    fn parses_git_report_fixture() {
+        let report = parse_git_report(GIT_REPORT);
+        assert_eq!(report.deploy_branch, "main");
+        assert_eq!(report.computed_deploy_branch, "main");
+        assert_eq!(report.sha, "", "null sha (literal HEAD) is not a commit");
+        assert_eq!(report.source_image, "");
+        assert_eq!(report.last_updated_at, "2026-10-05 21:18 UTC");
+    }
+
+    #[test]
+    fn git_report_without_explicit_branch_falls_back_to_computed() {
+        let report = parse_git_report(GIT_REPORT_NOT_DEPLOYED);
+        assert_eq!(report.deploy_branch, "");
+        assert_eq!(report.computed_deploy_branch, "master");
+        assert_eq!(report.sha.len(), 40);
+    }
+
+    #[test]
+    fn git_report_fresh_app_has_no_commit_or_timestamp() {
+        let report = parse_git_report(GIT_REPORT_FRESH);
+        assert_eq!(report.deploy_branch, "");
+        assert_eq!(report.computed_deploy_branch, "master");
+        assert_eq!(report.sha, "", "the report prints HEAD for unborn refs");
+        assert_eq!(report.last_updated_at, "");
+    }
+
+    #[test]
+    fn git_report_after_sync_has_real_sha() {
+        let report = parse_git_report(GIT_REPORT_SYNCED);
+        assert_eq!(report.deploy_branch, "master");
+        assert_eq!(report.sha, "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d");
+        assert!(!report.last_updated_at.is_empty());
+    }
+
+    #[test]
+    fn git_report_tolerates_missing_or_malformed_output() {
+        let report = parse_git_report("");
+        assert_eq!(report, GitReport::default());
+        let report = parse_git_report("=====> alpha git information\nGit sha: deadbeef\n");
+        assert_eq!(report.sha, "deadbeef", "short shas are kept");
+        let report = parse_git_report("Git sha: not a sha\n");
+        assert_eq!(report.sha, "");
+    }
+
+    #[test]
+    fn git_public_key_parses_key_line_only() {
+        assert_eq!(
+            parse_git_public_key("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@host\n"),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test@host".to_owned())
+        );
+        assert_eq!(
+            parse_git_public_key(GIT_PUBLIC_KEY_MISSING),
+            None,
+            "warning block is not a key"
+        );
+        assert_eq!(parse_git_public_key(""), None);
+    }
+
+    #[test]
+    fn parses_letsencrypt_list_fixture() {
+        let entries = parse_letsencrypt_list(LETSENCRYPT_LIST);
+        assert_eq!(entries.len(), 10, "the banner is skipped, every row parsed");
+        assert_eq!(entries[0].app, "oneiric");
+        assert_eq!(entries[0].expires_at, "2026-11-18 05:25:41");
+        assert_eq!(entries[0].renews_in, "42d, 19h, 3m, 14s");
+        assert_eq!(entries[0].renewal_in, "12d, 19h, 3m, 14s");
+        assert!(
+            entries.iter().any(|entry| entry.app == "dokku-ui"),
+            "dokku-ui row present"
+        );
+    }
+
+    #[test]
+    fn letsencrypt_list_ignores_banners_and_junk() {
+        assert_eq!(parse_letsencrypt_list(""), Vec::new());
+        assert_eq!(
+            parse_letsencrypt_list("-----> App name           Certificate Expiry\n"),
+            Vec::new()
+        );
+        assert_eq!(
+            parse_letsencrypt_list("a-b  2026-01-01 00:00:00  1d, 0h, 0m, 0s  0d, 0h, 0m, 0s\n")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn parses_letsencrypt_active_fixtures() {
+        assert!(parse_letsencrypt_active(LETSENCRYPT_ACTIVE_TRUE));
+        assert!(!parse_letsencrypt_active(LETSENCRYPT_ACTIVE_FALSE));
+        assert!(!parse_letsencrypt_active(""));
+        assert!(!parse_letsencrypt_active("not true\n"));
+    }
+
+    #[test]
+    fn parses_certs_report_sections() {
+        let report = parse_certs_report(CERTS_REPORT_APP).expect("section");
+        assert!(report.enabled);
+        assert_eq!(report.hostnames, "dokku.re-cycledair.com");
+        assert_eq!(report.expires_at, "Jan  1 11:30:37 2027 GMT");
+        assert!(report.issuer.contains("Let's Encrypt"));
+        assert_eq!(report.subject, "subject=CN = dokku.re-cycledair.com");
+        assert!(report.verified_by_ca());
+
+        let first = parse_certs_report(CERTS_REPORT).expect("first section");
+        assert_eq!(
+            first.hostnames, "alethos.io www.alethos.io",
+            "the all-apps report yields the first section"
+        );
+    }
+
+    #[test]
+    fn certs_report_disabled_app_has_empty_fields() {
+        let report = parse_certs_report(CERTS_REPORT_DISABLED).expect("section");
+        assert!(!report.enabled);
+        assert!(report.hostnames.is_empty());
+        assert!(report.expires_at.is_empty());
+        assert!(!report.verified_by_ca());
+        assert_eq!(parse_certs_report(""), None);
+    }
+
+    #[test]
+    fn logs_failed_drops_the_header_and_keeps_the_log() {
+        assert_eq!(
+            parse_logs_failed(LOGS_FAILED),
+            LogLines::new(Vec::new()),
+            "the empty capture is header-only"
+        );
+        let lines = parse_logs_failed(LOGS_FAILED_POPULATED);
+        assert!(
+            lines
+                .as_slice()
+                .iter()
+                .any(|line| line.contains("pre-receive hook declined")),
+            "remote error lines survive"
+        );
+        assert!(
+            lines
+                .as_slice()
+                .iter()
+                .all(|line| !line.contains("failed deploy logs")),
+            "the dokku header is dropped"
+        );
+        assert!(
+            lines
+                .as_slice()
+                .iter()
+                .any(|line| line.starts_with("remote:  !")),
+            "remote warning lines are content, not banners"
+        );
+    }
 
     #[test]
     fn parses_apps_list_fixture() {

@@ -1,0 +1,12 @@
+=====> scratch-m20 git information
+       Git computed deploy branch:    master                   
+       Git computed keep git dir:     false                    
+       Git deploy branch:                                      
+       Git global archive max files:  10000                    
+       Git global archive max size:   1073741824               
+       Git global deploy branch:      master                   
+       Git keep git dir:                                       
+       Git rev env var:               GIT_REV                  
+       Git sha:                       HEAD                     
+       Git source image:                                       
+       Git last updated at:                                    

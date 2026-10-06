@@ -1,0 +1,271 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Push to deploy</h3>
+      <span class="text-xs text-slate-500">updated {{ updated }}</span>
+    </div>
+    <p class="mt-1 text-xs text-slate-500">
+      Push a branch to this git remote to build and deploy the app.
+    </p>
+    <div class="mt-4 flex items-center gap-2">
+      <input id="push-url" type="text" readonly value="{{ push_url }}"
+             class="w-full flex-1 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-slate-200">
+      <button type="button" data-copy="push-url" data-copy-label="Copy"
+              class="rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700">
+        Copy
+      </button>
+    </div>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Deploy public key</h3>
+    {% if let Some(key) = public_key %}
+    <p class="mt-1 text-xs text-slate-500">
+      Add this key as a read-only deploy key on private repositories dokku
+      should fetch from.
+    </p>
+    <div class="mt-4 flex items-start gap-2">
+      <pre id="deploy-key" class="w-full flex-1 overflow-x-auto rounded-md border border-slate-800 bg-slate-900 p-3 font-mono text-xs text-slate-200">{{ key }}</pre>
+      <button type="button" data-copy="deploy-key" data-copy-label="Copy"
+              class="rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700">
+        Copy
+      </button>
+    </div>
+    {% else %}
+    <p class="mt-1 text-sm text-slate-400">
+      No deploy key is configured on the host, so dokku can only fetch public
+      repositories. Generate one on the dokku host with
+      <code class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-slate-200">dokku git:generate-deploy-key</code>
+      and add its public key to any private repository you deploy from.
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Git</h3>
+    <dl class="mt-4 grid gap-4 text-sm lg:grid-cols-3">
+      <div>
+        <dt class="text-xs text-slate-500">Deploy branch</dt>
+        <dd class="font-mono text-slate-300">
+          {% if git.deploy_branch.is_empty() %}<span class="text-slate-500">global default</span>{% else %}{{ git.deploy_branch }}{% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Effective branch</dt>
+        <dd class="font-mono text-slate-300">{{ git.computed_deploy_branch }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Last updated</dt>
+        <dd class="font-mono text-slate-300">
+          {% if git.last_updated_at.is_empty() %}<span class="text-slate-500">—</span>{% else %}{{ git.last_updated_at }}{% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Commit</dt>
+        <dd class="break-all font-mono text-slate-300">
+          {% if git.sha.is_empty() %}<span class="text-slate-500">—</span>{% else %}{{ git.sha }}{% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Source image</dt>
+        <dd class="font-mono text-slate-300">
+          {% if git.source_image.is_empty() %}<span class="text-slate-500">—</span>{% else %}{{ git.source_image }}{% endif %}
+        </dd>
+      </div>
+    </dl>
+    <form hx-post="/apps/{{ name }}/deploy/branch" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2 border-t border-slate-800/50 pt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="deploy-branch" class="mb-1 block text-sm text-slate-400">
+          Deploy branch <span class="text-slate-500">(blank uses the global default)</span>
+        </label>
+        <input id="deploy-branch" type="text" name="deploy_branch" value="{{ git.deploy_branch }}"
+               placeholder="{{ git.computed_deploy_branch }}"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Save
+      </button>
+    </form>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Deploy from git</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Clone or fetch a repository into the app and optionally build it.
+    </p>
+    <form hx-post="/apps/{{ name }}/deploy/sync" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 grid gap-4 lg:grid-cols-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lg:col-span-2">
+        <label for="sync-repo" class="mb-1 block text-sm text-slate-400">Repository</label>
+        <input id="sync-repo" type="text" name="repo" required placeholder="https://github.com/org/repo.git"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <div>
+        <label for="sync-ref" class="mb-1 block text-sm text-slate-400">Branch or ref</label>
+        <input id="sync-ref" type="text" name="git_ref" placeholder="default branch"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <div>
+        <label for="sync-mode" class="mb-1 block text-sm text-slate-400">Build</label>
+        <select id="sync-mode" name="build_mode"
+                class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+          <option value="build-if-changes" selected>If changes</option>
+          <option value="build">Always</option>
+          <option value="no-build">Never</option>
+        </select>
+      </div>
+      <div class="lg:col-span-4">
+        <button type="submit"
+                class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Sync and deploy
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <div class="grid gap-6 lg:grid-cols-2">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+      <h3 class="text-sm font-medium text-white">Deploy from image</h3>
+      <p class="mt-1 text-xs text-slate-500">
+        Replace the app's code with a docker image.
+      </p>
+      <form hx-post="/apps/{{ name }}/deploy/from-image" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="mt-4 flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex-1">
+          <label for="from-image" class="mb-1 block text-sm text-slate-400">Image</label>
+          <input id="from-image" type="text" name="image" required placeholder="ghcr.io/org/app:tag"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Deploy
+        </button>
+      </form>
+    </div>
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+      <h3 class="text-sm font-medium text-white">Deploy from archive</h3>
+      <p class="mt-1 text-xs text-slate-500">
+        Replace the app's code with a tar, tar.gz, or zip archive.
+      </p>
+      <form hx-post="/apps/{{ name }}/deploy/from-archive" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="mt-4 flex items-end gap-2">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex-1">
+          <label for="from-archive" class="mb-1 block text-sm text-slate-400">Archive URL</label>
+          <input id="from-archive" type="text" name="archive_url" required placeholder="https://example.com/app.tar.gz"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+        </div>
+        <button type="submit"
+                class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Deploy
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">GitHub webhook</h3>
+      {% if let Some(webhook) = webhook %}
+      {% if webhook.enabled %}
+      <span class="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
+        Enabled
+      </span>
+      {% else %}
+      <span class="inline-flex items-center gap-2 rounded-full bg-slate-700/40 px-3 py-1 text-xs font-medium text-slate-300">
+        Disabled
+      </span>
+      {% endif %}
+      {% endif %}
+    </div>
+    <p class="mt-1 text-xs text-slate-500">
+      GitHub calls this URL on every push; a signed event for the configured
+      repository and branch triggers a sync and deploy.
+    </p>
+    <div class="mt-4 flex items-center gap-2">
+      <input id="webhook-url" type="text" readonly value="{{ webhook_url }}"
+             class="w-full flex-1 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-slate-200">
+      <button type="button" data-copy="webhook-url" data-copy-label="Copy"
+              class="rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700">
+        Copy
+      </button>
+    </div>
+    <form hx-post="/apps/{{ name }}/webhooks" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 grid items-end gap-4 lg:grid-cols-5">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="lg:col-span-2">
+        <label for="webhook-repo" class="mb-1 block text-sm text-slate-400">Repository</label>
+        <input id="webhook-repo" type="text" name="repo" required placeholder="https://github.com/org/repo.git"
+               value="{% if let Some(webhook) = webhook %}{{ webhook.repo }}{% endif %}"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <div>
+        <label for="webhook-branch" class="mb-1 block text-sm text-slate-400">Branch</label>
+        <input id="webhook-branch" type="text" name="branch" required
+               value="{% if let Some(webhook) = webhook %}{{ webhook.branch }}{% else %}main{% endif %}"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <div>
+        <label for="webhook-mode" class="mb-1 block text-sm text-slate-400">Build</label>
+        <select id="webhook-mode" name="build_mode"
+                class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+          <option value="build-if-changes" {% if let Some(webhook) = webhook %}{% if webhook.build_mode.as_str() == "build-if-changes" %}selected{% endif %}{% else %}selected{% endif %}>If changes</option>
+          <option value="build" {% if let Some(webhook) = webhook %}{% if webhook.build_mode.as_str() == "build" %}selected{% endif %}{% endif %}>Always</option>
+          <option value="no-build" {% if let Some(webhook) = webhook %}{% if webhook.build_mode.as_str() == "no-build" %}selected{% endif %}{% endif %}>Never</option>
+        </select>
+      </div>
+      <div>
+        <label for="webhook-enabled" class="mb-2 flex items-center gap-2 text-sm text-slate-400">
+          <input id="webhook-enabled" type="checkbox" name="enabled"
+                 {% if let Some(webhook) = webhook %}{% if webhook.enabled %}checked{% endif %}{% else %}checked{% endif %}
+                 class="size-4 rounded border-slate-700 bg-slate-900">
+          Enabled
+        </label>
+        <button type="submit"
+                class="app-action w-full rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+          Save
+        </button>
+      </div>
+    </form>
+    {% if let Some(webhook) = webhook %}
+    <div class="mt-4 flex items-start gap-2 border-t border-slate-800/50 pt-4">
+      <form hx-post="/apps/{{ name }}/webhooks/reveal" hx-target="#webhook-secret-panel" hx-swap="innerHTML"
+            method="post" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit"
+                class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+          Reveal secret
+        </button>
+      </form>
+      <form hx-post="/apps/{{ name }}/webhooks/remove" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit"
+                class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-slate-700">
+          Remove webhook
+        </button>
+      </form>
+    </div>
+    <div id="webhook-secret-panel" class="mt-3"></div>
+    {% else %}
+    <p class="mt-3 text-xs text-slate-500">
+      Saving generates a webhook secret; GitHub must sign deliveries with it.
+    </p>
+    {% endif %}
+  </div>
+
+  <div id="failed-logs-panel"
+       hx-get="/apps/{{ name }}/partials/failed-logs"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+      <h3 class="text-sm font-medium text-white">Failed deploy logs</h3>
+      {% include "partials/loading.html" %}
+    </div>
+  </div>
+</div>

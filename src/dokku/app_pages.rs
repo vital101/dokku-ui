@@ -29,12 +29,14 @@ pub async fn app_logs(
     client: &dyn DokkuClient,
     app: AppName,
     num_lines: u32,
+    process: Option<&str>,
 ) -> Result<LogLines, DokkuError> {
     let output = client
         .exec(&DokkuCommand::Logs {
             app,
             num_lines,
             follow: false,
+            process: process.map(str::to_owned),
         })
         .await?;
     Ok(parse_logs(&output.stdout))
@@ -139,11 +141,14 @@ mod tests {
                 app: app("alpha"),
                 num_lines: 200,
                 follow: false,
+                process: None,
             },
             Ok(DokkuOutput::ok(LOGS)),
         );
 
-        let logs = app_logs(&client, app("alpha"), 200).await.expect("logs");
+        let logs = app_logs(&client, app("alpha"), 200, None)
+            .await
+            .expect("logs");
         assert_eq!(logs.len(), 3);
         assert!(!logs.as_slice().iter().any(|line| line.contains('\x1b')));
     }
@@ -155,15 +160,19 @@ mod tests {
                 app: app("alpha"),
                 num_lines: 50,
                 follow: false,
+                process: None,
             },
             Ok(DokkuOutput::ok("")),
         );
 
-        app_logs(&client, app("alpha"), 50).await.expect("logs");
+        app_logs(&client, app("alpha"), 50, None)
+            .await
+            .expect("logs");
         assert!(client.calls().contains(&DokkuCommand::Logs {
             app: app("alpha"),
             num_lines: 50,
             follow: false,
+            process: None
         }));
     }
 

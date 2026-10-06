@@ -36,10 +36,11 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
         )),
         jobs: Arc::new(storage::jobs::SqliteJobsRepo::new(pool.clone())),
         capabilities,
-        db: pool,
+        db: pool.clone(),
         settings: settings.clone(),
         dokku: client,
         snapshot,
+        webhooks: Arc::new(storage::webhooks::SqliteWebhooksRepo::new(pool)),
     };
     // The durable job workers: they reclaim expired leases and run any queued
     // jobs whose enqueuing process died. Prompt execution still happens in the

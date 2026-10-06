@@ -1,0 +1,8 @@
+=====> dokku-ui failed deploy logs
+remote: -----> Building dokku-ui from herokuish
+remote: -----> Installing nodejs
+remote:  !     Failed to install nodejs
+remote:  !     exit status 1
+ To https://github.com/example/dokku-ui.git
+ ! [remote rejected] main -> main (pre-receive hook declined)
+error: failed to push some refs to 'https://github.com/example/dokku-ui.git'

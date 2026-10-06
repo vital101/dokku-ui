@@ -6,6 +6,7 @@ pub mod cron;
 pub mod domain_name;
 pub mod email;
 pub mod env_file;
+pub mod git;
 pub mod http_auth;
 pub mod job;
 pub mod mount_spec;
@@ -15,7 +16,9 @@ pub mod redact;
 pub mod resource;
 pub mod service_name;
 pub mod service_plugin;
+pub mod tls;
 pub mod types;
+pub mod webhook;
 
 pub use app_name::{AppName, AppNameError};
 pub use build::{

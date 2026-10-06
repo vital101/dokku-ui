@@ -1,0 +1,161 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white">Let's Encrypt</h3>
+        {% if letsencrypt_available %}
+        <p class="mt-1 text-sm text-slate-400">
+          Issues and renews a certificate for the app's domains via ACME.
+        </p>
+        {% else %}
+        <p class="mt-1 text-sm text-slate-400">{{ letsencrypt_label }}</p>
+        {% endif %}
+      </div>
+      <div class="flex items-center gap-3">
+        {% if letsencrypt_available %}
+        {% if active %}
+        <span class="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
+          Active
+        </span>
+        {% else %}
+        <span class="inline-flex items-center gap-2 rounded-full bg-slate-700/40 px-3 py-1 text-xs font-medium text-slate-300">
+          Inactive
+        </span>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+    {% if letsencrypt_available %}
+    {% if let Some(entry) = entry %}
+    <dl class="mt-4 grid gap-4 text-sm lg:grid-cols-3">
+      <div>
+        <dt class="text-xs text-slate-500">Expires</dt>
+        <dd class="font-mono text-slate-300">{{ entry.expires_at }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Renews in</dt>
+        <dd class="font-mono text-slate-300">{{ entry.renews_in }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Renewal window in</dt>
+        <dd class="font-mono text-slate-300">{{ entry.renewal_in }}</dd>
+      </div>
+    </dl>
+    {% endif %}
+    <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-800/50 pt-4">
+      {% if !active %}
+      <form hx-post="/apps/{{ name }}/tls/enable" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="app-action rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500">
+          Enable
+        </button>
+      </form>
+      {% else %}
+      <form hx-post="/apps/{{ name }}/tls/disable" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Disable
+        </button>
+      </form>
+      {% endif %}
+      <form hx-post="/apps/{{ name }}/tls/revoke" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-red-300 hover:bg-slate-700">
+          Revoke
+        </button>
+      </form>
+      <form hx-post="/apps/{{ name }}/tls/cleanup" hx-target="#modal-content" hx-swap="innerHTML"
+            method="post" data-action-form class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+          Cleanup
+        </button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white">Server-wide auto-renew</h3>
+        {% if letsencrypt_available %}
+        <p class="mt-1 text-sm text-slate-400">
+          A cron job on the dokku host that periodically renews every app's
+          certificate. This setting is server-wide, not per-app.
+        </p>
+        {% else %}
+        <p class="mt-1 text-sm text-slate-400">{{ letsencrypt_label }}</p>
+        {% endif %}
+      </div>
+      {% if letsencrypt_available %}
+      <div class="flex items-center gap-2">
+        <form hx-post="/apps/{{ name }}/tls/cron-job/add" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Add cron job
+          </button>
+        </form>
+        <form hx-post="/apps/{{ name }}/tls/cron-job/remove" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Remove cron job
+          </button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Certificate status</h3>
+      <span class="text-xs text-slate-500">updated {{ updated }}</span>
+    </div>
+    {% if let Some(ssl) = ssl %}
+    {% if ssl.enabled %}
+    <dl class="mt-4 grid gap-4 text-sm lg:grid-cols-3">
+      <div>
+        <dt class="text-xs text-slate-500">Hostnames</dt>
+        <dd class="font-mono text-slate-300">{{ ssl.hostnames }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Issuer</dt>
+        <dd class="text-slate-300">{{ ssl.issuer }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Verified</dt>
+        <dd class="text-slate-300">
+          {% if ssl.verified_by_ca() %}
+          <span class="text-emerald-400">verified by a certificate authority</span>
+          {% else %}
+          <span class="text-amber-400">{{ ssl.verified }}</span>
+          {% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Starts</dt>
+        <dd class="font-mono text-slate-300">{{ ssl.starts_at }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Expires</dt>
+        <dd class="font-mono text-slate-300">{{ ssl.expires_at }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Subject</dt>
+        <dd class="font-mono text-slate-300">{{ ssl.subject }}</dd>
+      </div>
+    </dl>
+    {% else %}
+    <p class="mt-4 text-sm text-slate-400">No certificate installed for this app.</p>
+    {% endif %}
+    {% else %}
+    <p class="mt-4 text-sm text-slate-400">Certificate status is unavailable.</p>
+    {% endif %}
+  </div>
+</div>

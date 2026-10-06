@@ -25,6 +25,7 @@ use dokku_ui::settings::Settings;
 use dokku_ui::storage;
 use dokku_ui::storage::jobs::SqliteJobsRepo;
 use dokku_ui::storage::runs::SqliteRunsRepo;
+use dokku_ui::storage::webhooks::SqliteWebhooksRepo;
 use dokku_ui::web::{AppState, build_app};
 
 fn app_name(name: &str) -> AppName {
@@ -87,6 +88,7 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
             jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
             capabilities: Arc::new(CapabilitiesStore::new(dokku.clone(), pool.clone())),
             db: pool,
             settings,
@@ -1321,6 +1323,7 @@ async fn logs_partial_defaults_to_200_lines_and_strips_ansi() {
             app: app_name("alpha"),
             num_lines: 200,
             follow: false,
+            process: None,
         },
         Ok(DokkuOutput::ok(LOGS_FIXTURE)),
     ))
@@ -1347,6 +1350,7 @@ async fn logs_partial_defaults_to_200_lines_and_strips_ansi() {
         app: app_name("alpha"),
         num_lines: 200,
         follow: false,
+        process: None
     }));
 }
 
@@ -1363,6 +1367,7 @@ async fn logs_partial_clamps_lines_parameter() {
             app: app_name("alpha"),
             num_lines: expected,
             follow: false,
+            process: None,
         };
         let (state, client, _dir) =
             harness(seeded_app_client().stub(command.clone(), Ok(DokkuOutput::ok("")))).await;
@@ -1409,6 +1414,7 @@ async fn logs_empty_renders_empty_state() {
             app: app_name("alpha"),
             num_lines: 200,
             follow: false,
+            process: None,
         },
         Ok(DokkuOutput::ok("")),
     ))
@@ -1435,6 +1441,7 @@ async fn logs_fetch_error_renders_retry_fragment() {
             app: app_name("alpha"),
             num_lines: 50,
             follow: false,
+            process: None,
         },
         Err(exit_error(1, "boom")),
     ))

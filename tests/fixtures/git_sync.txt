@@ -1,0 +1,2 @@
+-----> Cloning scratch-m20 from https://github.com/octocat/Hello-World.git#
+       Detected branch, setting deploy-branch to master

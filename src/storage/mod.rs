@@ -12,6 +12,7 @@ pub mod runs;
 pub mod sessions;
 pub mod snapshots;
 pub mod users;
+pub mod webhooks;
 
 pub fn ensure_db_parent_dir(database_url: &str) -> io::Result<()> {
     let Some(path) = database_url.strip_prefix("sqlite://") else {

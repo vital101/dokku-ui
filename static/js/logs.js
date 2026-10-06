@@ -12,11 +12,23 @@
   var app = panel.getAttribute("data-app");
   var log = panel.querySelector("[data-live-log]");
   var toggle = panel.querySelector("[data-log-toggle]");
+  var processInput = panel.querySelector("[data-log-process]");
   var source = null;
   var currentSource = "logs";
 
+  function processFilter() {
+    return processInput ? processInput.value.trim() : "";
+  }
+
   function streamUrl() {
-    return "/apps/" + app + "/logs/stream?source=" + currentSource + "&tail=1";
+    var url =
+      "/apps/" + app + "/logs/stream?source=" + currentSource + "&tail=1";
+    var process = processFilter();
+    // The process filter only applies to the app's own log source.
+    if (process && currentSource === "logs") {
+      url += "&process=" + encodeURIComponent(process);
+    }
+    return url;
   }
 
   function openStream() {
@@ -73,6 +85,14 @@
   panel.querySelector("[data-log-clear]").addEventListener("click", function () {
     log.textContent = "";
   });
+
+  if (processInput) {
+    processInput.addEventListener("change", function () {
+      if (!source) return;
+      log.textContent = "";
+      openStream();
+    });
+  }
 
   panel.classList.remove("hidden");
   openStream();

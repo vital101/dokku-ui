@@ -112,20 +112,20 @@ webhooks, multi-server, reverse-proxy auth, operating).
 
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
-| Let's Encrypt (email, staging/prod, status/expiry, disable) | ❌ | ✅ | `letsencrypt` plugin, background job |
-| Manual certificate upload / activate | ❌ | ✅ | `certs:*` |
-| Server-wide auto-renew cron toggle | ❌ | ✅ | Admin setting |
+| Let's Encrypt (email, staging/prod, status/expiry, disable) | ◐ | ✅ | Status/expiry, enable/disable/revoke/cleanup, and server-wide auto-renew are in the TLS tab; `letsencrypt:set` (email/staging) not exposed yet |
+| Manual certificate upload / activate | ❌ | ✅ | Deferred: PEM cannot survive the SSH argv re-split; design note in `PLAN.md` §20 covers a stdin-tarball client capability |
+| Server-wide auto-renew cron toggle | ✅ | ✅ | `letsencrypt:cron-job --add/--remove`; no status query on plugin 0.20.4, so the card is action-only |
 | k3s cert-manager integration | ❌ | ✅ | Environment-specific; divergent unless host runs k3s |
-| Live log tail + pause/follow | ❌ | ✅ | Pro uses WebSocket; our SSE infra can stream the same |
-| Log source selector (app / nginx access / nginx error) | ❌ | ✅ | |
-| Process filtering of application logs | ❌ | ✅ | |
+| Live log tail + pause/follow | ✅ | ✅ | Pro uses WebSocket; our SSE streams over SSH |
+| Log source selector (app / nginx access / nginx error) | ✅ | ✅ | Capability-gated per source |
+| Process filtering of application logs | ✅ | ✅ | `logs --ps <process>` via the live panel and bounded viewer |
 | Last build/image status | ✅ | ✅ | `builds:report` |
-| Build logs + deploy history | ❌ | ✅ | Via Activity |
+| Build logs + deploy history | ◐ | ✅ | Activity records operations; failed deploy logs card on the Deploy tab |
 | Per-service live logs | ◐ static tail | ✅ | Plugin ignores tail count on 0.38.4; we re-tail client-side |
 | App live CPU/memory | ❌ | not documented | Not a Pro gap; no native dokku stats command |
-| Activity/audit tab (app / service / user) | ❌ | ✅ | Foundation exists in `action_runs` |
-| Durable audit, secret redaction, lineage, retention | ❌ | ✅ | Ours: runs pruned after 300s, no actor/attribution |
-| Background job queue + retries | ❌ | ✅ | Ours: in-process runs, no queue |
+| Activity/audit tab (app / service / user) | ✅ | ✅ | `/activity`, per-app, per-service; actor attribution |
+| Durable audit, secret redaction, lineage, retention | ✅ | ✅ | `action_runs` + `action_run_lines`; TTL settings; `JobPayload.redactions` |
+| Background job queue + retries | ✅ | ✅ | Persisted `action_jobs`; transient retries; cross-container lease reclaim |
 
 ### Services, data, plugins, storage
 
@@ -157,9 +157,9 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | REST JSON:API + JWT access/refresh tokens | ❌ | ✅ | |
 | Swagger UI + OpenAPI spec | ❌ | ✅ | |
 | Atomic batch operations (`/operations`, coalescing, collection replacement) | ❌ | ✅ | Coalescing is the complex half |
-| Git HTTP server + push URL on app page | ❌ | ✅ | Hardest gap; needs host helper in SSH-only model |
-| GitHub webhooks (HMAC receiver, per-app config) | ❌ | ✅ | Needs public route + secret storage |
-| Deploy from git / image / archive | ❌ | ✅ | `git:sync`, `git:from-image`, `git:from-archive` |
+| Git HTTP server + push URL on app page | ◐ push URL | ✅ | SSH push URL card on the Deploy tab; HTTP server needs the companion helper (spike in PLAN.md §20) |
+| GitHub webhooks (HMAC receiver, per-app config) | ✅ | ✅ | Public `/webhooks/github/{app}`, HMAC-SHA256, per-app repo/branch/build-mode config; secret reveal under re-auth |
+| Deploy from git / image / archive | ✅ | ✅ | `git:sync`, `git:from-image`, `git:from-archive` on the Deploy tab |
 | Multi-server (peer list, CORS, custom servers, selector) | ❌ | ✅ | Our "multi" is containers of one server |
 | Theme light/dark, command palette, login banner, app filter | ❌ | ✅ | Polish/later |
 | Ops config parity (JWT secrets, root token, TTLs, public URL, CORS, timeouts) | ◐ subset | ✅ | Public URL is a prerequisite for future reset links |
@@ -217,7 +217,7 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | Datastore coverage 4 → 18 | Generic pages + parsers + fixtures | Plugin detection |
 | k3s cert-manager / scheduler props | Environment-specific | Divergent unless host runs k3s |
 
-## Capability detection framework (prerequisite, not yet designed in code)
+## Capability detection framework (implemented — see P0 status)
 
 One reusable mechanism so we stop hand-rolling version checks:
 
@@ -262,7 +262,7 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
 `make coverage-gate`):
 
 - **Capability detection** (`src/domain/capabilities.rs`, `src/dokku/capabilities.rs`,
-  migration `0007`): `dokku --version` + `plugin:list` + `<family> --help` probes
+  migration `0007`): `dokku version` + `plugin:list` + `<cmd>:help` probes
   published to a shared SQLite row; `DokkuCommand::requirement()` declares each
   command's gate; the logs page shows a live-tail badge straight from the row.
 - **Durable audit** (migration `0005`): `action_runs` carries actor, operation,
@@ -322,6 +322,34 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
   reverse-proxy auth.
 - **P4 — Polish/ops**: theming, command palette, login banner, app filter,
   public URL, TTL configuration, "deleting" states.
+
+## P2 status (implemented)
+
+- **Deploy tab**: SSH push URL card, deploy public key card (guidance state —
+  the host has no generated deploy key), `git:report` summary with deploy
+  branch/commit/source image/last-updated, deploy-branch set/clear
+  (`git:set`).
+- **Deploy actions**: `git:sync` (build modes, optional ref), `git:from-image`,
+  `git:from-archive` as indefinite-timeout jobs; remotes carrying userinfo are
+  redacted from run lines; audit operations `git.*`.
+- **GitHub webhooks**: migration `0010`, per-app repo/branch/build-mode/secret
+  config, public HMAC-SHA256 receiver (`/webhooks/github/{app}`; 256 KiB cap,
+  constant-time compare via `ring` + `subtle`, host-aware repo matching),
+  system-actor attribution, secret reveal under re-auth (`no-store`).
+- **TLS tab**: `letsencrypt:list`/`active` status and expiry/renewal,
+  enable/disable/revoke/cleanup, server-wide `letsencrypt:cron-job` toggle
+  (all plugin-gated with explanatory fallback), plus a read-only `certs:report`
+  certificate card. Manual certificate uploads remain deferred (PEM cannot
+  travel as SSH argv; design note in `PLAN.md` §20).
+- **Log quick wins**: `logs --ps <process>` filtering on the bounded viewer
+  and the SSE live panel (`?process=`, app source only), and a lazy failed
+  deploy logs card fed by `logs:failed`.
+- **Git HTTP server**: paper spike only (`PLAN.md` §20) — companion-helper
+  shape, auth options, constraints; no code until companion infrastructure is
+  scheduled.
+- **Fixture provenance**: deploy/TLS/logs-failed fixtures captured from the
+  live host on 2026-10-06; `logs_failed_populated.txt` is synthetic,
+  source-verified against dokku `v0.38.4`.
 
 ## Refreshing this document
 

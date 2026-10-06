@@ -1,0 +1,9 @@
+=====> dokku-ui ssl information
+       Ssl dir:                       /home/dokku/dokku-ui/tls 
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 dokku.re-cycledair.com   
+       Ssl expires at:                Jan  1 11:30:37 2027 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE2
+       Ssl starts at:                 Oct  3 11:30:38 2026 GMT 
+       Ssl subject:                   subject=CN = dokku.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority

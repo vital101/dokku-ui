@@ -184,4 +184,21 @@
       closeModal();
     }
   });
+
+  // Copy-to-clipboard for readonly fields (push URL, deploy key). The field is
+  // named by id in data-copy; the button briefly confirms.
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy]");
+    if (!button) return;
+    var field = document.getElementById(button.getAttribute("data-copy"));
+    if (!field || !navigator.clipboard) return;
+    var value = field.value !== undefined ? field.value : field.textContent;
+    navigator.clipboard.writeText(value).then(function () {
+      var label = button.getAttribute("data-copy-label") || "Copy";
+      button.textContent = "Copied";
+      setTimeout(function () {
+        button.textContent = label;
+      }, 1500);
+    });
+  });
 })();

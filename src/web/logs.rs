@@ -18,6 +18,8 @@ pub struct StreamQuery {
     source: String,
     #[serde(default = "default_tail")]
     tail: u8,
+    #[serde(default)]
+    process: Option<String>,
 }
 
 fn default_tail() -> u8 {
@@ -41,6 +43,17 @@ pub async fn log_stream(
         Ok(source) if source != CapabilityFamily::Logs => source,
         _ => CapabilityFamily::Logs,
     };
+    // The process filter only applies to the app's own log source.
+    let process = match query.process.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(process) if source == CapabilityFamily::Logs => {
+            if !crate::domain::resource::is_valid_process_type(process) {
+                return Err(AppError::BadRequest("invalid process type".into()));
+            }
+            Some(process.to_owned())
+        }
+        Some(_) => None,
+    };
 
     // Capability-gate each source independently: an unsupported family sends
     // an explanatory SSE error instead of a failed SSH attempt.
@@ -60,7 +73,7 @@ pub async fn log_stream(
         }
     }
 
-    let command = log_command(source, app, query.tail != 0);
+    let command = log_command(source, app, query.tail != 0, process);
     let (tx, rx) = mpsc::channel::<String>(64);
     let client = state.dokku.clone();
     let task = tokio::spawn(async move {
@@ -74,12 +87,18 @@ pub async fn log_stream(
         .streaming(live_stream(rx, task)))
 }
 
-fn log_command(source: CapabilityFamily, app: AppName, follow: bool) -> DokkuCommand {
+fn log_command(
+    source: CapabilityFamily,
+    app: AppName,
+    follow: bool,
+    process: Option<String>,
+) -> DokkuCommand {
     match source {
         CapabilityFamily::Logs => DokkuCommand::Logs {
             app,
             num_lines: 200,
             follow,
+            process,
         },
         CapabilityFamily::NginxAccessLogs => DokkuCommand::NginxAccessLogs { app, follow },
         CapabilityFamily::NginxErrorLogs => DokkuCommand::NginxErrorLogs { app, follow },
@@ -155,18 +174,37 @@ mod tests {
     #[test]
     fn unknown_sources_fall_back_to_app_logs() {
         assert_eq!(
-            log_command(CapabilityFamily::Logs, app("alpha"), true),
+            log_command(CapabilityFamily::Logs, app("alpha"), true, None),
             DokkuCommand::Logs {
                 app: app("alpha"),
                 num_lines: 200,
                 follow: true,
+                process: None
             }
         );
         assert_eq!(
-            log_command(CapabilityFamily::NginxAccessLogs, app("alpha"), true),
+            log_command(CapabilityFamily::NginxAccessLogs, app("alpha"), true, None),
             DokkuCommand::NginxAccessLogs {
                 app: app("alpha"),
                 follow: true,
+            }
+        );
+    }
+
+    #[test]
+    fn app_log_streams_carry_the_process_filter() {
+        assert_eq!(
+            log_command(
+                CapabilityFamily::Logs,
+                app("alpha"),
+                true,
+                Some("web".into())
+            ),
+            DokkuCommand::Logs {
+                app: app("alpha"),
+                num_lines: 200,
+                follow: true,
+                process: Some("web".into()),
             }
         );
     }

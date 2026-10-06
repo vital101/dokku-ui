@@ -6,6 +6,7 @@ use crate::dokku::{CapabilitiesStore, DokkuClient, SnapshotStore};
 use crate::settings::Settings;
 use crate::storage::jobs::SqliteJobsRepo;
 use crate::storage::runs::SqliteRunsRepo;
+use crate::storage::webhooks::SqliteWebhooksRepo;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,4 +17,5 @@ pub struct AppState {
     pub capabilities: Arc<CapabilitiesStore>,
     pub action_runs: Arc<SqliteRunsRepo>,
     pub jobs: Arc<SqliteJobsRepo>,
+    pub webhooks: Arc<SqliteWebhooksRepo>,
 }

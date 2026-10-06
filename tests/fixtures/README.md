@@ -7,7 +7,7 @@ domain parsers' unit tests and the `MockClient` integration suite.
 
 - **Host:** dokku.re-cycledair.com
 - **Dokku version:** 0.38.4
-- **Captured:** 2026-10-03
+- **Captured:** 2026-10-03, with deploy/TLS/logs-failed captures added 2026-10-06
 - **Validation:** `tests/dokku_smoke.rs` (`-- --ignored`) runs `apps:list`
   through the real russh client against the live host and parses it with
   `parse_apps_list`. `tests/russh_integration.rs` runs the client against an
@@ -76,6 +76,20 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `cron_list_empty.json` | `dokku cron:list <app> --format json` | Real capture (2026-10-05): `[]` for an app with no cron tasks. Populated entries (id/schedule/concurrency/maintenance/command) are parsed tolerantly. |
 | `buildpacks_list_empty.txt` | `dokku buildpacks:list <app>` | Real capture (2026-10-05): the `-----> <app> buildpack urls` header with no URLs. |
 | `builder_report.txt` | `dokku builder:report <app>` | Real capture (2026-10-05): `Builder selected:`, `Builder computed selected:`, etc. `builder:set <app> selected <builder>` sets; no value clears. |
+| `git_report.txt` | `dokku git:report dokku-ui` | Real capture (2026-10-06). Header `=====> <app> git information` + space-padded `Git <key>: value` lines. `Git sha` is `git rev-parse HEAD` on the app's bare repo — it literally prints `HEAD` on unborn refs, so the parser only accepts commit-hash-shaped values. `Git last updated at` is the deploy-branch ref mtime (unix seconds) and is empty when the branch ref does not exist yet. |
+| `git_report_not_deployed.txt` | `dokku git:report starwars` | Real capture: no explicit deploy branch (computed falls back to the `--global` value, `master`), real sha. |
+| `git_report_fresh.txt` | `dokku git:report scratch-m20` | Real capture of a just-created app (scratch app, destroyed after): empty deploy branch and last-updated, `Git sha: HEAD`. |
+| `git_report_synced.txt` | `dokku git:report scratch-m20` (after `git:sync`) | Real capture: `git:sync` auto-set `deploy-branch` to the detected branch, real sha, last-updated set. |
+| `git_public_key_missing.txt` | `dokku git:public-key` | Real capture (2026-10-06): the host has no deploy key, so the plugin prints a three-line warning on stdout and exits 1. The key-present form (`ssh-ed25519 AAAA...`) cannot be captured without generating a key and is fixture-free; the parser is unit-tested for both shapes. |
+| `git_sync.txt` | `dokku git:sync scratch-m20 https://github.com/octocat/Hello-World.git` | Real capture (2026-10-06): clone banner plus `Detected branch, setting deploy-branch to master`. No flags means no build/deploy. Flags are `--build` / `--build-if-changes` / `--skip-deploy-branch`, and they precede the app. |
+| `letsencrypt_list.txt` | `dokku letsencrypt:list` | Real capture (2026-10-06): `-----> App name ...` banner + fixed-width rows (app, absolute expiry `YYYY-MM-DD HH:MM:SS` UTC, time before expiry, time before renewal). The countdown columns drift; parsers should key on app + absolute expiry. |
+| `letsencrypt_active_true.txt`, `letsencrypt_active_false.txt` | `dokku letsencrypt:active <app>` | Real captures: the literal string `true`/`false`, exit 0 either way. |
+| `letsencrypt_help.txt` | `dokku letsencrypt:help` | Real capture. Confirms `cron-job [--add --remove]` (no status query on 0.20.4 — no-args prints `Specify --add or --remove to modify the cron-job`), plus `auto-renew`, `cleanup`, `disable`, `enable`, `revoke`, `set`. |
+| `certs_report.txt` | `dokku certs:report` (no app) | Real capture (2026-10-06): one `=====> <app> ssl information` section per app; keys `Ssl dir/enabled/hostnames/expires at/issuer/starts at/subject/verified` (no `--format json` on 0.38.4). |
+| `certs_report_app.txt` | `dokku certs:report dokku-ui` | Real capture: single-app form of the same section shape. |
+| `certs_report_disabled.txt` | `dokku certs:report scratch-m20` | Real capture of an app without TLS: `Ssl enabled: false`, every other value empty. |
+| `logs_failed.txt` | `dokku logs:failed dokku-ui` | Real capture (2026-10-06): the `=====> <app> failed deploy logs` header only. No app on the host currently has failed deploy logs, and 0.38.4 prints **no** `!` warning for the empty case (unlike older docs); parser drops the header, keeps the rest. |
+| `logs_failed_populated.txt` | synthetic | Source-verified against dokku v0.38.4 `plugins/logs/logs.go` (`GetFailedLogs`: header + streamed `scheduler-logs-failed` output). Covers the populated branch, including `remote: !` error lines the parser must keep. |
 
 ## Maintenance
 

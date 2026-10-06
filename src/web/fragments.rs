@@ -178,6 +178,32 @@ pub(super) async fn enqueue_action_run(
     redactions: &[String],
 ) -> Result<String, AppError> {
     let actor = current_actor(state, session).await;
+    enqueue_action_run_as(
+        state,
+        actor,
+        subject,
+        operation,
+        target_kind,
+        plan,
+        completion,
+        redactions,
+    )
+    .await
+}
+
+/// Enqueues with an explicit actor, for paths without a session (the public
+/// GitHub webhook route attributes to a system identity).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn enqueue_action_run_as(
+    state: &AppState,
+    actor: Actor,
+    subject: &str,
+    operation: &str,
+    target_kind: TargetKind,
+    plan: &[JobSpec],
+    completion: &RunCompletion,
+    redactions: &[String],
+) -> Result<String, AppError> {
     let run_id = state
         .action_runs
         .insert_with(&NewRun {

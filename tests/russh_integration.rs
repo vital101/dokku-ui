@@ -175,6 +175,7 @@ async fn viewer_disconnect_aborts_the_channel_but_keeps_the_session() {
                     app: dokku_ui::domain::AppName::try_from("myapp").expect("app name"),
                     num_lines: 200,
                     follow: true,
+                    process: None,
                 },
                 tx,
             )

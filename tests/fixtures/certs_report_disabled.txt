@@ -1,0 +1,9 @@
+=====> scratch-m20 ssl information
+       Ssl dir:                       /home/dokku/scratch-m20/tls
+       Ssl enabled:                   false                    
+       Ssl hostnames:                                          
+       Ssl expires at:                                         
+       Ssl issuer:                                             
+       Ssl starts at:                                          
+       Ssl subject:                                            
+       Ssl verified:                                           

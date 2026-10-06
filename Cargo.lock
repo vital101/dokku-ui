@@ -998,6 +998,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "rand 0.9.5",
+ "ring",
  "russh",
  "serde",
  "serde_json",

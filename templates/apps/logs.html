@@ -15,6 +15,9 @@
       <input id="lines" type="number" name="lines" min="{{ min_lines }}" max="{{ max_lines }}"
              value="{{ line_count }}"
              class="w-24 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
+      <label for="process" class="text-sm text-slate-400">Process</label>
+      <input id="process" type="text" name="process" placeholder="all"
+             class="w-28 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
       <button type="submit"
               class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">
         Update
@@ -34,6 +37,9 @@
                 class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">nginx error</button>
       </div>
       <div class="flex items-center gap-2">
+        <label for="live-process" class="text-xs text-slate-400">Process</label>
+        <input id="live-process" type="text" data-log-process placeholder="all"
+               class="w-24 rounded-md border border-slate-800 bg-slate-900 px-2 py-1 text-xs text-white">
         <button type="button" data-log-toggle
                 class="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500">Pause</button>
         <button type="button" data-log-clear

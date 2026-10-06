@@ -1,0 +1,90 @@
+=====> alethos-mcp ssl information
+       Ssl dir:                       /home/dokku/alethos-mcp/tls
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 alethos.io www.alethos.io
+       Ssl expires at:                Dec  6 05:25:46 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE2
+       Ssl starts at:                 Sep  7 05:25:47 2026 GMT 
+       Ssl subject:                   subject=CN = alethos.io  
+       Ssl verified:                  verified by a certificate authority
+=====> candid ssl information
+       Ssl dir:                       /home/dokku/candid/tls   
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 candid.re-cycledair.com  
+       Ssl expires at:                Nov 29 05:25:39 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE2
+       Ssl starts at:                 Aug 31 05:25:40 2026 GMT 
+       Ssl subject:                   subject=CN = candid.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> docs-kernl ssl information
+       Ssl dir:                       /home/dokku/docs-kernl/tls
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 docs-kernl.re-cycledair.com docs.kernl.us
+       Ssl expires at:                Nov 19 05:25:43 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE1
+       Ssl starts at:                 Aug 21 05:25:44 2026 GMT 
+       Ssl subject:                   subject=CN = docs-kernl.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> dokku-ui ssl information
+       Ssl dir:                       /home/dokku/dokku-ui/tls 
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 dokku.re-cycledair.com   
+       Ssl expires at:                Jan  1 11:30:37 2027 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE2
+       Ssl starts at:                 Oct  3 11:30:38 2026 GMT 
+       Ssl subject:                   subject=CN = dokku.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> kernl-analytics ssl information
+       Ssl dir:                       /home/dokku/kernl-analytics/tls
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 kernl-analytics.re-cycledair.com
+       Ssl expires at:                Dec 25 05:25:42 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE1
+       Ssl starts at:                 Sep 26 05:25:43 2026 GMT 
+       Ssl subject:                   subject=CN = kernl-analytics.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> nannymud ssl information
+       Ssl dir:                       /home/dokku/nannymud/tls 
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 nannymud.re-cycledair.com
+       Ssl expires at:                Nov 20 05:25:42 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE2
+       Ssl starts at:                 Aug 22 05:25:43 2026 GMT 
+       Ssl subject:                   subject=CN = nannymud.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> oneiric ssl information
+       Ssl dir:                       /home/dokku/oneiric/tls  
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 oneiric.re-cycledair.com 
+       Ssl expires at:                Nov 18 05:25:41 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE1
+       Ssl starts at:                 Aug 20 05:25:42 2026 GMT 
+       Ssl subject:                   subject=CN = oneiric.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> openrouter-logs ssl information
+       Ssl dir:                       /home/dokku/openrouter-logs/tls
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 openrouter-logs.re-cycledair.com
+       Ssl expires at:                Dec 19 05:25:38 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE1
+       Ssl starts at:                 Sep 20 05:25:39 2026 GMT 
+       Ssl subject:                   subject=CN = openrouter-logs.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> recycledair ssl information
+       Ssl dir:                       /home/dokku/recycledair/tls
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 re-cycledair.com recycledair.re-cycledair.com www.re-cycledair.com
+       Ssl expires at:                Dec 15 05:25:49 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE1
+       Ssl starts at:                 Sep 16 05:25:50 2026 GMT 
+       Ssl subject:                   subject=CN = recycledair.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority
+=====> starwars ssl information
+       Ssl dir:                       /home/dokku/starwars/tls 
+       Ssl enabled:                   true                     
+       Ssl hostnames:                 starwars.re-cycledair.com
+       Ssl expires at:                Nov 20 05:26:05 2026 GMT 
+       Ssl issuer:                    C = US, O = Let's Encrypt, CN = YE2
+       Ssl starts at:                 Aug 22 05:26:06 2026 GMT 
+       Ssl subject:                   subject=CN = starwars.re-cycledair.com
+       Ssl verified:                  verified by a certificate authority

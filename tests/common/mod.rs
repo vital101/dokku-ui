@@ -18,6 +18,7 @@ use dokku_ui::storage;
 use dokku_ui::storage::jobs::SqliteJobsRepo;
 use dokku_ui::storage::runs::SqliteRunsRepo;
 use dokku_ui::storage::users::{SqliteUsersRepo, UsersRepo};
+use dokku_ui::storage::webhooks::SqliteWebhooksRepo;
 use dokku_ui::web::AppState;
 
 pub const SESSION_COOKIE: &str = "dokku-ui-session";
@@ -53,6 +54,7 @@ pub async fn test_state_with_shared_client(
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
             jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
             capabilities: Arc::new(CapabilitiesStore::new(dokku.clone(), pool.clone())),
             db: pool,
             settings,
@@ -109,6 +111,7 @@ pub async fn states_over_shared_db(
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
             jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
             capabilities: Arc::new(CapabilitiesStore::new(client.clone(), pool.clone())),
             db: pool.clone(),
             settings: settings.clone(),

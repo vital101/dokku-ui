@@ -17,6 +17,7 @@ use dokku_ui::settings::Settings;
 use dokku_ui::storage;
 use dokku_ui::storage::jobs::SqliteJobsRepo;
 use dokku_ui::storage::runs::SqliteRunsRepo;
+use dokku_ui::storage::webhooks::SqliteWebhooksRepo;
 use dokku_ui::web::{AppState, build_app};
 
 fn app_name(name: &str) -> AppName {
@@ -78,6 +79,7 @@ async fn harness(client: MockClient) -> (AppState, Arc<MockClient>, tempfile::Te
         AppState {
             action_runs: Arc::new(SqliteRunsRepo::new(pool.clone())),
             jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
+            webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
             capabilities: Arc::new(dokku_ui::dokku::CapabilitiesStore::new(
                 dokku.clone(),
                 pool.clone(),

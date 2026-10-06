@@ -714,12 +714,25 @@ pub async fn logs_partial(
     current_user(&state, &session).await?;
 
     let num_lines = clamp_log_lines(query.get("lines").map(String::as_str));
-    let retry_url = partial_url(&name, "logs", Some(&format!("lines={num_lines}")));
+    let process = match query.get("process").map(String::as_str).map(str::trim) {
+        None | Some("") => None,
+        Some(process) => {
+            if !is_valid_process_type(process) {
+                return Err(AppError::BadRequest("invalid process type".into()));
+            }
+            Some(process.to_owned())
+        }
+    };
+    let retry_query = match &process {
+        Some(process) => format!("lines={num_lines}&process={process}"),
+        None => format!("lines={num_lines}"),
+    };
+    let retry_url = partial_url(&name, "logs", Some(&retry_query));
     let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
         Ok(resolved) => resolved,
         Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
     };
-    let log_lines = match app_logs(&*state.dokku, app, num_lines).await {
+    let log_lines = match app_logs(&*state.dokku, app, num_lines, process.as_deref()).await {
         Ok(log_lines) => log_lines,
         Err(err) => return error_fragment(&retry_url, &err.to_string()),
     };

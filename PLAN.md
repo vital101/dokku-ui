@@ -38,18 +38,19 @@ Non-negotiables: **no SPA**, **Rust + actix-web**, **development in Docker**, **
 
 | Crate | Purpose |
 |---|---|
-| actix-web 4, actix-session 0.10, actix-web-lab? (no) | HTTP + session middleware (custom store) |
-| russh 0.5x (pinned) + russh-keys? (bundled in russh 0.45+) | SSH exec to dokku host |
+| actix-web 4, actix-session 0.11 | HTTP + session middleware (custom store) |
+| russh 0.63 (default-features off, ring/rsa/flate2) | SSH exec to dokku host |
 | tokio (rt-multi-thread, macros, time), futures-util | Runtime, timeouts, `join_all` fan-out |
-| sqlx 0.8 (sqlite, runtime-tokio, migrate, time) | DB, no macros (no DATABASE_URL needed at compile time) |
-| argon2 0.5 + password-hash 0.5 | argon2id hashing/verification |
-| askama 0.12 | Compile-time templates |
+| sqlx 0.9 (sqlite, runtime-tokio, migrate) | DB, no macros (no DATABASE_URL needed at compile time) |
+| argon2 0.6 | argon2id hashing/verification |
+| askama 0.16 | Compile-time templates |
 | actix-files | `/static` serving |
 | serde, serde_json | JSON parsing of `dokku *:report --format json`, session payloads |
 | tracing, tracing-subscriber (env-filter) | Structured logs, `#[instrument]` on handlers |
 | thiserror | Error enums |
-| rand 0.8 / getrandom | Session ids, CSRF tokens (128+ bits, base64url) |
+| rand 0.9 | Session ids, CSRF tokens (128+ bits, hex) |
 | time 0.3 | Timestamps (UTC unix epoch in DB) |
+| ring + subtle | GitHub webhook HMAC-SHA256 + constant-time signature compare |
 | async-trait | Dyn-compatible `DokkuClient` trait |
 | (dev) bacon, cargo-llvm-cov, rustfmt, clippy | Watch-loop TDD, coverage, lint |
 
@@ -384,7 +385,7 @@ Coverage protection rails: `main.rs` stays trivial; anything nontrivial lives be
 
 ## 16. Post-v1 backlog (context, not scope)
 
-Deployments & build logs, one-off `run` commands, user management/roles UI, login rate limiting, Let's Encrypt/certs UI, ssh-keys management, plugin screens, backup/export, i18n, themes. (P0 foundations — config editing with re-auth reveal, live log tailing over SSE, durable audit + job queue + toasts, capability detection, RBAC/re-auth seams — and the P1 app configuration UI — rename, deploy lock, domains, resource limits, cron, build config, plugin-gated maintenance/basic auth — are landed; see `GAPS.md`.)
+Deployments & build logs, one-off `run` commands, user management/roles UI, login rate limiting, manual certificate upload, ssh-keys management, plugin screens, backup/export, i18n, themes. (P0 foundations — config editing with re-auth reveal, live log tailing over SSE, durable audit + job queue + toasts, capability detection, RBAC/re-auth seams — the P1 app configuration UI — rename, deploy lock, domains, resource limits, cron, build config, plugin-gated maintenance/basic auth — and the P2 deploy paths + TLS work — Deploy tab, `git:sync`/`from-image`/`from-archive`, GitHub webhooks, Let's Encrypt + cert status, log process filter + failed deploy logs — are landed; see `GAPS.md`.)
 
 ### Deferred from App Detail v1
 
@@ -482,3 +483,83 @@ Redis, MongoDB) plus app bind mounts.
   (shell `'\''` escapes and newlines do not survive that re-split).
 - **Deferred:** named storage entries (`storage:create/destroy/info`), service
   clone/promote/backups, pause, per-app storage tab.
+
+## 19. P2: Deploy paths + TLS (implemented)
+
+- **Deploy tab** (`GET /apps/{name}/deploy` + `.../partials/deploy`): push URL
+  card (scp-style on port 22, `ssh://` URL form otherwise — scp syntax cannot
+  carry a port), deploy public key card (the host has no generated deploy key;
+  the absent case renders the `git:generate-deploy-key` guidance), git summary
+  from `git:report` (explicit/computed deploy branch, commit only when it is
+  hash-shaped — the report prints the literal `HEAD` on unborn refs — source
+  image, deploy-branch ref mtime formatted UTC), and a deploy-branch set/clear
+  form (`git:set <app> deploy-branch [value]`).
+- **Deploy actions** run as jobs with no timeout: `git:sync` (flags
+  `--build`/`--build-if-changes` before the app, optional ref),
+  `git:from-image`, `git:from-archive`. Validators in `domain/git.rs` are
+  re-checked at job rehydration; remotes with userinfo add the full URL,
+  `user:token`, and token to `JobPayload.redactions`. Audit operations
+  `git.sync`/`git.from-image`/`git.from-archive`, completion refresh `Reports`.
+- **GitHub webhooks.** Migration `0010_app_webhooks.sql` stores one config per
+  app (repo, branch, build mode, secret, enabled). `POST
+  /webhooks/github/{app}` is the first unauthenticated route (allowlisted by
+  the `/webhooks/` prefix): 256 KiB body cap, constant-time HMAC-SHA256
+  verification (`ring` + `subtle`), `ping` → 200, `push` → repo/branch filter
+  (host-aware — `repository.full_name` is only trusted for `github.com`
+  remotes) → enqueue `git:sync` with the configured build mode. Unknown or
+  disabled apps 404; bad signatures 401. Deliveries are attributed to the
+  `github-webhook` system actor (no user id, so they never enter a toast tray)
+  and both the remote's credentials and the webhook secret are redacted from
+  persisted run lines. The secret is generated once per config, survives
+  edits, and is revealed only under the re-auth window with `no-store`.
+- **TLS tab** (`GET /apps/{name}/tls`): `letsencrypt:list`/`active` status with
+  expiry and renewal countdowns; enable/disable/revoke/cleanup and the
+  server-wide `letsencrypt:cron-job --add/--remove` (all `Plugin`-gated, so a
+  host without the plugin renders the explanatory state); a read-only
+  `certs:report <app>` certificate card (Core, plain text on 0.38.4).
+- **Log quick wins.** `logs [-p|--ps <process>]` filters the app log source
+  (validated by the process-type validator; the SSE stream takes `?process=`,
+  applied only to the app source) on both the bounded partial and the live
+  panel. `logs:failed <app>` feeds a lazy Deploy-tab card; the parser drops the
+  dokku header/banners and keeps `remote:` error lines. An empty deploy renders
+  "No failed deploy logs." — 0.38.4 prints no warning line for that case.
+- **Fixtures.** Captured from the live host on 2026-10-06
+  (`git_report*`, `git_public_key_missing`, `git_sync`, `letsencrypt_*`,
+  `certs_report*`, `logs_failed`); `logs_failed_populated.txt` is synthetic,
+  source-verified against dokku `v0.38.4` `plugins/logs/logs.go`. See
+  `tests/fixtures/README.md`.
+
+## 20. Git HTTP server spike (paper deliverable)
+
+Goal (Pro parity): per-app HTTP(S) push URLs (`git push https://…`), no
+client SSH key needed. Current architecture cannot implement this in the app
+container: the UI has no docker.sock, no root on the host, and only the dokku
+SSH command surface. The viable shape is a **companion helper** installed on
+the host, invoked over the existing SSH seam — not a second network service in
+our container (which would require a port, TLS termination, and host
+filesystem access to dokku's git repos).
+
+Options evaluated:
+
+1. **`git-http-backend` shim via companion plugin.** A small host script
+   (`dokku ui:git-http …`) that nginx/dokku fronts; auth via a per-app token
+   minted in our SQLite and verified by the helper (it cannot read our DB, so
+   the token would be written to a host file via an SSH invocation, or the
+   helper calls back to our authenticated API — neither is clean).
+2. **Companion git daemon + dokku receive hook.** `git daemon --inetd`-style
+   exposure of `/home/dokku/<app>` with `git-http-backend` and a pre-receive
+   hook that validates a token embedded in the URL userinfo. Auth material is
+   stored host-side, managed through a `ui:git-token` dokku command the UI
+   invokes over SSH.
+3. **Native git-over-SSH only (status quo).** Push URLs shown today
+   (`dokku@host:app`) already work for anyone whose key is authorized on the
+   host; Pro's HTTP server mainly removes key management.
+
+Constraints/decision: any option needs host-side installation and root during
+setup (both permitted per GAPS.md "Locked decisions" item 2), plus a durable
+per-app token store. Option 2 has the smallest moving surface: one companion
+command family (`ui:git-token set/clear`, `ui:git-server status`) invoked over
+SSH, one nginx snippet installed by the helper, and token auth handled entirely
+host-side (the UI never serves git traffic). Deferred until a drop explicitly
+schedules companion-helper infrastructure; no code is committed for this spike.
+Until then the Deploy tab exposes the SSH push URL, which needs no host changes.

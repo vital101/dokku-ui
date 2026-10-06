@@ -44,6 +44,53 @@ pub struct BuilderReport {
     pub detected: String,
 }
 
+/// `git:report <app>` as a typed view. `deploy_branch` is the explicitly-set
+/// property (empty = unset); `computed_deploy_branch` is the effective branch
+/// after the global fallback. `sha` is only populated for commit-hash-shaped
+/// values — the report prints the literal `HEAD` on unborn refs. Empty strings
+/// mean unavailable/unset.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitReport {
+    pub deploy_branch: String,
+    pub computed_deploy_branch: String,
+    pub sha: String,
+    pub source_image: String,
+    pub last_updated_at: String,
+}
+
+/// One row of `letsencrypt:list` (dokku-letsencrypt 0.20.4 fixed-width
+/// table): app, absolute expiry, and the printed countdowns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LetsencryptEntry {
+    pub app: String,
+    /// Absolute expiry `YYYY-MM-DD HH:MM:SS` as reported by the host.
+    pub expires_at: String,
+    /// Time before expiry, e.g. `42d, 19h, 3m, 14s`.
+    pub renews_in: String,
+    /// Time before the auto-renewal window opens.
+    pub renewal_in: String,
+}
+
+/// The `Ssl …` section of `certs:report` (plain text only on 0.38.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SslReport {
+    pub enabled: bool,
+    pub hostnames: String,
+    pub issuer: String,
+    pub expires_at: String,
+    pub starts_at: String,
+    pub subject: String,
+    pub verified: String,
+}
+
+impl SslReport {
+    /// Whether the certificate chain verified against a CA (the report prints
+    /// prose rather than a boolean).
+    pub fn verified_by_ca(&self) -> bool {
+        self.verified.contains("verified by")
+    }
+}
+
 /// One scheduled cron task from `cron:list --format json` (dokku v0.38.4
 /// `CronTask` struct). `task_in_maintenance` is the suspend state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
