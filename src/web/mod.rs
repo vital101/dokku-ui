@@ -10,8 +10,10 @@ mod domains;
 mod favicon;
 mod flash;
 mod fragments;
+mod instance_settings;
 mod logs;
 mod pages;
+mod palette;
 mod reauth;
 mod render;
 mod runs;
@@ -20,6 +22,7 @@ mod services;
 mod state;
 mod tls;
 mod toasts;
+mod users;
 mod volumes;
 mod webhooks;
 
@@ -116,8 +119,31 @@ pub fn build_app(
         .route("/", web::get().to(pages::dashboard))
         .route("/refresh", web::post().to(pages::refresh_now))
         .route("/activity", web::get().to(activity::index))
+        .route("/palette.json", web::get().to(palette::palette))
         .route("/actions/toasts", web::get().to(toasts::tray))
         .route("/actions/runs/{id}/ack", web::post().to(toasts::ack))
+        .service(
+            web::resource("/users")
+                .route(web::get().to(users::index))
+                .route(web::post().to(users::create)),
+        )
+        .route("/users/{id}/role", web::post().to(users::set_role))
+        .route("/users/{id}/delete", web::post().to(users::delete))
+        .route("/partials/admin-nav", web::get().to(users::admin_nav))
+        .service(
+            web::resource("/settings")
+                .route(web::get().to(instance_settings::form))
+                .route(web::post().to(instance_settings::save)),
+        )
+        .route(
+            "/partials/service-nav",
+            web::get().to(services::service_nav),
+        )
+        .service(
+            web::resource("/password")
+                .route(web::get().to(users::password_form))
+                .route(web::post().to(users::password_submit)),
+        )
         .route("/apps/new", web::get().to(apps::new_form))
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))

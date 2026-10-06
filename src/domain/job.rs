@@ -15,6 +15,7 @@ use crate::domain::git::{
 use crate::domain::http_auth::is_valid_username;
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
+use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::tls::LetsencryptAction;
@@ -142,6 +143,8 @@ pub enum JobSpec {
     ServiceCreate {
         plugin: String,
         service: String,
+        #[serde(default)]
+        options: ServiceCreateOptions,
     },
     ServiceDestroy {
         plugin: String,
@@ -476,9 +479,20 @@ impl JobSpec {
                 };
                 Ok(vec![command])
             }
-            JobSpec::ServiceCreate { plugin, service } => {
+            JobSpec::ServiceCreate {
+                plugin,
+                service,
+                options,
+            } => {
                 let (plugin, service) = parse_service(plugin, service)?;
-                Ok(vec![DokkuCommand::ServiceCreate { plugin, service }])
+                options
+                    .validate()
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                Ok(vec![DokkuCommand::ServiceCreate {
+                    plugin,
+                    service,
+                    options: options.clone(),
+                }])
             }
             JobSpec::ServiceDestroy { plugin, service } => {
                 let (plugin, service) = parse_service(plugin, service)?;
@@ -845,26 +859,62 @@ mod tests {
         let job = JobSpec::ServiceCreate {
             plugin: "redis".into(),
             service: "candid".into(),
+            options: ServiceCreateOptions::default(),
         };
         assert_eq!(
             job.to_commands().expect("commands"),
             vec![DokkuCommand::ServiceCreate {
                 plugin: crate::domain::ServicePlugin::try_from("redis").expect("redis"),
                 service: crate::domain::ServiceName::try_from("candid").expect("candid"),
+                options: ServiceCreateOptions::default(),
             }]
         );
         let bad = JobSpec::ServiceCreate {
             plugin: "maria".into(),
             service: "candid".into(),
+            options: ServiceCreateOptions::default(),
         };
         assert!(bad.to_commands().is_err(), "unknown plugins are rejected");
         let bad = JobSpec::ServiceCreate {
             plugin: "redis".into(),
             service: "Bad Name".into(),
+            options: ServiceCreateOptions::default(),
         };
         assert!(
             bad.to_commands().is_err(),
             "invalid service names are rejected"
+        );
+    }
+
+    #[test]
+    fn service_create_options_revalidate_on_rehydration() {
+        let job = JobSpec::ServiceCreate {
+            plugin: "redis".into(),
+            service: "candid".into(),
+            options: ServiceCreateOptions {
+                image: Some("redis".into()),
+                image_version: Some("7.2".into()),
+                custom_env: Some("USER=alpha".into()),
+                config_options: Some("--appendonly yes".into()),
+            },
+        };
+        let commands = job.to_commands().expect("commands");
+        let DokkuCommand::ServiceCreate { options, .. } = &commands[0] else {
+            panic!("expected service create");
+        };
+        assert_eq!(options.image_version.as_deref(), Some("7.2"));
+
+        let tampered = JobSpec::ServiceCreate {
+            plugin: "redis".into(),
+            service: "candid".into(),
+            options: ServiceCreateOptions {
+                config_options: Some("bad'quote".into()),
+                ..Default::default()
+            },
+        };
+        assert!(
+            tampered.to_commands().is_err(),
+            "tampered options must not reach the host"
         );
     }
 

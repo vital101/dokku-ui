@@ -12,7 +12,7 @@ use common::{
 
 use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::command::DokkuCommand;
-use dokku_ui::domain::{ServiceName, ServicePlugin};
+use dokku_ui::domain::{ServiceCreateOptions, ServiceName, ServicePlugin};
 use dokku_ui::web::build_app;
 
 const REDIS_LIST: &str = include_str!("fixtures/redis_list.txt");
@@ -127,7 +127,10 @@ async fn service_list_shell_renders_panel_and_new_button() {
     assert!(body.contains("Redis services"));
     assert!(body.contains(r#"hx-get="/services/redis/partials/list""#));
     assert!(body.contains(r#"href="/services/redis/new""#));
-    assert!(body.contains(r#"href="/services/postgres""#), "sidebar nav");
+    assert!(
+        body.contains(r#"hx-get="/partials/service-nav""#),
+        "sidebar nav is capability-loaded"
+    );
     assert!(body.contains(r#"href="/volumes""#), "sidebar nav");
 }
 
@@ -873,6 +876,42 @@ async fn service_new_form_renders_create_form() {
     assert!(body.contains(r#"action="/services/redis""#));
     assert!(body.contains(r#"hx-post="/services/redis""#));
     assert!(body.contains(r#"name="name""#));
+    assert!(body.contains(r#"name="image""#));
+    assert!(body.contains(r#"name="custom_env""#));
+    assert!(body.contains(r#"name="config_options""#));
+}
+
+#[tokio::test]
+async fn service_nav_lists_only_installed_plugins() {
+    let client = service_list_stub()
+        .stub(
+            DokkuCommand::DokkuVersion,
+            Ok(DokkuOutput::ok("dokku version 0.38.4\n")),
+        )
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(
+                "postgres 1.36.4 enabled dokku postgres service plugin\nredis 1.42.1 enabled dokku redis service plugin\n",
+            )),
+        );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/partials/service-nav")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("/services/postgres"), "{body}");
+    assert!(body.contains("/services/redis"), "{body}");
+    assert!(!body.contains("/services/mysql"), "{body}");
+    assert!(!body.contains("/services/clickhouse"), "{body}");
 }
 
 #[tokio::test]
@@ -881,6 +920,7 @@ async fn hx_create_service_streams_and_redirects_to_detail() {
         DokkuCommand::ServiceCreate {
             plugin: redis(),
             service: ServiceName::try_from("cache").expect("service"),
+            options: ServiceCreateOptions::default(),
         },
         Ok(DokkuOutput::ok("-----> pulling image\n-----> created\n")),
     );
@@ -930,6 +970,7 @@ async fn create_service_non_htmx_flashes_and_redirects() {
         DokkuCommand::ServiceCreate {
             plugin: redis(),
             service: ServiceName::try_from("cache").expect("service"),
+            options: ServiceCreateOptions::default(),
         },
         Ok(DokkuOutput::ok("")),
     );
@@ -963,6 +1004,7 @@ async fn create_service_non_htmx_flashes_and_redirects() {
     assert!(client.calls().contains(&DokkuCommand::ServiceCreate {
         plugin: redis(),
         service: ServiceName::try_from("cache").expect("service"),
+        options: ServiceCreateOptions::default(),
     }));
 
     let resp = test::call_service(
@@ -1027,6 +1069,122 @@ async fn create_service_rejects_invalid_name_without_calling_dokku() {
             .iter()
             .all(|call| !matches!(call, DokkuCommand::ServiceCreate { .. })),
         "no create command for invalid name"
+    );
+}
+
+#[tokio::test]
+async fn hx_create_service_passes_advanced_options_and_redacts_env_values() {
+    let options = ServiceCreateOptions::parse(
+        Some("redis"),
+        Some("7.2"),
+        Some("USER=alpha-secret"),
+        Some("--appendonly yes"),
+    )
+    .expect("valid options");
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceCreate {
+            plugin: redis(),
+            service: ServiceName::try_from("cache").expect("service"),
+            options: options.clone(),
+        },
+        Ok(DokkuOutput::ok("creating with USER=alpha-secret\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = common::extract_csrf(
+        &get_body(
+            test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/services/redis/new")
+                    .cookie(cookie.clone())
+                    .to_request(),
+            )
+            .await,
+        )
+        .await,
+    );
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis",
+            format!(
+                "csrf_token={csrf}&name=cache&image=redis&image_version=7.2&custom_env=USER%3Dalpha-secret&config_options=--appendonly+yes"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains("••••••••"), "value is masked: {events}");
+    assert!(!events.contains("alpha-secret"), "secret leaked: {events}");
+    assert!(
+        client.calls().contains(&DokkuCommand::ServiceCreate {
+            plugin: redis(),
+            service: ServiceName::try_from("cache").expect("service"),
+            options,
+        }),
+        "advanced options reach dokku"
+    );
+}
+
+#[tokio::test]
+async fn create_service_rejects_invalid_advanced_options_without_calling_dokku() {
+    let (state, client, _dir) = test_state_with_shared_client(service_list_stub()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = common::extract_csrf(
+        &get_body(
+            test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/services/redis/new")
+                    .cookie(cookie.clone())
+                    .to_request(),
+            )
+            .await,
+        )
+        .await,
+    );
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis",
+            format!("csrf_token={csrf}&name=cache&custom_env=USER%3Dhas%27quote"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis",
+            format!("csrf_token={csrf}&name=cache&image=-flag"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/services/redis/new");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::ServiceCreate { .. })),
+        "no create command for invalid options"
     );
 }
 

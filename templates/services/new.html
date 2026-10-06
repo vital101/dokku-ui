@@ -24,6 +24,40 @@
       while and streams into this page.
     </p>
 
+    <details class="rounded-md border border-slate-800 bg-slate-900/40 p-4">
+      <summary class="cursor-pointer text-sm font-medium text-slate-300">Advanced options</summary>
+      <div class="mt-4 space-y-4">
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div>
+            <label for="image" class="block text-sm font-medium text-slate-300">Image</label>
+            <input id="image" name="image" type="text"
+                   class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+                   placeholder="postgres">
+          </div>
+          <div>
+            <label for="image_version" class="block text-sm font-medium text-slate-300">Image version</label>
+            <input id="image_version" name="image_version" type="text"
+                   class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+                   placeholder="16.2">
+          </div>
+        </div>
+        <div>
+          <label for="custom_env" class="block text-sm font-medium text-slate-300">Environment variables</label>
+          <input id="custom_env" name="custom_env" type="text"
+                 class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+                 placeholder="USER=alpha;HOST=beta">
+          <p class="mt-2 text-xs text-slate-400">Semicolon-separated KEY=VALUE pairs passed as the plugin's custom env.</p>
+        </div>
+        <div>
+          <label for="config_options" class="block text-sm font-medium text-slate-300">Config options</label>
+          <input id="config_options" name="config_options" type="text"
+                 class="mt-1 block w-full rounded-md border-slate-700 bg-slate-800 text-white placeholder-slate-500 sm:text-sm"
+                 placeholder="--shm-size=1g">
+          <p class="mt-2 text-xs text-slate-400">Extra arguments for the container create command (single line, no quotes).</p>
+        </div>
+      </div>
+    </details>
+
     <button type="submit"
             class="app-action rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
       <span class="app-action-label">Create service</span>

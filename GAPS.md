@@ -95,18 +95,22 @@ webhooks, multi-server, reverse-proxy auth, operating).
 |---|---|---|---|
 | Create / destroy / start / stop / restart / rebuild | ✅ | ✅ | Ours streams via SSE; mutating actions have no timeout |
 | Scale processes | ✅ | ✅ | Ours capped at 100; Pro also edits resources |
-| Rename app | ❌ | ✅ | `apps:rename`, optional skip-rebuild |
-| Deploy lock (`apps:lock`/`unlock`) | ❌ | ✅ | Trivial command, real UI state |
-| Maintenance mode | ❌ | ✅ | `maintenance` plugin |
-| Env var view | ◐ masked | ✅ reveal/copy | Ours fixed `••••`; no re-auth unmask |
-| Env var edit (batched, `.env`, unset, commit bar) | ❌ | ✅ | `config:export/set/unset` + rebuild job |
-| Domains view | ✅ (+DNS check) | ✅ | Ours includes a DNS pre-check Pro hints at |
-| Domains add/remove/set | ❌ | ✅ | `domains:add/remove/set` |
-| Resource limit/reserve/CPU editing | ❌ | ✅ | `resource:limit/reserve`; ours read-only |
-| Build configuration (buildpacks order, builder, build dir, scheduler and scheduler props) | ❌ | ✅ | Several families of commands |
-| Cron tab (list, run-now, suspend/resume individual & app-wide) | ❌ | ✅ | `cron:*`; verify presence on 0.38.4 |
-| HTTP basic auth (users + allowed IPs) | ❌ | ✅ | `http-auth` plugin |
-| Queued-job toasts / "deleting" states | ❌ | ✅ | Falls out of the job queue |
+| Rename app | ✅ | ✅ | `apps:rename`, optional skip-rebuild (P1) |
+| Deploy lock (`apps:lock`/`unlock`) | ✅ | ✅ | P1; real UI state |
+| Maintenance mode | ✅ | ✅ | `maintenance` plugin; `Plugin`-gated explanatory state when absent |
+| Env var view | ✅ | ✅ reveal/copy | Masked by default; reveal under re-auth with `no-store` (P0) |
+| Env var edit (batched, `.env`, unset, commit bar) | ✅ | ✅ | `config:set/unset` batch as one queued run (P0) |
+| Domains view | ✅ | ✅ | Ours includes a DNS pre-check Pro hints at |
+| Domains add/remove/set | ✅ | ✅ | `domains:add/remove/set` (P1) |
+| Resource limit/reserve/CPU editing | ✅ | ✅ | `resource:limit/reserve` + clears (P1); rebuild applies |
+| Build configuration (buildpacks order, builder, build dir, scheduler and scheduler props) | ✅ | ✅ | Buildpacks order + builder/build-dir (P1); scheduler props host-specific |
+| Cron tab (list, run-now, suspend/resume individual & app-wide) | ✅ | ✅ | `cron:list --format json` + run/suspend/resume (P1) |
+| HTTP basic auth (users + allowed IPs) | ✅ | ✅ | `http-auth` plugin, `Plugin`-gated (P1); passwords redacted from run lines |
+| Multi-user accounts + roles | ✅ | ✅ | Own SQLite RBAC: `admin`/`operator`/`viewer`, enforced per request in the auth middleware; Users screen (P3 increment) |
+| Self-service password change | ✅ | ✅ | Current-password verification + policy; reset tokens/links still missing |
+| Queued-job toasts / "deleting" states | ✅ | ✅ | Durable per-user toasts (P0) + dashboard "deleting…" badge from in-flight destroy runs |
+| Advanced service create (image/version, env, extra args) | ✅ | ✅ | 1.x plugin flags `--image`/`--image-version`/`--custom-env`/`--config-options`; env values redacted |
+| Instance settings (public URL, login banner, app filter, TTLs) | ✅ | ✅ | Admin `/settings` page persisted in shared SQLite; TTL overrides applied at prune time |
 
 ### TLS, proxy, logs, builds, activity
 
@@ -132,10 +136,10 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
 | Service lifecycle + link/unlink | ✅ | ✅ | Pro blocks destroy while linked; ours does not |
-| Service create advanced options (image/tag, env, extra args) | ❌ | ✅ | |
+| Service create advanced options (image/tag, env, extra args) | ✅ | ✅ | `--image`/`--image-version`/`--custom-env`/`--config-options`, source-verified against the installed 1.x plugin generation |
 | Connection string / credential reveal | ❌ deliberate | ✅ | **Open policy decision** — test asserts DSNs never surface |
-| Service Activity tab | ❌ | ✅ | |
-| Datastore plugin coverage | 4 (pg/mysql/redis/mongo) | 18 official plugins | Our pages are generic; expansion is config + parsers |
+| Service Activity tab | ✅ | ✅ | `/services/{plugin}/{service}/activity` |
+| Datastore plugin coverage | ◐ 8 (pg/mysql/redis/mongo/mariadb/memcached/rabbitmq/clickhouse) | 18 official plugins | Sidebar is capability-driven (only installed plugins show); adding more is a catalog entry + data-dir mapping |
 | Expose/unexpose service ports | ✅ | not documented | We exceed the documented Pro surface |
 | Service live stats (mem/CPU/data/disk) | ✅ | not documented | Our fixed read-only scripts; cgroup v2 only |
 | Volumes page (mounts, mount/unmount, usage, host disk) | ✅ | not documented | We exceed the documented Pro surface |
@@ -146,14 +150,14 @@ webhooks, multi-server, reverse-proxy auth, operating).
 
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
-| Multi-user accounts | ❌ | ✅ | Ours: single admin from setup |
-| Password set / reset token & link | ❌ | ✅ | `users:set-password`, reset URLs |
+| Multi-user accounts | ✅ | ✅ | Admin creates users with an initial password; roles admin/operator/viewer |
+| Password set / reset token & link | ◐ | ✅ | Self-service change is in; reset links need the public-URL flow |
 | SSH key management | ❌ | ✅ | Maps to dokku `ssh-keys` |
-| Teams (owners/members) | ❌ | ✅ | Pro ships a `teams` host plugin |
-| Command/app/service scoped grants | ❌ | ✅ | Enforced via host plugin triggers |
+| Teams (owners/members) | ❌ | ✅ | Pro ships a `teams` host plugin; own RBAC covers the app-level need |
+| Command/app/service scoped grants | ❌ | ✅ | Enforced via host plugin triggers; own RBAC is role-level today |
 | Internal per-app / per-service teams | ❌ | ✅ | Auto-managed `dokku@app--…`/`dokku@service--…` |
-| Per-user activity audit | ❌ | ✅ | |
-| Reverse-proxy authentication (trusted header + CIDR, auto-registration) | ❌ | ✅ | Env-only; small once multi-user exists |
+| Per-user activity audit | ✅ | ✅ | `/activity?user=`, actor attribution on every run |
+| Reverse-proxy authentication (trusted header + CIDR, auto-registration) | ❌ | ✅ | Env-only; small once multi-user exists (now unblocked) |
 | REST JSON:API + JWT access/refresh tokens | ❌ | ✅ | |
 | Swagger UI + OpenAPI spec | ❌ | ✅ | |
 | Atomic batch operations (`/operations`, coalescing, collection replacement) | ❌ | ✅ | Coalescing is the complex half |
@@ -161,8 +165,8 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | GitHub webhooks (HMAC receiver, per-app config) | ✅ | ✅ | Public `/webhooks/github/{app}`, HMAC-SHA256, per-app repo/branch/build-mode config; secret reveal under re-auth |
 | Deploy from git / image / archive | ✅ | ✅ | `git:sync`, `git:from-image`, `git:from-archive` on the Deploy tab |
 | Multi-server (peer list, CORS, custom servers, selector) | ❌ | ✅ | Our "multi" is containers of one server |
-| Theme light/dark, command palette, login banner, app filter | ❌ | ✅ | Polish/later |
-| Ops config parity (JWT secrets, root token, TTLs, public URL, CORS, timeouts) | ◐ subset | ✅ | Public URL is a prerequisite for future reset links |
+| Theme light/dark, command palette, login banner, app filter | ✅ | ✅ | Light/dark variable flip, ⌘K palette (`/palette.json`), banner + app filter in instance settings |
+| Ops config parity (JWT secrets, root token, TTLs, public URL, CORS, timeouts) | ◐ | ✅ | Public URL + activity/run-log TTLs are admin-editable; JWT/root-token/CORS remain N/A |
 | `/healthz` healthcheck | ✅ | not documented | Our deploy requirement |
 | Horizontal multi-container scaling | ✅ | not documented | Horizontal test suite guards it |
 
@@ -350,6 +354,44 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
 - **Fixture provenance**: deploy/TLS/logs-failed fixtures captured from the
   live host on 2026-10-06; `logs_failed_populated.txt` is synthetic,
   source-verified against dokku `v0.38.4`.
+
+## P3 status (partially implemented)
+
+- **Multi-user + RBAC** (migration `0009` roles already existed): `UsersRepo`
+  gained list/update-role/set-password/delete; the auth middleware now resolves
+  the user per request and enforces a pure `permission_for(method, path)` map
+  (`src/auth/rbac.rs`) — admin/operator/viewer, with self-service exceptions
+  (logout, own password, re-auth, toast acks) and 403s for the rest. Sessions
+  for deleted users are purged. `/users` admin screen (create with role, set
+  role, delete) with fail-closed role parsing and a pure last-admin guard
+  (cannot delete or demote the final admin; cannot self-delete). Self-service
+  `/password` verifies the current password. `DokkuCommand` argv/parsers
+  unchanged; the UI does not (yet) hide every mutation control for viewers —
+  the server-side 403 is authoritative.
+- **Advanced service create**: `ServiceCreateOptions` (pure,
+  `src/domain/service_create.rs`) with source-verified 1.x plugin flags —
+  `--image`, `--image-version`, `--custom-env "K=V;K=V"`,
+  `--config-options "--flag value"` — validated for the SSH argv re-split
+  (single-line, quote-free) and re-checked at job rehydration. Custom-env
+  values join `JobPayload.redactions`.
+- **Datastore coverage 4 → 8**: catalog adds `mariadb`, `memcached`,
+  `rabbitmq`, `clickhouse` (display names + data dirs); the sidebar and
+  `/partials/service-nav` render only plugins present in the capabilities
+  `plugin:list` inventory, degrading to the full catalog when the probe has not
+  run. Remaining official plugins are catalog additions.
+- **Instance settings** (migration `0011`, shared SQLite, admin `/settings`):
+  public URL, login banner (rendered on the sign-in page), app filter (globs
+  hidden from the dashboard while staying manageable by URL), and
+  activity/run-log TTL overrides applied by the run-prune path with the env
+  value as fallback.
+- **Polish**: light/dark theme via CSS-variable inversion + cookie-backed
+  toggle (`static/js/theme.js`, no template sweep); ⌘K command palette
+  (`/palette.json` + `static/js/palette.js`, role-gated entries); dashboard
+  "deleting…" badge from unfinished destroy runs.
+- **Still open in P3**: REST JSON:API + JWT + Swagger + batch operations,
+  multi-server, reverse-proxy auth, SSH-key management, teams/scoped grants,
+  plugin management (companion helper), git HTTP server, DSN reveal policy,
+  password reset links, service destroy-while-linked guard.
 
 ## Refreshing this document
 

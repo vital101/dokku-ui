@@ -33,6 +33,14 @@ domain parsers' unit tests and the `MockClient` integration suite.
 > + `subcommands.go` at dokku tag `v0.38.4`) and should be replaced by real
 > captures on the next host session. The stats/entries fixtures below are real
 > captures from 2026-10-04.
+>
+> **Added service plugins (mariadb, memcached, rabbitmq, clickhouse):** no new
+> fixtures — the list/info/log commands share the generic plain-text shapes
+> above. Plugin `display_name`/`data_dir` mappings were source-verified against
+> the plugins' official images (`/var/lib/mysql`, container root for
+> memcached's volume-less layout, `/var/lib/rabbitmq`, `/var/lib/clickhouse`).
+> The sidebar only shows plugins the `plugin:list` capability probe reports as
+> installed.
 
 ## Formats
 

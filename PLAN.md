@@ -563,3 +563,46 @@ SSH, one nginx snippet installed by the helper, and token auth handled entirely
 host-side (the UI never serves git traffic). Deferred until a drop explicitly
 schedules companion-helper infrastructure; no code is committed for this spike.
 Until then the Deploy tab exposes the SSH push URL, which needs no host changes.
+
+## 21. P3 increment (implemented)
+
+- **Multi-user + RBAC**: `users.role` (migration `0009`) is now enforced. The
+  auth middleware resolves the session user (`find_by_id`) on every request,
+  purges sessions whose user was deleted, and gates via pure
+  `permission_for(method, path)` (`src/auth/rbac.rs`): `/users*` and
+  `/settings*` need `ManageUsers`; GETs are `View`; self-service POSTs
+  (`/logout`, `/password`, `/reauth`, toast acks) are open to every role;
+  everything else is `ManageApps`. Unauthorized requests render the 403 error
+  page. `UsersRepo` gains `list`/`count_admins`/`update_role`/
+  `update_password_hash`/`delete`; `insert` takes the role explicitly. Unknown
+  roles fail closed to `Viewer`. Admin `/users` screen creates users with an
+  initial password (role select), changes roles, and deletes; pure last-admin
+  guards prevent deleting/demoting the final admin and self-deletion.
+  `/password` is self-service with current-password verification.
+- **Advanced service create**: `ServiceCreateOptions` (`src/domain/service_create.rs`)
+  carries `image`, `image_version`, `custom_env`, `config_options` — the flags
+  source-verified against dokku-postgres 1.36.4 `subcommands/create`
+  (flags follow the service name; `--custom-env` is semicolon-delimited).
+  Validation is enforced at parse and re-checked at job rehydration; custom-env
+  values are added to `JobPayload.redactions`. The `/services/{plugin}/new`
+  form has a collapsible advanced section.
+- **Datastore catalog 4 → 8**: `ServicePlugin` adds mariadb, memcached,
+  rabbitmq, clickhouse (labels + data dirs). The sidebar is served by
+  `/partials/service-nav`, which filters `ServicePlugin::all()` through the
+  capabilities `plugin:list` inventory (Unknown/absent probe shows the full
+  catalog). Unknown plugin URLs still 404.
+- **Instance settings**: migration `0011_instance_settings.sql`, shared SQLite
+  via `SqliteInstanceSettingsRepo`. Admin `/settings` edits public URL, login
+  banner (rendered on `/login`), app-filter globs (dashboard hides matches via
+  `dashboard_from_snapshot_filtered`, everything else stays URL-manageable), and
+  activity/run-log TTL overrides. TTLs are read by the run-prune path
+  (`effective_ttl_secs`) with the env policy as fallback.
+- **Polish**: light/dark theme by overriding Tailwind's color variables under
+  `[data-theme="light"]` (no template sweep) with a cookie-backed toggle in
+  `static/js/theme.js`; ⌘K palette (`/palette.json`, role-gated entries,
+  `static/js/palette.js`, markup in `base.html` so Tailwind scans it); dashboard
+  "deleting…" badge fed by `active_destruction_subjects()`.
+- **Not in this increment**: hiding every mutation control for viewers (the
+  server-side 403 is authoritative; the Users/Settings nav is htmx-gated),
+  REST JSON:API/JWT/Swagger/batch ops, multi-server, reverse-proxy auth, SSH
+  keys, teams, plugin management, git HTTP, DSN reveal, reset links.

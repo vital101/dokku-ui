@@ -7,6 +7,8 @@ pub struct AppRow {
     pub name: String,
     pub health: AppHealth,
     pub process_count: i64,
+    /// An unfinished destroy run targets this app.
+    pub deleting: bool,
 }
 
 impl AppRow {
@@ -26,15 +28,25 @@ pub struct DashboardData {
 
 /// Pure assembly of the dashboard from an already-warm snapshot. No IO.
 pub fn dashboard_from_snapshot(snapshot: &Snapshot) -> DashboardData {
+    dashboard_from_snapshot_filtered(snapshot, |_| false)
+}
+
+/// Same assembly, minus apps the instance filter hides.
+pub fn dashboard_from_snapshot_filtered(
+    snapshot: &Snapshot,
+    hide: impl Fn(&str) -> bool,
+) -> DashboardData {
     let rows: Vec<AppRow> = snapshot
         .apps
         .iter()
+        .filter(|name| !hide(name))
         .map(|name| {
             let report = snapshot.ps_report(name);
             AppRow {
                 name: name.clone(),
                 process_count: report.map(|r| r.process_count).unwrap_or(-1),
                 health: AppHealth::from_report(report),
+                deleting: false,
             }
         })
         .collect();
@@ -42,6 +54,7 @@ pub fn dashboard_from_snapshot(snapshot: &Snapshot) -> DashboardData {
     let reports: Vec<PsReport> = snapshot
         .apps
         .iter()
+        .filter(|name| !hide(name))
         .filter_map(|name| snapshot.ps_report(name).cloned())
         .collect();
     let stats = AppStats::from_reports(&reports);
@@ -98,16 +111,19 @@ mod tests {
                     name: "alpha".into(),
                     health: AppHealth::Running,
                     process_count: 2,
+                    deleting: false,
                 },
                 AppRow {
                     name: "beta".into(),
                     health: AppHealth::Stopped,
                     process_count: 1,
+                    deleting: false,
                 },
                 AppRow {
                     name: "gamma".into(),
                     health: AppHealth::NotDeployed,
                     process_count: 0,
+                    deleting: false,
                 },
             ]
         );
@@ -137,11 +153,13 @@ mod tests {
                     name: "bad".into(),
                     health: AppHealth::Unknown,
                     process_count: -1,
+                    deleting: false,
                 },
                 AppRow {
                     name: "good".into(),
                     health: AppHealth::Running,
                     process_count: 1,
+                    deleting: false,
                 },
             ]
         );
@@ -174,6 +192,30 @@ mod tests {
 
         assert!(data.rows.is_empty());
         assert_eq!(data.stats, AppStats::default());
+    }
+
+    #[test]
+    fn app_filter_hides_rows_and_recomputes_stats() {
+        let snapshot = snapshot(
+            &["alpha", "dokku-ui"],
+            &[
+                ("alpha", Some(ps_report(true, true, 1))),
+                ("dokku-ui", Some(ps_report(true, true, 2))),
+            ],
+        );
+
+        let data = dashboard_from_snapshot_filtered(&snapshot, |name| name == "dokku-ui");
+
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].name, "alpha");
+        assert_eq!(
+            data.stats,
+            AppStats {
+                total: 1,
+                running: 1,
+                stopped: 0,
+            }
+        );
     }
 
     #[test]

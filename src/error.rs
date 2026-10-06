@@ -16,6 +16,8 @@ pub enum AppError {
     Dokku(#[from] crate::dokku::client::DokkuError),
     #[error("the requested resource was not found")]
     NotFound,
+    #[error("you do not have permission to perform this action")]
+    Forbidden,
     #[error("bad request: {0}")]
     BadRequest(String),
 }
@@ -56,6 +58,7 @@ impl ResponseError for AppError {
             | AppError::Render(_)
             | AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Dokku(err) => match err {
                 crate::dokku::client::DokkuError::Exit { .. } => StatusCode::BAD_GATEWAY,
@@ -99,6 +102,7 @@ mod tests {
         use crate::dokku::client::DokkuError;
 
         assert_eq!(AppError::NotFound.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::Forbidden.status_code(), StatusCode::FORBIDDEN);
         assert_eq!(
             AppError::BadRequest("x".into()).status_code(),
             StatusCode::BAD_REQUEST

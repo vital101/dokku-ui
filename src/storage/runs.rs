@@ -473,23 +473,55 @@ impl SqliteRunsRepo {
         Ok(rows.into_iter().map(|(run_id,)| run_id).collect::<Vec<_>>())
     }
 
+    /// Subjects with an unfinished app destroy run; the dashboard marks these
+    /// rows as "deleting" until the run lands. Scoped to `app.destroy` so a
+    /// service whose name collides with an app never shows a phantom badge.
+    pub async fn active_destruction_subjects(&self) -> Result<Vec<String>, sqlx::Error> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT subject FROM action_runs WHERE outcome IS NULL AND operation = 'app.destroy'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(subject,)| subject).collect())
+    }
+
     async fn prune_finished(&self) -> Result<(), sqlx::Error> {
+        let ttl = self
+            .effective_ttl_secs("activity_ttl_secs", self.policy.activity_ttl_secs)
+            .await;
         sqlx::query("DELETE FROM action_runs WHERE finished_at IS NOT NULL AND finished_at < ?")
-            .bind(now_epoch() - self.policy.activity_ttl_secs)
+            .bind(now_epoch() - ttl)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
     async fn prune_lines(&self) -> Result<(), sqlx::Error> {
+        let ttl = self
+            .effective_ttl_secs("run_log_ttl_secs", self.policy.log_ttl_secs)
+            .await;
         sqlx::query(
             "DELETE FROM action_run_lines WHERE run_id IN \
              (SELECT id FROM action_runs WHERE finished_at IS NOT NULL AND finished_at < ?)",
         )
-        .bind(now_epoch() - self.policy.log_ttl_secs)
+        .bind(now_epoch() - ttl)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Instance-settings TTL override, falling back to the injected policy when
+    /// the admin has not set one (or the row is tampered).
+    async fn effective_ttl_secs(&self, key: &str, fallback: i64) -> i64 {
+        sqlx::query_scalar::<_, String>("SELECT value FROM instance_settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| raw.parse::<i64>().ok())
+            .filter(|secs| (60..=crate::domain::TTL_MAX_SECS as i64).contains(secs))
+            .unwrap_or(fallback)
     }
 
     async fn sweep_orphans(&self) -> Result<(), sqlx::Error> {
@@ -678,6 +710,28 @@ mod tests {
         assert!(
             repo.get(&fresh).await.expect("get").is_some(),
             "running kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_settings_override_the_retention_policy() {
+        let (repo, _dir) = repo_with(3600, 3600).await;
+        let old = repo.insert("alpha").await.expect("insert");
+        repo.finish(&old, &done(true)).await.expect("finish");
+        backdate(&repo, &old, 1000).await;
+
+        sqlx::query(
+            "INSERT INTO instance_settings (key, value, updated_at) \
+             VALUES ('activity_ttl_secs', '60', 0)",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("override");
+
+        let _fresh = repo.insert("beta").await.expect("insert");
+        assert!(
+            repo.get(&old).await.expect("get").is_none(),
+            "the instance override prunes the run"
         );
     }
 

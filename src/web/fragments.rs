@@ -229,7 +229,9 @@ pub(super) async fn enqueue_action_run_as(
 /// Runs a mutating command synchronously (the no-JS create paths, whose
 /// redirect target must already exist), recording a completed run for the
 /// audit trail with the command's stdout as its lines. Audit writes are
-/// best-effort: a failure to record never blocks the action.
+/// best-effort: a failure to record never blocks the action. `redactions`
+/// carries literal secrets that must never reach persisted lines.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_synchronously(
     state: &AppState,
     session: &Session,
@@ -238,6 +240,7 @@ pub(super) async fn run_synchronously(
     target_kind: TargetKind,
     command: DokkuCommand,
     success_message: &str,
+    redactions: &[String],
 ) -> Result<crate::dokku::DokkuOutput, crate::dokku::DokkuError> {
     let actor = current_actor(state, session).await;
     let mut run_id: Option<String> = None;
@@ -261,7 +264,11 @@ pub(super) async fn run_synchronously(
     if let Some(run_id) = run_id {
         if let Ok(output) = &result {
             for (seq, line) in output.stdout.lines().enumerate() {
-                if let Err(err) = state.action_runs.append_line(&run_id, seq, line, &[]).await {
+                if let Err(err) = state
+                    .action_runs
+                    .append_line(&run_id, seq, line, redactions)
+                    .await
+                {
                     tracing::warn!(error = %err, "failed to persist audit line");
                 }
             }

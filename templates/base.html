@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,6 +9,7 @@
   <!-- Disables htmx's auto-injected indicator <style> tag, which the CSP
        (style-src 'self', no unsafe-inline) would block. -->
   <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
+  <script src="/static/js/theme.js"></script>
   <script src="/static/js/htmx.min.js" defer></script>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100">
@@ -25,21 +26,11 @@
         <li>
           <a href="/activity" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">Activity</a>
         </li>
+        <li id="admin-nav" hx-get="/partials/admin-nav" hx-trigger="load" hx-swap="outerHTML"></li>
       </ul>
       <p class="mt-6 mb-2 px-3 text-xs font-medium uppercase tracking-wide text-slate-500">Services</p>
       <ul class="space-y-1 text-sm">
-        <li>
-          <a href="/services/postgres" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">PostgreSQL</a>
-        </li>
-        <li>
-          <a href="/services/mysql" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">MySQL</a>
-        </li>
-        <li>
-          <a href="/services/redis" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">Redis</a>
-        </li>
-        <li>
-          <a href="/services/mongo" class="block rounded-md px-3 py-2 text-slate-300 hover:bg-slate-800 hover:text-white">MongoDB</a>
-        </li>
+        <li id="service-nav" hx-get="/partials/service-nav" hx-trigger="load" hx-swap="outerHTML"></li>
       </ul>
       <p class="mt-6 mb-2 px-3 text-xs font-medium uppercase tracking-wide text-slate-500">Storage</p>
       <ul class="space-y-1 text-sm">
@@ -53,7 +44,8 @@
         <h1 class="text-sm font-medium text-slate-300">{% block heading %}{% endblock %}</h1>
         <form method="post" action="/logout" class="flex items-center gap-3">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <span class="text-sm text-slate-400">{{ email }}</span>
+          <button type="button" data-theme-toggle class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">Theme</button>
+          <a href="/password" class="text-sm text-slate-400 hover:text-slate-200">{{ email }}</a>
           <button type="submit" class="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-slate-700">Log out</button>
         </form>
       </header>
@@ -73,5 +65,23 @@
        hx-trigger="load, every 5s"
        hx-swap="innerHTML">
   </div>
+  <div data-palette-overlay
+       class="fixed inset-0 z-50 items-start justify-center bg-slate-950/70 pt-24">
+    <div class="w-full max-w-lg rounded-lg border border-slate-800 bg-slate-900 p-3 shadow-xl">
+      <input data-palette-input type="text" placeholder="Search apps and pages… (Ctrl+K)"
+             class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none">
+      <ul data-palette-results class="mt-2 max-h-80 space-y-1 overflow-y-auto"></ul>
+    </div>
+  </div>
+  <template data-palette-item-template>
+    <li>
+      <a data-palette-link href="#"
+         class="flex items-center justify-between rounded-md px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white">
+        <span data-palette-label></span>
+        <span data-palette-group class="text-xs uppercase tracking-wide text-slate-500"></span>
+      </a>
+    </li>
+  </template>
+  <script src="/static/js/palette.js" defer></script>
 </body>
 </html>

@@ -270,6 +270,7 @@ pub async fn create(
         TargetKind::App,
         DokkuCommand::AppsCreate { app },
         &format!("App '{name}' created."),
+        &[],
     )
     .await
     {

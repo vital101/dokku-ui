@@ -38,6 +38,7 @@ mod tests {
         stats: crate::domain::types::AppStats,
         rows: Vec<crate::dokku::AppRow>,
         updated: String,
+        can_manage: bool,
     }
 
     #[tokio::test]
@@ -49,6 +50,7 @@ mod tests {
             stats: Default::default(),
             rows: Vec::new(),
             updated: "just now".into(),
+            can_manage: true,
         };
         let resp = render(&page).expect("render");
         assert_eq!(resp.status(), actix_web::http::StatusCode::OK);

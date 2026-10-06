@@ -4,8 +4,10 @@ use askama::Template;
 use serde::Deserialize;
 
 use crate::auth::password::{hash_password, verify_password};
+use crate::auth::rbac::Role;
 use crate::domain::{Email, Password};
 use crate::error::AppError;
+use crate::storage::instance_settings::{InstanceSettingsRepo, SqliteInstanceSettingsRepo};
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
@@ -19,6 +21,7 @@ struct LoginPage<'a> {
     next: &'a str,
     error: Option<&'a str>,
     csrf_token: &'a str,
+    banner: Option<&'a str>,
 }
 
 #[derive(Template)]
@@ -62,6 +65,14 @@ async fn users_count(state: &AppState) -> Result<i64, AppError> {
     repo.count().await.map_err(AppError::Database)
 }
 
+async fn login_banner(state: &AppState) -> Option<String> {
+    SqliteInstanceSettingsRepo::new(state.db.clone())
+        .load()
+        .await
+        .ok()
+        .and_then(|settings| settings.login_banner)
+}
+
 pub async fn login_form(
     state: web::Data<AppState>,
     session: Session,
@@ -79,10 +90,12 @@ pub async fn login_form(
     }
     let csrf_token = ensure_csrf(&session).await?;
     let next = safe_next(&query.next);
+    let banner = login_banner(&state).await;
     let page = LoginPage {
         next: &next,
         error: None,
         csrf_token: &csrf_token,
+        banner: banner.as_deref(),
     };
     render(&page)
 }
@@ -105,10 +118,12 @@ pub async fn login_submit(
     if !valid {
         let csrf_token = ensure_csrf(&session).await?;
         let next = safe_next(&form.next);
+        let banner = login_banner(&state).await;
         let page = LoginPage {
             next: &next,
             error: Some("Invalid email or password"),
             csrf_token: &csrf_token,
+            banner: banner.as_deref(),
         };
         return render(&page);
     }
@@ -184,7 +199,7 @@ pub async fn setup_submit(
     let password = password_result.expect("validated above");
     let hash = hash_password(&password)?;
     let repo = SqliteUsersRepo::new(state.db.clone());
-    let user = repo.insert(email.as_str(), &hash).await?;
+    let user = repo.insert(email.as_str(), &hash, Role::Admin).await?;
 
     session.renew();
     session

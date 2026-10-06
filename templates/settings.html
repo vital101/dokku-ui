@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block heading %}Instance settings{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+  {% if let Some(error) = error %}
+  <div class="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/settings" class="space-y-6 rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div>
+      <label for="public_url" class="mb-1 block text-sm font-medium text-slate-300">Public URL</label>
+      <input id="public_url" name="public_url" type="url" value="{{ public_url }}"
+             placeholder="https://dokku-ui.example.com"
+             class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none">
+      <p class="mt-1 text-xs text-slate-500">Canonical URL of this UI; used by future reset links and webhook docs.</p>
+    </div>
+
+    <div>
+      <label for="login_banner" class="mb-1 block text-sm font-medium text-slate-300">Login banner</label>
+      <textarea id="login_banner" name="login_banner" rows="2" maxlength="280"
+                class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none"
+                placeholder="Scheduled maintenance at 22:00 UTC">{{ login_banner }}</textarea>
+      <p class="mt-1 text-xs text-slate-500">Shown above the sign-in form.</p>
+    </div>
+
+    <div>
+      <label for="app_filter" class="mb-1 block text-sm font-medium text-slate-300">App filter</label>
+      <textarea id="app_filter" name="app_filter" rows="3"
+                class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none"
+                placeholder="dokku-ui&#10;*-internal-*">{{ app_filter }}</textarea>
+      <p class="mt-1 text-xs text-slate-500">One glob per line; matching apps are hidden from the dashboard. Hidden apps stay manageable by URL.</p>
+    </div>
+
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div>
+        <label for="activity_ttl" class="mb-1 block text-sm font-medium text-slate-300">Activity retention (seconds)</label>
+        <input id="activity_ttl" name="activity_ttl" type="number" min="60" max="31536000" value="{{ activity_ttl }}"
+               placeholder="{{ activity_ttl_default }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none">
+        <p class="mt-1 text-xs text-slate-500">Finished runs are pruned after this window. Blank uses the environment default ({{ activity_ttl_default }}s).</p>
+      </div>
+      <div>
+        <label for="run_log_ttl" class="mb-1 block text-sm font-medium text-slate-300">Run-log retention (seconds)</label>
+        <input id="run_log_ttl" name="run_log_ttl" type="number" min="60" max="31536000" value="{{ run_log_ttl }}"
+               placeholder="{{ run_log_ttl_default }}"
+               class="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-slate-500 focus:outline-none">
+        <p class="mt-1 text-xs text-slate-500">Run output lines are pruned after this window. Blank uses the environment default ({{ run_log_ttl_default }}s).</p>
+      </div>
+    </div>
+
+    <button type="submit"
+            class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+      Save settings
+    </button>
+  </form>
+</div>
+{% endblock %}

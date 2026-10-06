@@ -11,6 +11,7 @@ use actix_web::http::header::{CONTENT_TYPE, LOCATION};
 use actix_web::test;
 
 use dokku_ui::auth::password::hash_password;
+use dokku_ui::auth::rbac::Role;
 use dokku_ui::dokku::{CapabilitiesStore, DokkuClient, FakeResolver, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
 use dokku_ui::settings::Settings;
@@ -133,9 +134,13 @@ pub fn run_url(html: &str) -> String {
 }
 
 pub async fn seed_user(state: &AppState, email: &str, password: &str) {
+    seed_user_with_role(state, email, password, Role::Admin).await;
+}
+
+pub async fn seed_user_with_role(state: &AppState, email: &str, password: &str, role: Role) {
     let repo = SqliteUsersRepo::new(state.db.clone());
     let hash = hash_password(&Password::new(password).expect("valid password")).expect("hash");
-    repo.insert(email, &hash).await.expect("insert user");
+    repo.insert(email, &hash, role).await.expect("insert user");
 }
 
 pub fn extract_csrf(html: &str) -> String {

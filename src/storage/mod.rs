@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 pub mod capabilities;
+pub mod instance_settings;
 pub mod jobs;
 pub mod runs;
 pub mod sessions;

@@ -3,9 +3,10 @@ use actix_web::{HttpResponse, web};
 use askama::Template;
 use serde::Deserialize;
 
-use crate::dokku::{AppRow, dashboard_from_snapshot, format_age};
+use crate::dokku::{AppRow, dashboard_from_snapshot_filtered, format_age};
 use crate::domain::types::AppStats;
 use crate::error::AppError;
+use crate::storage::instance_settings::{InstanceSettingsRepo, SqliteInstanceSettingsRepo};
 use crate::storage::users::{SqliteUsersRepo, UsersRepo};
 use crate::web::auth_middleware::SESSION_USER_ID;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
@@ -22,6 +23,7 @@ struct DashboardPage {
     stats: AppStats,
     rows: Vec<AppRow>,
     updated: String,
+    can_manage: bool,
 }
 
 pub async fn dashboard(
@@ -39,7 +41,14 @@ pub async fn dashboard(
         .ok_or_else(|| AppError::Internal("session user no longer exists".into()))?;
 
     let snapshot = state.snapshot.ensure_loaded().await?;
-    let data = dashboard_from_snapshot(&snapshot);
+    let instance = SqliteInstanceSettingsRepo::new(state.db.clone())
+        .load()
+        .await?;
+    let mut data = dashboard_from_snapshot_filtered(&snapshot, |name| instance.app_is_hidden(name));
+    let destroying = state.action_runs.active_destruction_subjects().await?;
+    for row in &mut data.rows {
+        row.deleting = destroying.iter().any(|subject| subject == &row.name);
+    }
     let updated = format_age(snapshot.age());
 
     let page = DashboardPage {
@@ -49,6 +58,7 @@ pub async fn dashboard(
         stats: data.stats,
         rows: data.rows,
         updated,
+        can_manage: user.role.can_manage_apps(),
     };
     Ok(HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -126,6 +136,7 @@ mod tests {
             name: "a".into(),
             health: AppHealth::from_report(Some(&report(true, true))),
             process_count: count,
+            deleting: false,
         };
         assert_eq!(row(-1).process_label(), "—");
         assert_eq!(row(0).process_label(), "0");

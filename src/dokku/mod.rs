@@ -21,7 +21,9 @@ pub use capabilities::{
     CapabilitiesError, CapabilitiesStore, probe_capabilities, spawn_capabilities_refresher,
 };
 pub use client::{DokkuClient, DokkuError, DokkuOutput};
-pub use dashboard::{AppRow, DashboardData, dashboard_from_snapshot};
+pub use dashboard::{
+    AppRow, DashboardData, dashboard_from_snapshot, dashboard_from_snapshot_filtered,
+};
 pub use dns::{DnsResolver, FakeResolver, TokioResolver, dns_record_status};
 pub use mock::MockClient;
 pub use overview::{OverviewError, overview_from_snapshot};

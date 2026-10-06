@@ -3,6 +3,7 @@ use crate::domain::capabilities::{CapabilityFamily, Requirement};
 use crate::domain::domain_name::DomainName;
 use crate::domain::git::GitBuildMode;
 use crate::domain::mount_spec::MountSpec;
+use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::{EnvVar, ScaleEntry};
@@ -138,6 +139,7 @@ pub enum DokkuCommand {
     ServiceCreate {
         plugin: ServicePlugin,
         service: ServiceName,
+        options: ServiceCreateOptions,
     },
     ServiceDestroy {
         plugin: ServicePlugin,
@@ -502,8 +504,31 @@ impl DokkuCommand {
                 vec![format!("{plugin}:info"), service.clone()]
             }
             DokkuCommand::ServiceList { plugin } => vec![format!("{plugin}:list")],
-            DokkuCommand::ServiceCreate { plugin, service } => {
-                vec![format!("{plugin}:create"), service.as_str().into()]
+            DokkuCommand::ServiceCreate {
+                plugin,
+                service,
+                options,
+            } => {
+                // Flags follow the service name: the plugin's `service_create`
+                // parses `"${@:2}"` (dokku-postgres 1.36.4 `functions`).
+                let mut argv = vec![format!("{plugin}:create"), service.as_str().into()];
+                if let Some(image) = &options.image {
+                    argv.push("--image".into());
+                    argv.push(image.clone());
+                }
+                if let Some(version) = &options.image_version {
+                    argv.push("--image-version".into());
+                    argv.push(version.clone());
+                }
+                if let Some(custom_env) = &options.custom_env {
+                    argv.push("--custom-env".into());
+                    argv.push(custom_env.clone());
+                }
+                if let Some(config_options) = &options.config_options {
+                    argv.push("--config-options".into());
+                    argv.push(config_options.clone());
+                }
+                argv
             }
             DokkuCommand::ServiceDestroy {
                 plugin,
@@ -1459,6 +1484,7 @@ mod tests {
             DokkuCommand::ServiceCreate {
                 plugin: plugin("postgres"),
                 service: service("db"),
+                options: ServiceCreateOptions::default(),
             },
             DokkuCommand::ServiceDestroy {
                 plugin: plugin("postgres"),
@@ -1732,9 +1758,41 @@ mod tests {
             DokkuCommand::ServiceCreate {
                 plugin: plugin("postgres"),
                 service: service("my-db"),
+                options: ServiceCreateOptions::default(),
             }
             .argv(),
             vec!["postgres:create", "my-db"]
+        );
+    }
+
+    #[test]
+    fn service_create_argv_carries_advanced_options_after_the_name() {
+        let options = ServiceCreateOptions::parse(
+            Some("postgres"),
+            Some("16.2"),
+            Some("USER=alpha;HOST=beta"),
+            Some("--shm-size=1g"),
+        )
+        .expect("valid options");
+        assert_eq!(
+            DokkuCommand::ServiceCreate {
+                plugin: plugin("postgres"),
+                service: service("my-db"),
+                options,
+            }
+            .argv(),
+            vec![
+                "postgres:create",
+                "my-db",
+                "--image",
+                "postgres",
+                "--image-version",
+                "16.2",
+                "--custom-env",
+                "USER=alpha;HOST=beta",
+                "--config-options",
+                "--shm-size=1g",
+            ]
         );
     }
 

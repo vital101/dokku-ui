@@ -3,6 +3,40 @@
 @source "../templates";
 @source "../src";
 
+[data-theme="light"] {
+  --color-slate-950: #f8fafc;
+  --color-slate-900: #f1f5f9;
+  --color-slate-800: #e2e8f0;
+  --color-slate-700: #cbd5e1;
+  --color-slate-600: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-400: #475569;
+  --color-slate-300: #334155;
+  --color-slate-200: #1e293b;
+  --color-slate-100: #0f172a;
+  --color-white: #0f172a;
+  --color-emerald-400: #047857;
+  --color-red-400: #b91c1c;
+  --color-red-300: #b91c1c;
+  --color-amber-400: #b45309;
+  --color-blue-400: #1d4ed8;
+  --color-sky-400: #0369a1;
+  --color-red-950: #fef2f2;
+  --color-red-900: #fecaca;
+  --color-red-800: #fecaca;
+}
+
+[data-palette-overlay] {
+  display: none;
+}
+[data-palette-overlay][data-open] {
+  display: flex;
+}
+[data-palette-link][data-active] {
+  background-color: var(--color-slate-800);
+  color: var(--color-white);
+}
+
 /* App action modal + run streaming (see static/js/actions.js) */
 [data-modal-overlay] {
   display: none;

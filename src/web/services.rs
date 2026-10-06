@@ -7,9 +7,11 @@ use serde::Deserialize;
 
 use crate::dokku::{DokkuError, plugin_services, service_linked_apps, service_logs, service_stats};
 use crate::domain::AppName;
+use crate::domain::Support;
 use crate::domain::command::DokkuCommand;
 use crate::domain::job::{JobSpec, ServiceAction as JobServiceAction};
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_service_list};
+use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::ServiceInfo;
@@ -38,6 +40,12 @@ struct ListPage<'a> {
 struct ListPartial {
     plugin: ServicePlugin,
     services: Vec<ServiceInfo>,
+}
+
+#[derive(Template)]
+#[template(path = "partials/service_nav.html")]
+struct ServiceNavPartial {
+    plugins: Vec<ServicePlugin>,
 }
 
 #[derive(Template)]
@@ -263,6 +271,32 @@ pub async fn list_partial(
     }
 }
 
+/// Sidebar fragment: renders links only for service plugins the host actually
+/// has installed. A failed probe degrades to the full catalog rather than
+/// hiding services.
+pub async fn service_nav(
+    state: web::Data<AppState>,
+    session: Session,
+) -> Result<HttpResponse, AppError> {
+    current_user(&state, &session).await?;
+
+    let plugins: Vec<ServicePlugin> = match state.capabilities.ensure_loaded().await {
+        Ok(capabilities) => ServicePlugin::all()
+            .filter(|plugin| {
+                !matches!(
+                    capabilities.supports_plugin(plugin.as_str()),
+                    Support::PluginMissing { .. }
+                )
+            })
+            .collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "capability probe failed; showing every service plugin");
+            ServicePlugin::all().collect()
+        }
+    };
+    render(&ServiceNavPartial { plugins })
+}
+
 pub async fn new_form(
     state: web::Data<AppState>,
     session: Session,
@@ -284,6 +318,14 @@ pub async fn new_form(
 #[derive(Deserialize)]
 pub struct CreateForm {
     name: String,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    image_version: Option<String>,
+    #[serde(default)]
+    custom_env: Option<String>,
+    #[serde(default)]
+    config_options: Option<String>,
 }
 
 pub async fn create(
@@ -294,19 +336,33 @@ pub async fn create(
     form: CsrfForm<CreateForm>,
 ) -> Result<HttpResponse, AppError> {
     let plugin = plugin_from_slug(&path.into_inner())?;
-    let name = form.0.name.trim().to_owned();
+    let form = form.0;
+    let name = form.name.trim().to_owned();
+
+    let fail = |message: String| {
+        if is_htmx(&req) {
+            modal_error(message)
+        } else {
+            set_flash(&session, FlashLevel::Error, message);
+            Ok(see_other(&format!("/services/{plugin}/new")))
+        }
+    };
 
     let service = match ServiceName::try_from(name.as_str()) {
         Ok(service) => service,
-        Err(err) => {
-            let message = format!("Invalid service name: {err}");
-            if is_htmx(&req) {
-                return modal_error(message);
-            }
-            set_flash(&session, FlashLevel::Error, message);
-            return Ok(see_other(&format!("/services/{plugin}/new")));
-        }
+        Err(err) => return fail(format!("Invalid service name: {err}")),
     };
+
+    let options = match ServiceCreateOptions::parse(
+        form.image.as_deref(),
+        form.image_version.as_deref(),
+        form.custom_env.as_deref(),
+        form.config_options.as_deref(),
+    ) {
+        Ok(options) => options,
+        Err(err) => return fail(err.to_string()),
+    };
+    let redactions = options.redaction_fragments();
     let redirect_to = detail_url(plugin, &service);
 
     if is_htmx(&req) {
@@ -321,13 +377,14 @@ pub async fn create(
                 plan: vec![JobSpec::ServiceCreate {
                     plugin: plugin.as_str().to_owned(),
                     service: service.as_str().to_owned(),
+                    options,
                 }],
                 completion: RunCompletion {
                     success_message: format!("Service '{name}' created."),
                     redirect: Some(redirect_to),
                     refresh: RunRefresh::None,
                 },
-                redactions: Vec::new(),
+                redactions,
                 refresh_url: None,
             },
         )
@@ -340,8 +397,13 @@ pub async fn create(
         &name,
         "service.create",
         TargetKind::Service,
-        DokkuCommand::ServiceCreate { plugin, service },
+        DokkuCommand::ServiceCreate {
+            plugin,
+            service,
+            options,
+        },
         &format!("Service '{name}' created."),
+        &redactions,
     )
     .await
     {
