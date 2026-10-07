@@ -23,6 +23,7 @@
           <td class="py-2 pr-4 text-slate-400">{{ row.index }}</td>
           <td class="py-2 pr-4 font-mono text-white">{{ row.url }}</td>
           <td class="py-2 text-right">
+            {% if can_manage %}
             <form hx-post="/apps/{{ name }}/build/buildpacks/remove" hx-target="#modal-content" hx-swap="innerHTML"
                   method="post" data-action-form class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -31,6 +32,7 @@
                 Remove
               </button>
             </form>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
@@ -38,6 +40,7 @@
     </table>
     {% endif %}
 
+    {% if can_manage %}
     <div class="mt-4 grid gap-4 border-t border-slate-800/50 pt-4 lg:grid-cols-2">
       <form hx-post="/apps/{{ name }}/build/buildpacks/add" hx-target="#modal-content" hx-swap="innerHTML"
             method="post" data-action-form class="flex items-end gap-2">
@@ -86,6 +89,7 @@
       </button>
     </form>
     {% endif %}
+    {% endif %}
   </div>
 
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
@@ -94,6 +98,7 @@
       Auto lets dokku detect the builder from the app's files. Changes take
       effect on the next deploy or rebuild.
     </p>
+    {% if can_manage %}
     <div class="mt-4 grid gap-4 lg:grid-cols-2">
       <form hx-post="/apps/{{ name }}/build/builder" hx-target="#modal-content" hx-swap="innerHTML"
             method="post" data-action-form class="flex items-end gap-2">
@@ -129,6 +134,7 @@
         </button>
       </form>
     </div>
+    {% endif %}
     <dl class="mt-4 grid gap-2 text-sm lg:grid-cols-3">
       <div>
         <dt class="text-xs text-slate-500">Detected</dt>
@@ -143,5 +149,48 @@
         <dd class="font-mono text-slate-300">{{ builder.build_dir }}</dd>
       </div>
     </dl>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Scheduler</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Auto uses the global default. Selection takes effect on the next deploy
+      or rebuild. Per-scheduler properties require a newer dokku release than
+      this host runs.
+    </p>
+    <dl class="mt-4 grid gap-2 text-sm lg:grid-cols-3">
+      <div>
+        <dt class="text-xs text-slate-500">Selected</dt>
+        <dd class="font-mono text-slate-300">{% if scheduler.selected.is_empty() %}—{% else %}{{ scheduler.selected }}{% endif %}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Computed selected</dt>
+        <dd class="font-mono text-slate-300">{{ scheduler.computed_selected }}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Global selected</dt>
+        <dd class="font-mono text-slate-300">{{ scheduler.global_selected }}</dd>
+      </div>
+    </dl>
+    {% if can_manage %}
+    <form hx-post="/apps/{{ name }}/build/scheduler" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2 border-t border-slate-800/50 pt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="scheduler-selected" class="mb-1 block text-sm text-slate-400">Scheduler</label>
+        <select id="scheduler-selected" name="selected"
+                class="w-48 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+          <option value="" {% if scheduler.selected.is_empty() %}selected{% endif %}>Auto (global default)</option>
+          {% for scheduler_name in schedulers %}
+          <option value="{{ scheduler_name }}" {% if scheduler.selected.as_str() == scheduler_name.as_str() %}selected{% endif %}>{{ scheduler_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Save
+      </button>
+    </form>
+    {% endif %}
   </div>
 </div>

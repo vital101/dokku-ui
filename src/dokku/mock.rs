@@ -12,6 +12,7 @@ pub struct MockClient {
     responses: Mutex<HashMap<DokkuCommand, Result<DokkuOutput, DokkuError>>>,
     default: Result<DokkuOutput, DokkuError>,
     calls: Mutex<Vec<DokkuCommand>>,
+    stdin_calls: Mutex<Vec<(DokkuCommand, String)>>,
 }
 
 impl Default for MockClient {
@@ -26,6 +27,7 @@ impl MockClient {
             responses: Mutex::new(HashMap::new()),
             default: Ok(DokkuOutput::ok("")),
             calls: Mutex::new(Vec::new()),
+            stdin_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -34,6 +36,7 @@ impl MockClient {
             responses: Mutex::new(HashMap::new()),
             default,
             calls: Mutex::new(Vec::new()),
+            stdin_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -47,6 +50,11 @@ impl MockClient {
 
     pub fn calls(&self) -> Vec<DokkuCommand> {
         self.calls.lock().expect("calls lock").clone()
+    }
+
+    /// Commands executed with stdin, in call order (command + payload).
+    pub fn stdin_calls(&self) -> Vec<(DokkuCommand, String)> {
+        self.stdin_calls.lock().expect("stdin calls lock").clone()
     }
 }
 
@@ -68,6 +76,18 @@ impl DokkuClient for MockClient {
             }),
             other => other,
         }
+    }
+
+    async fn exec_with_stdin(
+        &self,
+        command: &DokkuCommand,
+        stdin: &str,
+    ) -> Result<DokkuOutput, DokkuError> {
+        self.stdin_calls
+            .lock()
+            .expect("stdin calls lock")
+            .push((command.clone(), stdin.to_owned()));
+        self.exec(command).await
     }
 }
 

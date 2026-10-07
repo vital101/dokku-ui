@@ -1,9 +1,9 @@
 use crate::domain::mount_spec::MountSpec;
 use crate::domain::types::{
     AppInfo, AppMounts, BuildInfo, BuilderReport, ContainerDetails, CronTask, DomainsReport,
-    EnvVar, GitReport, ImageStatus, LetsencryptEntry, LogLines, Mount, ProcessState, ProcessStatus,
-    PsReport, ResourceReport, ScaleEntry, ServiceInfo, ServiceStats, SslReport, StorageEntry,
-    VolumeUsage,
+    EnvVar, GitReport, HttpAuthReport, ImageStatus, LetsencryptEntry, LogLines, Mount, PortsReport,
+    ProcessState, ProcessStatus, ProxyReport, PsReport, ResourceReport, ScaleEntry,
+    SchedulerReport, ServiceInfo, ServiceStats, SshKey, SslReport, StorageEntry, VolumeUsage,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -269,6 +269,156 @@ pub fn parse_certs_report(output: &str) -> Option<SslReport> {
 pub fn parse_cron_tasks(json: &str) -> Vec<CronTask> {
     serde_json::from_str::<Vec<CronTask>>(json).unwrap_or_default()
 }
+/// `ports:report <app>` -> configured and detected mappings from the
+/// `Ports map` / `Ports map detected` lines. Malformed output yields defaults.
+pub fn parse_ports_report(output: &str) -> PortsReport {
+    let mut report = PortsReport::default();
+    let mut in_section = false;
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.starts_with("=====> ") {
+            in_section = true;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        match key.trim().to_lowercase().as_str() {
+            "ports map" => report.configured = split_mappings(value),
+            "ports map detected" => report.detected = split_mappings(value),
+            _ => {}
+        }
+    }
+    report
+}
+
+/// `proxy:report <app>` -> proxy status from the `Proxy …` lines.
+pub fn parse_proxy_report(output: &str) -> ProxyReport {
+    let mut report = ProxyReport::default();
+    let mut in_section = false;
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.starts_with("=====> ") {
+            in_section = true;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = normalize_report_value(value);
+        match key.trim().to_lowercase().as_str() {
+            "proxy enabled" => report.enabled = value == "true",
+            "proxy computed type" => report.computed_type = value,
+            "proxy global type" => report.global_type = value,
+            "proxy type" => report.proxy_type = value,
+            _ => {}
+        }
+    }
+    report
+}
+
+fn split_mappings(value: &str) -> Vec<String> {
+    value.split_whitespace().map(str::to_owned).collect()
+}
+
+/// `ssh-keys:list` -> authorized keys. Text lines look like
+/// `SHA256:… NAME="laptop" SSHCOMMAND_ALLOWED_KEYS="no-agent-forwarding,…"`
+/// (the installed `sshcommand list` format); the final field is the
+/// authorized_keys options list, not the key type.
+pub fn parse_ssh_keys(output: &str) -> Vec<SshKey> {
+    output
+        .lines()
+        .map(strip_ansi)
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let mut tokens = line.split_whitespace();
+            let fingerprint = tokens.next()?.to_owned();
+            let mut key = SshKey {
+                fingerprint,
+                ..SshKey::default()
+            };
+            for token in tokens {
+                if let Some(value) = token.strip_prefix("NAME=") {
+                    key.name = value.trim_matches('"').to_owned();
+                } else if let Some(value) = token.strip_prefix("SSHCOMMAND_ALLOWED_KEYS=") {
+                    key.options = value.trim_matches('"').to_owned();
+                }
+            }
+            (!key.fingerprint.is_empty()).then_some(key)
+        })
+        .collect()
+}
+
+/// `scheduler:report <app>` -> scheduler selection from the `Scheduler …`
+/// lines. Malformed output yields defaults.
+pub fn parse_scheduler_report(output: &str) -> SchedulerReport {
+    let mut report = SchedulerReport::default();
+    let mut in_section = false;
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.starts_with("=====> ") {
+            in_section = true;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = normalize_report_value(value);
+        match key.trim().to_lowercase().as_str() {
+            "scheduler selected" => report.selected = value,
+            "scheduler computed selected" => report.computed_selected = value,
+            "scheduler global selected" => report.global_selected = value,
+            _ => {}
+        }
+    }
+    report
+}
+
+/// `http-auth:report <app>` -> enabled flag, allowed-IP bypass list, scoped
+/// domains, and basic-auth users. Malformed output yields defaults.
+pub fn parse_http_auth_report(output: &str) -> HttpAuthReport {
+    let mut report = HttpAuthReport::default();
+    let mut in_section = false;
+    for line in output.lines() {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        if line.starts_with("=====> ") {
+            in_section = true;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = normalize_report_value(value);
+        match key.trim().to_lowercase().as_str() {
+            "http auth enabled" => report.enabled = value == "true",
+            "http auth allowed ips" => report.allowed_ips = split_mappings(&value),
+            "http auth domains" => report.domains = split_mappings(&value),
+            "http auth users" => report.users = split_mappings(&value),
+            _ => {}
+        }
+    }
+    report
+}
+
 /// `dokku domains:report <app> --format json` -> the app's vhost hostnames.
 pub fn parse_domains_report(json: &str) -> Vec<String> {
     parse_domains_detail(json)
@@ -626,8 +776,9 @@ pub fn parse_resource_report(output: &str) -> Vec<ResourceReport> {
 
 /// `<plugin>:info <service>` plain text -> service details. Reads `Key: value`
 /// lines under a `=====> <service> <plugin> service information` header; an
-/// empty or `-` value means unset. The DSN is intentionally never parsed into
-/// the returned struct, and an unrecognisable report yields `None`.
+/// empty or `-` value means unset. The DSN is parsed (for the re-auth-gated
+/// reveal flow) and masked before any display. An unrecognisable report
+/// yields `None`.
 pub fn parse_service_info(output: &str, plugin: &str, service: &str) -> Option<ServiceInfo> {
     let mut info = ServiceInfo::unknown(plugin, service);
     let mut saw_header = false;
@@ -654,8 +805,7 @@ pub fn parse_service_info(output: &str, plugin: &str, service: &str) -> Option<S
             "links" => {
                 info.linked_apps = value.split_whitespace().map(str::to_owned).collect();
             }
-            // The Dsn contains credentials; it is read and discarded.
-            "dsn" => {}
+            "dsn" => info.dsn = (!value.is_empty()).then_some(value),
             _ => {}
         }
     }
@@ -1003,6 +1153,60 @@ mod tests {
         assert!(report.expires_at.is_empty());
         assert!(!report.verified_by_ca());
         assert_eq!(parse_certs_report(""), None);
+    }
+
+    const PORTS_REPORT: &str = include_str!("../../tests/fixtures/ports_report.txt");
+    const PROXY_REPORT: &str = include_str!("../../tests/fixtures/proxy_report.txt");
+    const SCHEDULER_REPORT: &str = include_str!("../../tests/fixtures/scheduler_report.txt");
+
+    #[test]
+    fn parses_ports_and_proxy_reports() {
+        let ports = parse_ports_report(PORTS_REPORT);
+        assert_eq!(ports.configured, vec!["http:80:5000"]);
+        assert_eq!(ports.detected, vec!["http:80:5000"]);
+        assert_eq!(parse_ports_report(""), PortsReport::default());
+
+        let proxy = parse_proxy_report(PROXY_REPORT);
+        assert!(proxy.enabled);
+        assert_eq!(proxy.computed_type, "nginx");
+        assert_eq!(proxy.global_type, "nginx");
+        assert!(proxy.proxy_type.is_empty());
+        assert_eq!(proxy.effective_type(), "nginx");
+        assert_eq!(parse_proxy_report(""), ProxyReport::default());
+    }
+
+    #[test]
+    fn parses_scheduler_report() {
+        let report = parse_scheduler_report(SCHEDULER_REPORT);
+        assert!(report.selected.is_empty());
+        assert_eq!(report.computed_selected, "docker-local");
+        assert_eq!(report.global_selected, "docker-local");
+        assert_eq!(parse_scheduler_report(""), SchedulerReport::default());
+    }
+
+    const HTTP_AUTH_REPORT: &str = include_str!("../../tests/fixtures/http_auth_report.txt");
+
+    #[test]
+    fn parses_http_auth_report() {
+        let report = parse_http_auth_report(HTTP_AUTH_REPORT);
+        assert!(report.enabled);
+        assert_eq!(report.allowed_ips, vec!["10.0.0.0/8", "192.168.1.5"]);
+        assert!(report.domains.is_empty());
+        assert_eq!(report.users, vec!["admin"]);
+        assert_eq!(parse_http_auth_report(""), HttpAuthReport::default());
+    }
+
+    #[test]
+    fn parses_ssh_keys_text_format() {
+        let output = "SHA256:abc NAME=\"laptop\" SSHCOMMAND_ALLOWED_KEYS=\"no-agent-forwarding,no-user-rc\"\nSHA256:def NAME=\"deploy@ci\" SSHCOMMAND_ALLOWED_KEYS=\"no-port-forwarding\"\n";
+        let keys = parse_ssh_keys(output);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].fingerprint, "SHA256:abc");
+        assert_eq!(keys[0].name, "laptop");
+        assert_eq!(keys[0].options, "no-agent-forwarding,no-user-rc");
+        assert_eq!(keys[1].name, "deploy@ci");
+        assert_eq!(keys[1].options, "no-port-forwarding");
+        assert!(parse_ssh_keys("").is_empty());
     }
 
     #[test]
@@ -1589,11 +1793,25 @@ mod tests {
     }
 
     #[test]
-    fn service_info_never_parses_the_dsn() {
+    fn service_info_parses_the_dsn_but_masks_it_by_default() {
         let output = "=====> x redis service information\n       Dsn:                 redis://:secret@host:6379\n       Status:              running\n";
         let info = parse_service_info(output, "redis", "x").expect("info");
         assert_eq!(info.status, "running");
-        assert!(!format!("{info:?}").contains("secret"));
+        assert_eq!(
+            info.dsn.as_deref(),
+            Some("redis://:secret@host:6379"),
+            "the DSN is parsed for the reveal flow"
+        );
+        let masked = info.masked_dsn().expect("masked");
+        assert!(!masked.contains("secret"), "{masked}");
+        assert!(masked.contains("@host:6379"), "{masked}");
+        let debug = format!("{info:?}");
+        assert!(!debug.contains("secret"), "Debug masks the DSN: {debug}");
+        let json = serde_json::to_string(&info).expect("serialize");
+        assert!(
+            !json.contains("secret") && !json.contains("dsn"),
+            "serialization omits the DSN: {json}"
+        );
     }
 
     #[test]

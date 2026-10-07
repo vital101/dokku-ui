@@ -37,6 +37,7 @@
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
     <h3 class="text-sm font-medium text-white">Network exposure</h3>
     {% if info.exposed_ports.is_empty() %}
+    {% if can_manage %}
     <p class="mt-2 text-xs text-slate-500">
       Expose the service on the host so clients outside docker can reach it.
     </p>
@@ -55,7 +56,11 @@
       </button>
     </form>
     {% else %}
+    <p class="mt-2 text-sm text-slate-400">Not published on the host.</p>
+    {% endif %}
+    {% else %}
     <p class="mt-2 text-sm text-slate-300">Published on <span class="font-mono text-white">{{ info.exposed_ports }}</span>.</p>
+    {% if can_manage %}
     <form method="post" action="/services/{{ plugin }}/{{ service }}/unexpose"
           hx-post="/services/{{ plugin }}/{{ service }}/unexpose" hx-target="#modal-content" hx-swap="innerHTML"
           data-action-form class="mt-3">
@@ -65,6 +70,38 @@
         <span class="app-action-label">Unexpose</span>
       </button>
     </form>
+    {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <h3 class="text-sm font-medium text-white">Connection string</h3>
+    {% if let Some(masked) = info.masked_dsn() %}
+    <div class="mt-3 flex items-center gap-2">
+      <input id="dsn-masked" type="text" readonly value="{{ masked }}"
+             class="w-full flex-1 rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-300">
+      <button type="button" data-copy="dsn-masked" data-copy-label="Copy"
+              class="rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-700">
+        Copy
+      </button>
+      {% if can_manage %}
+      <form method="post" action="/services/{{ plugin }}/{{ service }}/dsn/reveal"
+            hx-post="/services/{{ plugin }}/{{ service }}/dsn/reveal" hx-target="#dsn-panel" hx-swap="innerHTML"
+            class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit"
+                class="rounded-md bg-slate-800 px-3 py-2 text-xs font-medium text-amber-300 hover:bg-slate-700">
+          Reveal
+        </button>
+      </form>
+      {% endif %}
+    </div>
+    <div id="dsn-panel" class="mt-3"></div>
+    <p class="mt-2 text-xs text-slate-500">
+      Passwords are masked. Revealing requires re-authentication and is audited.
+    </p>
+    {% else %}
+    <p class="mt-2 text-sm text-slate-400">No connection string was reported.</p>
     {% endif %}
   </div>
 

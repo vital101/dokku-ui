@@ -1,0 +1,134 @@
+<div class="space-y-6">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="text-sm font-medium text-white">Port mappings</h3>
+        <p class="mt-1 text-xs text-slate-500">
+          Explicit mappings override the auto-detected port. Available in
+          addition to the detected mapping.
+        </p>
+      </div>
+      {% if proxy.enabled %}
+      <span class="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
+        Proxy enabled
+      </span>
+      {% else %}
+      <span class="inline-flex items-center gap-2 rounded-full bg-slate-700/40 px-3 py-1 text-xs font-medium text-slate-300">
+        Proxy disabled
+      </span>
+      {% endif %}
+    </div>
+
+    {% if ports.configured.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No explicit port mappings configured.</p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Mapping</th>
+          <th class="py-2 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for mapping in ports.configured %}
+        <tr class="border-b border-slate-800/50 last:border-0">
+          <td class="py-2 pr-4 font-mono text-white">{{ mapping }}</td>
+          <td class="py-2 text-right">
+            {% if can_manage %}
+            <form hx-post="/apps/{{ name }}/ports/remove" hx-target="#modal-content" hx-swap="innerHTML"
+                  method="post" data-action-form class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="mapping" value="{{ mapping }}">
+              <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+                Remove
+              </button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% if can_manage %}
+    <form hx-post="/apps/{{ name }}/ports/clear" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit"
+              class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-slate-700">
+        Clear all mappings
+      </button>
+    </form>
+    {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Detected mapping</h3>
+    {% if ports.detected.is_empty() %}
+    <p class="mt-2 text-sm text-slate-400">No mapping was detected.</p>
+    {% else %}
+    <p class="mt-2 font-mono text-sm text-slate-300">{{ ports.detected.join(" ") }}</p>
+    {% endif %}
+  </div>
+
+  {% if can_manage %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Add mappings</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      One or more <span class="font-mono">scheme:host:container</span> mappings
+      (http, https, tcp, grpc), or a bare host port.
+    </p>
+    <form hx-post="/apps/{{ name }}/ports/add" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="add-ports" class="mb-1 block text-sm text-slate-400">Mappings (space or comma separated)</label>
+        <input id="add-ports" type="text" name="mappings" required placeholder="http:80:5000 tcp:5432:5432"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Add
+      </button>
+    </form>
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Replace all mappings</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Sets the complete mapping list; omitted mappings are removed.
+    </p>
+    <form hx-post="/apps/{{ name }}/ports/set" hx-target="#modal-content" hx-swap="innerHTML"
+          method="post" data-action-form class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="set-ports" class="mb-1 block text-sm text-slate-400">All mappings</label>
+        <input id="set-ports" type="text" name="mappings" required value="{{ ports.configured.join(" ") }}"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <button type="submit"
+              class="app-action rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+        Replace
+      </button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Proxy</h3>
+    <dl class="mt-4 grid gap-2 text-sm lg:grid-cols-3">
+      <div>
+        <dt class="text-xs text-slate-500">Enabled</dt>
+        <dd class="text-slate-300">{% if proxy.enabled %}yes{% else %}no{% endif %}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Effective type</dt>
+        <dd class="font-mono text-slate-300">{% if proxy.effective_type().is_empty() %}—{% else %}{{ proxy.effective_type() }}{% endif %}</dd>
+      </div>
+      <div>
+        <dt class="text-xs text-slate-500">Global type</dt>
+        <dd class="font-mono text-slate-300">{% if proxy.global_type.is_empty() %}—{% else %}{{ proxy.global_type }}{% endif %}</dd>
+      </div>
+    </dl>
+  </div>
+</div>

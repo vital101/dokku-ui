@@ -54,6 +54,22 @@ impl DokkuError {
 pub trait DokkuClient: Send + Sync {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError>;
 
+    /// Executes `command` with `stdin` written to the command's standard input
+    /// before its output is read (used by `ssh-keys:add`, which reads the key
+    /// from stdin). The default implementation rejects the call; only clients
+    /// that can carry stdin (the real SSH client and the mock) override it.
+    async fn exec_with_stdin(
+        &self,
+        command: &DokkuCommand,
+        stdin: &str,
+    ) -> Result<DokkuOutput, DokkuError> {
+        let _ = (command, stdin);
+        Err(DokkuError::Exit {
+            code: 2,
+            stderr: "this client does not support stdin commands".to_owned(),
+        })
+    }
+
     /// Executes `command`, forwarding output chunks to `sink` as they arrive.
     ///
     /// The default implementation falls back to `exec` and emits the complete

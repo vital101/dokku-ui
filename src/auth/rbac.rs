@@ -87,6 +87,8 @@ pub fn permission_for(method: &str, path: &str) -> Permission {
         || path.starts_with("/users/")
         || path == "/settings"
         || path.starts_with("/settings/")
+        || path == "/keys"
+        || path.starts_with("/keys/")
     {
         return Permission::ManageUsers;
     }
@@ -182,6 +184,12 @@ mod tests {
         );
         assert_eq!(
             permission_for("POST", "/users/3/delete"),
+            Permission::ManageUsers
+        );
+        assert_eq!(permission_for("GET", "/keys"), Permission::ManageUsers);
+        assert_eq!(permission_for("POST", "/keys"), Permission::ManageUsers);
+        assert_eq!(
+            permission_for("POST", "/keys/remove"),
             Permission::ManageUsers
         );
         // `/username` is not under the users namespace.

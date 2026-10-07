@@ -148,6 +148,15 @@ impl RunSummary {
             None => "running".to_owned(),
         }
     }
+
+    /// Tailwind text color for the outcome label.
+    pub fn outcome_css(&self) -> &'static str {
+        match self.ok {
+            Some(true) => "text-emerald-400",
+            Some(false) => "text-red-400",
+            None => "text-slate-300",
+        }
+    }
 }
 
 /// "just now" / "5m ago" / "3h ago" / "2d ago", falling back to the UTC date
@@ -411,6 +420,38 @@ impl SqliteRunsRepo {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
+        Ok(summaries_from_rows(rows))
+    }
+
+    /// Like [`Self::list_for_target`], but filtered to specific operations in
+    /// SQL so unrelated activity can never crowd older rows out of the limit.
+    pub async fn list_for_target_operations(
+        &self,
+        kind: TargetKind,
+        name: &str,
+        operations: &[&str],
+        limit: usize,
+    ) -> Result<Vec<RunSummary>, sqlx::Error> {
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", operations.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, operation, target_kind, subject, actor_email, outcome, created_at \
+             FROM action_runs WHERE target_kind = ? AND subject = ? AND operation IN ({placeholders}) \
+             ORDER BY created_at DESC, id DESC LIMIT ?"
+        );
+        // Only `?` placeholders are interpolated (no user input), so the
+        // manually built string is safe for sqlx to execute.
+        let mut query = sqlx::query_as::<_, SummaryRow>(sqlx::AssertSqlSafe(sql))
+            .bind(kind.as_str())
+            .bind(name);
+        for operation in operations {
+            query = query.bind(*operation);
+        }
+        let rows = query.bind(limit as i64).fetch_all(&self.pool).await?;
         Ok(summaries_from_rows(rows))
     }
 
@@ -943,6 +984,61 @@ mod tests {
             .expect("service rows");
         assert_eq!(svc_rows.len(), 1);
         assert_eq!(svc_rows[0].id, svc_run);
+    }
+
+    #[tokio::test]
+    async fn list_for_target_operations_filters_in_sql() {
+        let (repo, _dir) = repo_with(300, 600).await;
+        let mut ids = Vec::new();
+        for operation in ["git.sync", "app.restart", "git.from-image"] {
+            let id = repo
+                .insert_with(&NewRun {
+                    subject: "alpha".to_owned(),
+                    operation: operation.to_owned(),
+                    target_kind: TargetKind::App,
+                    actor: Actor {
+                        user_id: None,
+                        email: None,
+                    },
+                    parent_run_id: None,
+                })
+                .await
+                .expect("run");
+            ids.push((operation, id));
+        }
+
+        let deploy_rows = repo
+            .list_for_target_operations(
+                TargetKind::App,
+                "alpha",
+                &["git.sync", "git.from-image"],
+                10,
+            )
+            .await
+            .expect("deploy rows");
+        assert_eq!(deploy_rows.len(), 2);
+        assert!(
+            deploy_rows
+                .iter()
+                .all(|row| row.operation.starts_with("git.")),
+            "{deploy_rows:?}"
+        );
+
+        // The limit applies after filtering: a single deploy still shows even
+        // if other operations are newer.
+        let limited = repo
+            .list_for_target_operations(TargetKind::App, "alpha", &["git.sync"], 1)
+            .await
+            .expect("limited");
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, ids[0].1);
+
+        assert!(
+            repo.list_for_target_operations(TargetKind::App, "alpha", &[], 10)
+                .await
+                .expect("empty ops")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

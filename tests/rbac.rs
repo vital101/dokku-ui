@@ -6,12 +6,59 @@ use actix_web::test;
 
 use common::{
     complete_setup, extract_csrf, form_request, get_body, location, login, seed_user,
-    seed_user_with_role, test_state,
+    seed_user_with_role, test_state, test_state_with_client,
 };
 
 use dokku_ui::auth::rbac::Role;
+use dokku_ui::dokku::{DokkuOutput, MockClient};
+use dokku_ui::domain::AppName;
+use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::storage::users::{SqliteUsersRepo, UsersRepo};
 use dokku_ui::web::build_app;
+
+fn app_name(name: &str) -> AppName {
+    AppName::try_from(name).expect("valid app name")
+}
+
+fn seeded_app_client() -> MockClient {
+    MockClient::new()
+        .stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps\nalpha")),
+        )
+        .stub(
+            DokkuCommand::AppsReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(
+                r#"{"app-created-at": "1791023796", "app-locked": "false"}"#.to_owned(),
+            )),
+        )
+        .stub(
+            DokkuCommand::PsReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(
+                r#"{"deployed": "true", "running": "true", "processes": "2"}"#.to_owned(),
+            )),
+        )
+        .stub(
+            DokkuCommand::PsScaleGet {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(
+                include_str!("fixtures/ps_scale.txt").to_owned(),
+            )),
+        )
+        .stub(
+            DokkuCommand::ResourceReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(
+                include_str!("fixtures/resource_report.txt").to_owned(),
+            )),
+        )
+}
 
 async fn csrf_for<S, B, E>(app: &S, path: &str, cookie: &Cookie<'static>) -> String
 where
@@ -225,7 +272,7 @@ async fn viewer_is_read_only() {
         assert_eq!(resp.status(), StatusCode::OK, "GET {path}");
     }
 
-    let csrf = csrf_for(&app, "/apps/new", &viewer).await;
+    let csrf = csrf_for(&app, "/", &viewer).await;
     for (path, body) in [
         ("/apps", format!("csrf_token={csrf}&name=myapp")),
         ("/refresh", format!("csrf_token={csrf}")),
@@ -652,4 +699,84 @@ async fn palette_requires_login() {
     .await;
     assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
     assert_eq!(location(&resp), "/login");
+}
+
+#[tokio::test]
+async fn viewer_does_not_see_mutation_controls() {
+    let (state, _dir) = test_state_with_client(seeded_app_client()).await;
+    seed_user(&state, "admin@example.com", "correct-horse-battery").await;
+    seed_user_with_role(
+        &state,
+        "viewer@example.com",
+        "correct-horse-battery",
+        Role::Viewer,
+    )
+    .await;
+    let app = test::init_service(build_app(state)).await;
+
+    let viewer = login(&app, "viewer@example.com", "correct-horse-battery").await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(viewer.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    for needle in ["Start", "Stop", "Restart", "Rebuild", "Delete app"] {
+        assert!(!body.contains(needle), "viewer sees {needle}: {body}");
+    }
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/processes")
+            .cookie(viewer.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(!body.contains("Apply scale"), "{body}");
+    assert!(!body.contains(r#"value="clear""#), "{body}");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/new")
+            .cookie(viewer)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/");
+
+    let admin = login(&app, "admin@example.com", "correct-horse-battery").await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha")
+            .cookie(admin.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    for needle in ["Start", "Stop", "Restart", "Rebuild", "Delete app"] {
+        assert!(body.contains(needle), "admin missing {needle}: {body}");
+    }
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/processes")
+            .cookie(admin)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Apply scale"), "{body}");
 }

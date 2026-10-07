@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::auth::proxy::{Cidr, parse_trusted_cidrs};
+use crate::auth::rbac::Role;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub port: u16,
@@ -18,6 +21,20 @@ pub struct Settings {
     pub activity_ttl_secs: u64,
     pub run_log_ttl_secs: u64,
     pub reauth_ttl_secs: u64,
+    /// Reverse-proxy header auth is enabled only when this list is non-empty;
+    /// the header is honored only when the direct peer falls inside it.
+    pub trusted_proxy_cidrs: Vec<Cidr>,
+    /// Header carrying the authenticated user's email (lowercased).
+    pub proxy_auth_header: String,
+    /// Role granted to auto-registered proxy-auth users.
+    pub proxy_auth_default_role: Role,
+}
+
+impl Settings {
+    /// Whether reverse-proxy header authentication is configured.
+    pub fn proxy_auth_enabled(&self) -> bool {
+        !self.trusted_proxy_cidrs.is_empty() && !self.proxy_auth_header.is_empty()
+    }
 }
 
 impl Settings {
@@ -105,6 +122,21 @@ impl Settings {
                 .map_err(|_| SettingsError::InvalidRunLogTtl(raw.clone()))?,
             None => 604_800,
         };
+        let trusted_proxy_cidrs = match vars.get("TRUSTED_PROXY_CIDRS") {
+            Some(raw) => parse_trusted_cidrs(raw)
+                .map_err(|_| SettingsError::InvalidTrustedProxyCidrs(raw.clone()))?,
+            None => Vec::new(),
+        };
+        let proxy_auth_header = vars
+            .get("PROXY_AUTH_HEADER")
+            .map(|raw| raw.trim().to_ascii_lowercase())
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or_else(|| "x-forwarded-user".to_owned());
+        let proxy_auth_default_role = match vars.get("PROXY_AUTH_DEFAULT_ROLE") {
+            Some(raw) => Role::try_from(raw.as_str())
+                .ok_or_else(|| SettingsError::InvalidProxyAuthRole(raw.clone()))?,
+            None => Role::Viewer,
+        };
         Ok(Self {
             port,
             database_url,
@@ -121,6 +153,9 @@ impl Settings {
             activity_ttl_secs,
             run_log_ttl_secs,
             reauth_ttl_secs,
+            trusted_proxy_cidrs,
+            proxy_auth_header,
+            proxy_auth_default_role,
         })
     }
 }
@@ -145,6 +180,10 @@ pub enum SettingsError {
     InvalidRunLogTtl(String),
     #[error("REAUTH_TTL_SECS must be a valid u64, got `{0}`")]
     InvalidReauthTtl(String),
+    #[error("TRUSTED_PROXY_CIDRS must be a comma-separated list of CIDRs, got `{0}`")]
+    InvalidTrustedProxyCidrs(String),
+    #[error("PROXY_AUTH_DEFAULT_ROLE must be admin, operator, or viewer, got `{0}`")]
+    InvalidProxyAuthRole(String),
 }
 
 #[cfg(test)]
@@ -187,6 +226,10 @@ mod tests {
         assert_eq!(settings.activity_ttl_secs, 7_776_000);
         assert_eq!(settings.run_log_ttl_secs, 604_800);
         assert_eq!(settings.reauth_ttl_secs, 300);
+        assert!(settings.trusted_proxy_cidrs.is_empty());
+        assert_eq!(settings.proxy_auth_header, "x-forwarded-user");
+        assert_eq!(settings.proxy_auth_default_role, Role::Viewer);
+        assert!(!settings.proxy_auth_enabled());
     }
 
     #[test]
@@ -216,6 +259,9 @@ mod tests {
             ("ACTIVITY_TTL_SECS", "86400"),
             ("RUN_LOG_TTL_SECS", "3600"),
             ("REAUTH_TTL_SECS", "60"),
+            ("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.168.1.5"),
+            ("PROXY_AUTH_HEADER", "X-Auth-Request-Email"),
+            ("PROXY_AUTH_DEFAULT_ROLE", "operator"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -240,6 +286,21 @@ mod tests {
         assert_eq!(settings.activity_ttl_secs, 86_400);
         assert_eq!(settings.run_log_ttl_secs, 3_600);
         assert_eq!(settings.reauth_ttl_secs, 60);
+        assert_eq!(settings.trusted_proxy_cidrs.len(), 2);
+        assert_eq!(settings.proxy_auth_header, "x-auth-request-email");
+        assert_eq!(settings.proxy_auth_default_role, Role::Operator);
+        assert!(settings.proxy_auth_enabled());
+    }
+
+    #[test]
+    fn rejects_malformed_proxy_auth_settings() {
+        let err = Settings::from_map(&map(&[("TRUSTED_PROXY_CIDRS", "10.0.0.0/8,bogus")]))
+            .expect_err("invalid cidr");
+        assert!(matches!(err, SettingsError::InvalidTrustedProxyCidrs(_)));
+
+        let err = Settings::from_map(&map(&[("PROXY_AUTH_DEFAULT_ROLE", "root")]))
+            .expect_err("invalid role");
+        assert!(matches!(err, SettingsError::InvalidProxyAuthRole(_)));
     }
 
     #[test]

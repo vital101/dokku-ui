@@ -43,9 +43,9 @@ pub async fn service_linked_apps(
     Ok(parse_app_links(&output.stdout))
 }
 
-/// Fetches the service container's most recent log lines, bounded to
-/// `num_lines` for display (the plugin's own tail flag either follows forever
-/// or is not accepted by all installed versions).
+/// Fetches the service container's most recent log lines as a bounded
+/// snapshot (`follow: false`). Live tailing goes through the SSE route, which
+/// uses `follow: true`.
 pub async fn service_logs(
     client: &dyn DokkuClient,
     plugin: ServicePlugin,
@@ -57,6 +57,7 @@ pub async fn service_logs(
             plugin,
             service: service.clone(),
             num_lines,
+            follow: false,
         })
         .await?;
     Ok(parse_logs(&output.stdout).tail(num_lines as usize))
@@ -97,10 +98,12 @@ mod tests {
         assert_eq!(services[0].plugin, "redis");
         assert_eq!(services[0].status, "running");
         assert_eq!(services[0].version, "redis:7.2.4");
+        let masked = services[0].masked_dsn().expect("dsn parsed");
         assert!(
-            !format!("{:?}", services[0]).contains("redis://"),
-            "the DSN never reaches the parsed model"
+            !masked.contains("XXXXXX"),
+            "the stored password is masked, not echoed: {masked}"
         );
+        assert!(masked.contains('@'), "the DSN shape survives: {masked}");
     }
 
     #[tokio::test]
@@ -202,6 +205,7 @@ mod tests {
                 plugin: redis(),
                 service: service.clone(),
                 num_lines: 2,
+                follow: false,
             },
             Ok(DokkuOutput::ok(REDIS_LOGS)),
         );
@@ -229,6 +233,7 @@ mod tests {
                 plugin: redis(),
                 service: service.clone(),
                 num_lines: 10,
+                follow: false,
             },
             Ok(DokkuOutput::ok("\u{1b}[32mready\u{1b}[0m\n")),
         );

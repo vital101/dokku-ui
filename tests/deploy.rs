@@ -644,3 +644,56 @@ async fn non_htmx_deploy_branch_queues_flashes_and_is_audited() {
     let body = get_body(resp).await;
     assert!(body.contains("git.set"), "{body}");
 }
+
+#[tokio::test]
+async fn deploy_history_lists_deploy_runs_and_skips_other_operations() {
+    use dokku_ui::storage::runs::{Actor, NewRun, TargetKind};
+
+    let (state, _client, _dir) = harness(seeded_app_client()).await;
+    common::seed_user(&state, "admin@example.com", "correct-horse-battery").await;
+    state
+        .action_runs
+        .insert_with(&NewRun {
+            subject: "alpha".to_owned(),
+            operation: "git.sync".to_owned(),
+            target_kind: TargetKind::App,
+            actor: Actor {
+                user_id: None,
+                email: Some("github-webhook".to_owned()),
+            },
+            parent_run_id: None,
+        })
+        .await
+        .expect("seed deploy run");
+    state
+        .action_runs
+        .insert_with(&NewRun {
+            subject: "alpha".to_owned(),
+            operation: "app.restart".to_owned(),
+            target_kind: TargetKind::App,
+            actor: Actor {
+                user_id: None,
+                email: None,
+            },
+            parent_run_id: None,
+        })
+        .await
+        .expect("seed non-deploy run");
+
+    let app = test::init_service(build_app(state)).await;
+    let cookie = common::login(&app, "admin@example.com", "correct-horse-battery").await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/partials/deploy")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Deploy history"), "{body}");
+    assert!(body.contains("git.sync"), "{body}");
+    assert!(body.contains("github-webhook"), "{body}");
+    assert!(!body.contains("app.restart"), "non-deploy runs are hidden");
+}

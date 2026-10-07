@@ -8,6 +8,7 @@ use actix_web::test;
 
 use common::{
     complete_setup, extract_csrf, form_request, get_body, location, run_url, seed_user, test_state,
+    test_state_with_shared_client,
 };
 
 use dokku_ui::dokku::{DokkuClient, DokkuOutput, FakeResolver, MockClient, SnapshotStore};
@@ -60,6 +61,14 @@ fn seeded_app_client() -> MockClient {
                 app: app_name("alpha"),
             },
             Ok(DokkuOutput::ok(BUILDER_REPORT)),
+        )
+        .stub(
+            DokkuCommand::SchedulerReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!(
+                "fixtures/scheduler_report.txt"
+            ))),
         )
 }
 
@@ -477,4 +486,69 @@ async fn non_htmx_buildpacks_add_queues_flashes_and_is_audited() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("buildpacks.add"), "{body}");
+}
+
+#[tokio::test]
+async fn scheduler_set_validates_and_enqueues() {
+    let (state, client, _dir) = test_state_with_shared_client(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/alpha/build")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let csrf = extract_csrf(&get_body(resp).await);
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/build/scheduler",
+            format!("csrf_token={csrf}&selected=k3s"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(run_url(&body).starts_with("/actions/runs/"), "{body}");
+    for _ in 0..200 {
+        if client.calls().contains(&DokkuCommand::SchedulerSet {
+            app: app_name("alpha"),
+            value: Some("k3s".into()),
+        }) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        client.calls().contains(&DokkuCommand::SchedulerSet {
+            app: app_name("alpha"),
+            value: Some("k3s".into()),
+        }),
+        "scheduler:set ran"
+    );
+
+    // An unknown scheduler is rejected before any command is built.
+    let calls_before = client.calls().len();
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/build/scheduler",
+            format!("csrf_token={csrf}&selected=kubernetes"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+    assert_eq!(client.calls().len(), calls_before, "nothing ran");
 }

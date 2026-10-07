@@ -5,12 +5,19 @@ use actix_web::http::header::LOCATION;
 use actix_web::middleware::Next;
 use actix_web::{Error, FromRequest, HttpResponse, ResponseError, web};
 
+use crate::auth::proxy::peer_is_trusted;
 use crate::auth::rbac::{authorize, permission_for};
+use crate::domain::Email;
 use crate::error::AppError;
-use crate::storage::users::{SqliteUsersRepo, UsersRepo};
+use crate::storage::users::{SqliteUsersRepo, User, UsersRepo};
 use crate::web::state::AppState;
 
 pub const SESSION_USER_ID: &str = "user_id";
+
+/// Sentinel password hash for proxy-auto-registered users. It can never match
+/// an argon2 verification, so password login stays closed until an admin sets
+/// a real password.
+const PROXY_AUTH_UNUSABLE_HASH: &str = "!proxy-auth";
 
 pub async fn auth_middleware(
     req: ServiceRequest,
@@ -25,25 +32,30 @@ pub async fn auth_middleware(
         .get::<i64>(SESSION_USER_ID)
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    let Some(user_id) = user_id else {
-        return redirect_to_login(req).await;
-    };
+    let state = req
+        .app_data::<web::Data<AppState>>()
+        .expect("app state registered")
+        .clone();
+    let repo = SqliteUsersRepo::new(state.db.clone());
 
-    let repo = {
-        let state = req
-            .app_data::<web::Data<AppState>>()
-            .expect("app state registered");
-        SqliteUsersRepo::new(state.db.clone())
-    };
-    let user = match repo.find_by_id(user_id).await {
-        Ok(Some(user)) => user,
-        // A session for a user that no longer exists is dropped rather than
-        // rendering a 500 from every handler's `current_user`.
-        Ok(None) => {
-            session.purge();
-            return redirect_to_login(req).await;
-        }
-        Err(err) => return Err(actix_web::error::ErrorInternalServerError(err)),
+    let user = match user_id {
+        Some(user_id) => match repo.find_by_id(user_id).await {
+            Ok(Some(user)) => user,
+            // A session for a user that no longer exists is dropped rather than
+            // rendering a 500 from every handler's `current_user`.
+            Ok(None) => {
+                session.purge();
+                return redirect_to_login(req).await;
+            }
+            Err(err) => return Err(actix_web::error::ErrorInternalServerError(err)),
+        },
+        None => match proxy_auth_user(&req, &session, &state, &repo).await {
+            Some(user) => user,
+            // No session user and no trusted proxy identity: leave any
+            // anonymous session (flash/CSRF state) untouched, matching the
+            // pre-proxy-auth behavior, and send the visitor to login.
+            None => return redirect_to_login(req).await,
+        },
     };
 
     let permission = permission_for(req.method().as_str(), req.path());
@@ -71,6 +83,54 @@ pub async fn auth_middleware(
     }
 
     next.call(req).await
+}
+
+/// Resolves (and, when needed, auto-registers) a user from the configured
+/// reverse-proxy header. Only honored when the direct peer address falls
+/// inside `TRUSTED_PROXY_CIDRS`; a spoofed header from an untrusted peer is
+/// ignored and the request falls through to the login redirect.
+async fn proxy_auth_user(
+    req: &ServiceRequest,
+    session: &Session,
+    state: &AppState,
+    repo: &SqliteUsersRepo,
+) -> Option<User> {
+    let settings = &state.settings;
+    if !settings.proxy_auth_enabled() {
+        return None;
+    }
+    if !peer_is_trusted(
+        req.peer_addr().map(|addr| addr.ip()),
+        &settings.trusted_proxy_cidrs,
+    ) {
+        return None;
+    }
+    let raw = req
+        .headers()
+        .get(settings.proxy_auth_header.as_str())?
+        .to_str()
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    let email = Email::try_from(raw.as_str()).ok()?;
+
+    let user = match repo.find_by_email(email.as_str()).await {
+        Ok(Some(user)) => user,
+        Ok(None) => repo
+            .insert(
+                email.as_str(),
+                PROXY_AUTH_UNUSABLE_HASH,
+                settings.proxy_auth_default_role,
+            )
+            .await
+            .ok()?,
+        Err(_) => return None,
+    };
+    // Renew before binding the user so a pre-existing anonymous cookie can
+    // never be fixed onto the proxy identity.
+    session.renew();
+    session.insert(SESSION_USER_ID, user.id).ok()?;
+    Some(user)
 }
 
 /// Sends unauthenticated users to the first-run wizard or the login page.

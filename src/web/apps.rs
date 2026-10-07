@@ -15,16 +15,16 @@ use crate::domain::AppName;
 use crate::domain::command::DokkuCommand;
 use crate::domain::env_file::{config_diff, parse_env_file};
 use crate::domain::job::{AppAction as JobAppAction, JobSpec};
-use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines};
+use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_http_auth_report};
 use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
-use crate::domain::types::{EnvVar, ResourceReport, ServiceInfo};
+use crate::domain::types::{EnvVar, HttpAuthReport, ResourceReport, ServiceInfo};
 use crate::error::AppError;
 use crate::storage::runs::TargetKind;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
     RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, error_fragment,
-    is_htmx, modal_error, run_synchronously, start_action_run,
+    is_htmx, modal_error, reauth_valid_here, run_synchronously, start_action_run,
 };
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
@@ -50,6 +50,7 @@ struct ShowPage<'a> {
     flash: Option<&'a FlashMessage>,
     name: &'a str,
     active_tab: &'static str,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -126,6 +127,8 @@ struct SettingsPartial<'a> {
     maintenance_label: String,
     http_auth_available: bool,
     http_auth_label: String,
+    http_auth: Option<HttpAuthReport>,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -166,6 +169,7 @@ struct ProcessesPartial<'a> {
     resource_rows: Vec<ResourceRow>,
     scale_note: Option<String>,
     updated: String,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -183,6 +187,7 @@ struct ConfigPartial<'a> {
     vars: Vec<EnvVar>,
     name: &'a str,
     csrf_token: &'a str,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -232,6 +237,14 @@ pub async fn new_form(
     session: Session,
 ) -> Result<HttpResponse, AppError> {
     let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            "Your role does not allow creating apps.",
+        );
+        return Ok(see_other("/"));
+    }
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
 
@@ -313,6 +326,7 @@ pub async fn show(
         flash: flash.as_ref(),
         name: &name,
         active_tab: "overview",
+        can_manage: user.role.can_manage_apps(),
     };
     render(&page)
 }
@@ -398,7 +412,7 @@ pub async fn config_partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name, "config", None);
     let (_snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -414,6 +428,7 @@ pub async fn config_partial(
         vars,
         name: &name,
         csrf_token: &csrf_token,
+        can_manage: user.role.can_manage_apps(),
     })
 }
 
@@ -428,7 +443,7 @@ pub async fn config_reveal(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     current_user(&state, &session).await?;
-    if !reauth_valid_here(&state, &session).await {
+    if !reauth_valid_here(&session) {
         return Ok(see_other(&format!("/reauth?next=/apps/{name}/config")));
     }
     let retry_url = partial_url(&name, "config", None);
@@ -509,7 +524,15 @@ pub async fn config_edit(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
-    if !reauth_valid_here(&state, &session).await {
+    if !user.role.can_manage_apps() {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            "Your role does not allow editing config.",
+        );
+        return Ok(see_other(&format!("/apps/{name}/config")));
+    }
+    if !reauth_valid_here(&session) {
         return Ok(see_other(&format!("/reauth?next=/apps/{name}/config/edit")));
     }
     state.snapshot.resolve_app(&name).await?;
@@ -550,7 +573,7 @@ pub async fn config_update(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     current_user(&state, &session).await?;
-    if !reauth_valid_here(&state, &session).await {
+    if !reauth_valid_here(&session) {
         return Ok(see_other(&format!("/reauth?next=/apps/{name}/config/edit")));
     }
 
@@ -651,15 +674,6 @@ pub async fn config_update(
         format!("Queued: config update for {name}."),
     );
     Ok(see_other(&format!("/apps/{name}/config")))
-}
-
-/// The re-auth window is in the session (see `src/auth/reauth.rs`).
-async fn reauth_valid_here(_state: &AppState, session: &Session) -> bool {
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    match session.get::<i64>(crate::auth::reauth::REAUTH_UNTIL) {
-        Ok(Some(until)) => crate::auth::reauth::reauth_valid(now, until),
-        _ => false,
-    }
 }
 
 pub async fn logs(
@@ -769,7 +783,7 @@ pub async fn processes_partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name, "processes", None);
     let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -802,6 +816,7 @@ pub async fn processes_partial(
         resource_rows,
         scale_note,
         updated: format_age(snapshot.age()),
+        can_manage: user.role.can_manage_apps(),
     };
     render(&page)
 }
@@ -1227,10 +1242,10 @@ pub async fn settings_partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name, "settings", None);
-    let (snapshot, _app) = match state.snapshot.resolve_app(&name).await {
+    let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
         Ok(resolved) => resolved,
         Err(err) => return fragment_for_resolve_error(&name, &retry_url, err),
     };
@@ -1244,6 +1259,16 @@ pub async fn settings_partial(
     let http_auth = support_of("http-auth");
     let maintenance_available = maintenance == crate::domain::capabilities::Support::Supported;
     let http_auth_available = http_auth == crate::domain::capabilities::Support::Supported;
+    let http_auth_report = if http_auth_available {
+        state
+            .dokku
+            .exec(&DokkuCommand::HttpAuthReport { app })
+            .await
+            .ok()
+            .map(|output| parse_http_auth_report(&output.stdout))
+    } else {
+        None
+    };
     let csrf_token = ensure_csrf(&session).await?;
     render(&SettingsPartial {
         name: &name,
@@ -1253,6 +1278,8 @@ pub async fn settings_partial(
         maintenance_label: maintenance.label(),
         http_auth_available,
         http_auth_label: http_auth.label(),
+        http_auth: http_auth_report,
+        can_manage: user.role.can_manage_apps(),
     })
 }
 
@@ -1719,6 +1746,149 @@ pub async fn http_auth_remove_user(
     .await
 }
 
+#[derive(Deserialize)]
+pub struct HttpAuthIpForm {
+    address: String,
+}
+
+#[derive(Deserialize)]
+pub struct HttpAuthIpsForm {
+    #[serde(default)]
+    addresses: String,
+}
+
+pub async fn http_auth_add_allowed_ip(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<HttpAuthIpForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let address = form.0.address.trim().to_owned();
+    if !crate::domain::is_valid_allowed_ip(&address) {
+        let message =
+            "Allowed IP must be an IPv4/IPv6 address with an optional CIDR prefix, or `all`."
+                .to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    let plan = vec![JobSpec::HttpAuthAddAllowedIp {
+        app: name.clone(),
+        address: address.clone(),
+    }];
+    plugin_run(
+        &state,
+        &session,
+        &req,
+        name.clone(),
+        "http-auth",
+        plan,
+        "http-auth.add-allowed-ip",
+        format!("Adding allowed IP {address} to {name}…"),
+        format!("Added allowed IP '{address}' to '{name}'."),
+        format!("Queued: add allowed IP {address} to {name}."),
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn http_auth_remove_allowed_ip(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<HttpAuthIpForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let address = form.0.address.trim().to_owned();
+    if !crate::domain::is_valid_allowed_ip(&address) {
+        let message = "Invalid allowed IP.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    let plan = vec![JobSpec::HttpAuthRemoveAllowedIp {
+        app: name.clone(),
+        address: address.clone(),
+    }];
+    plugin_run(
+        &state,
+        &session,
+        &req,
+        name.clone(),
+        "http-auth",
+        plan,
+        "http-auth.remove-allowed-ip",
+        format!("Removing allowed IP {address} from {name}…"),
+        format!("Removed allowed IP '{address}' from '{name}'."),
+        format!("Queued: remove allowed IP {address} from {name}."),
+        Vec::new(),
+    )
+    .await
+}
+
+/// Replaces the whole bypass list; an empty input clears it (the plugin's
+/// no-argument `set-allowed-ips` call).
+pub async fn http_auth_set_allowed_ips(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<HttpAuthIpsForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let addresses: Vec<String> = form
+        .0
+        .addresses
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if addresses.len() > 50 {
+        let message = "At most 50 allowed IPs may be set at once.".to_owned();
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    if let Some(invalid) = addresses
+        .iter()
+        .find(|address| !crate::domain::is_valid_allowed_ip(address))
+    {
+        let message = format!("Invalid allowed IP: {invalid}");
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&format!("/apps/{name}/settings")));
+    }
+    let plan = vec![JobSpec::HttpAuthSetAllowedIps {
+        app: name.clone(),
+        addresses,
+    }];
+    plugin_run(
+        &state,
+        &session,
+        &req,
+        name.clone(),
+        "http-auth",
+        plan,
+        "http-auth.set-allowed-ips",
+        format!("Updating allowed IPs for {name}…"),
+        format!("Allowed IPs updated for '{name}'."),
+        format!("Queued: update allowed IPs for {name}."),
+        Vec::new(),
+    )
+    .await
+}
+
 pub async fn delete_confirm(
     state: web::Data<AppState>,
     session: Session,
@@ -1726,6 +1896,14 @@ pub async fn delete_confirm(
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
     let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            "Your role does not allow deleting apps.",
+        );
+        return Ok(see_other(&format!("/apps/{name}")));
+    }
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
 
@@ -1826,7 +2004,13 @@ pub async fn delete_confirm_modal(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        return error_fragment(
+            &partial_url(&name, "overview", None),
+            "Your role does not allow deleting apps.",
+        );
+    }
     state.snapshot.resolve_app(&name).await?;
     let csrf_token = ensure_csrf(&session).await?;
 

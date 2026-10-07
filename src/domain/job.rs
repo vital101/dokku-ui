@@ -59,6 +59,21 @@ pub enum JobSpec {
         app: String,
         domains: Vec<String>,
     },
+    PortsAdd {
+        app: String,
+        mappings: Vec<String>,
+    },
+    PortsSet {
+        app: String,
+        mappings: Vec<String>,
+    },
+    PortsRemove {
+        app: String,
+        mappings: Vec<String>,
+    },
+    PortsClear {
+        app: String,
+    },
     ResourceLimit {
         app: String,
         process_type: String,
@@ -113,6 +128,19 @@ pub enum JobSpec {
         app: String,
         username: String,
     },
+    HttpAuthAddAllowedIp {
+        app: String,
+        address: String,
+    },
+    HttpAuthRemoveAllowedIp {
+        app: String,
+        address: String,
+    },
+    HttpAuthSetAllowedIps {
+        app: String,
+        /// Empty clears the bypass list.
+        addresses: Vec<String>,
+    },
     BuildpacksSet {
         app: String,
         buildpack: String,
@@ -133,6 +161,11 @@ pub enum JobSpec {
     BuilderSet {
         app: String,
         property: String,
+        value: Option<String>,
+    },
+    SchedulerSet {
+        app: String,
+        /// `None` clears the per-app selection.
         value: Option<String>,
     },
     ServiceAction {
@@ -291,6 +324,25 @@ impl JobSpec {
                 let domains = parse_domains(domains)?;
                 Ok(vec![DokkuCommand::DomainsSet { app, domains }])
             }
+            JobSpec::PortsAdd { app, mappings } => {
+                let app = parse_app(app)?;
+                let mappings = parse_mappings(mappings)?;
+                Ok(vec![DokkuCommand::PortsAdd { app, mappings }])
+            }
+            JobSpec::PortsSet { app, mappings } => {
+                let app = parse_app(app)?;
+                let mappings = parse_mappings(mappings)?;
+                Ok(vec![DokkuCommand::PortsSet { app, mappings }])
+            }
+            JobSpec::PortsRemove { app, mappings } => {
+                let app = parse_app(app)?;
+                let mappings = parse_mappings(mappings)?;
+                Ok(vec![DokkuCommand::PortsRemove { app, mappings }])
+            }
+            JobSpec::PortsClear { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::PortsClear { app }])
+            }
             JobSpec::ResourceLimit {
                 app,
                 process_type,
@@ -405,6 +457,27 @@ impl JobSpec {
                 let username = parse_username(username)?;
                 Ok(vec![DokkuCommand::HttpAuthRemoveUser { app, username }])
             }
+            JobSpec::HttpAuthAddAllowedIp { app, address } => {
+                let app = parse_app(app)?;
+                let address = parse_allowed_ip(address)?;
+                Ok(vec![DokkuCommand::HttpAuthAddAllowedIp { app, address }])
+            }
+            JobSpec::HttpAuthRemoveAllowedIp { app, address } => {
+                let app = parse_app(app)?;
+                let address = parse_allowed_ip(address)?;
+                Ok(vec![DokkuCommand::HttpAuthRemoveAllowedIp { app, address }])
+            }
+            JobSpec::HttpAuthSetAllowedIps { app, addresses } => {
+                let app = parse_app(app)?;
+                let mut parsed = Vec::with_capacity(addresses.len());
+                for address in addresses {
+                    parsed.push(parse_allowed_ip(address)?);
+                }
+                Ok(vec![DokkuCommand::HttpAuthSetAllowedIps {
+                    app,
+                    addresses: parsed,
+                }])
+            }
             JobSpec::BuildpacksSet {
                 app,
                 buildpack,
@@ -470,6 +543,22 @@ impl JobSpec {
                     property: property.clone(),
                     value,
                 }])
+            }
+            JobSpec::SchedulerSet { app, value } => {
+                let app = parse_app(app)?;
+                let value = match value {
+                    None => None,
+                    Some(value) if value.is_empty() => None,
+                    Some(value) => Some(value.clone()),
+                };
+                if let Some(value) = &value {
+                    if !crate::domain::scheduler::is_valid_scheduler(value) {
+                        return Err(JobSpecError::Invalid(format!(
+                            "invalid scheduler `{value}`"
+                        )));
+                    }
+                }
+                Ok(vec![DokkuCommand::SchedulerSet { app, value }])
             }
             JobSpec::ServiceAction {
                 plugin,
@@ -750,6 +839,27 @@ fn parse_domains(raw: &[String]) -> Result<Vec<DomainName>, JobSpecError> {
         .collect()
 }
 
+/// Port mappings revalidate exactly like the form input did, so a tampered
+/// row cannot smuggle a quoting-breaking token onto the host.
+fn parse_mappings(raw: &[String]) -> Result<Vec<String>, JobSpecError> {
+    if raw.is_empty() {
+        return Err(JobSpecError::Invalid(
+            "no port mappings provided".to_owned(),
+        ));
+    }
+    if raw.len() > crate::domain::port::MAX_PORT_MAPPINGS {
+        return Err(JobSpecError::Invalid(format!(
+            "too many port mappings; at most {} are allowed",
+            crate::domain::port::MAX_PORT_MAPPINGS
+        )));
+    }
+    for mapping in raw {
+        crate::domain::port::validate_port_mapping(mapping)
+            .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+    }
+    Ok(raw.to_vec())
+}
+
 fn parse_buildpack(raw: &str) -> Result<String, JobSpecError> {
     if !is_valid_buildpack(raw) {
         return Err(JobSpecError::Invalid(format!("invalid buildpack `{raw}`")));
@@ -770,6 +880,13 @@ fn parse_buildpack_index(index: Option<u32>) -> Result<Option<u32>, JobSpecError
 fn parse_username(raw: &str) -> Result<String, JobSpecError> {
     if !is_valid_username(raw) {
         return Err(JobSpecError::Invalid(format!("invalid username `{raw}`")));
+    }
+    Ok(raw.to_owned())
+}
+
+fn parse_allowed_ip(raw: &str) -> Result<String, JobSpecError> {
+    if !crate::domain::http_auth::is_valid_allowed_ip(raw) {
+        return Err(JobSpecError::Invalid(format!("invalid allowed ip `{raw}`")));
     }
     Ok(raw.to_owned())
 }
@@ -1092,6 +1209,68 @@ mod tests {
     }
 
     #[test]
+    fn port_specs_rehydrate_and_revalidate() {
+        let mappings = vec!["http:80:5000".to_owned(), "tcp:5432:5432".to_owned()];
+        for (spec, expected) in [
+            (
+                JobSpec::PortsAdd {
+                    app: "alpha".into(),
+                    mappings: mappings.clone(),
+                },
+                DokkuCommand::PortsAdd {
+                    app: app("alpha"),
+                    mappings: mappings.clone(),
+                },
+            ),
+            (
+                JobSpec::PortsSet {
+                    app: "alpha".into(),
+                    mappings: mappings.clone(),
+                },
+                DokkuCommand::PortsSet {
+                    app: app("alpha"),
+                    mappings: mappings.clone(),
+                },
+            ),
+            (
+                JobSpec::PortsRemove {
+                    app: "alpha".into(),
+                    mappings: mappings.clone(),
+                },
+                DokkuCommand::PortsRemove {
+                    app: app("alpha"),
+                    mappings: mappings.clone(),
+                },
+            ),
+            (
+                JobSpec::PortsClear {
+                    app: "alpha".into(),
+                },
+                DokkuCommand::PortsClear { app: app("alpha") },
+            ),
+        ] {
+            assert_eq!(spec.to_commands().expect("commands"), vec![expected]);
+        }
+        assert!(
+            JobSpec::PortsAdd {
+                app: "alpha".into(),
+                mappings: vec!["http:'80':5000".into()],
+            }
+            .to_commands()
+            .is_err(),
+            "quoting-breaking mappings are rejected at rehydration"
+        );
+        assert!(
+            JobSpec::PortsClear {
+                app: "bad app".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid app names are rejected at rehydration"
+        );
+    }
+
+    #[test]
     fn resource_specs_rehydrate_and_revalidate() {
         assert_eq!(
             JobSpec::ResourceLimit {
@@ -1276,6 +1455,40 @@ mod tests {
             .to_commands()
             .is_err(),
             "quote-carrying passwords are rejected"
+        );
+        assert_eq!(
+            JobSpec::HttpAuthAddAllowedIp {
+                app: "alpha".into(),
+                address: "10.0.0.0/8".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::HttpAuthAddAllowedIp {
+                app: app("alpha"),
+                address: "10.0.0.0/8".into(),
+            }]
+        );
+        assert_eq!(
+            JobSpec::HttpAuthSetAllowedIps {
+                app: "alpha".into(),
+                addresses: Vec::new(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::HttpAuthSetAllowedIps {
+                app: app("alpha"),
+                addresses: Vec::new(),
+            }],
+            "a blank set clears the list"
+        );
+        assert!(
+            JobSpec::HttpAuthRemoveAllowedIp {
+                app: "alpha".into(),
+                address: "10.0.0.999".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid addresses are rejected at rehydration"
         );
     }
 

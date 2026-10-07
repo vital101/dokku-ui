@@ -33,6 +33,7 @@
             {% endif %}
           </td>
           <td class="py-2 text-right">
+            {% if can_manage %}
             <form hx-post="/apps/{{ name }}/domains/remove" hx-target="#modal-content" hx-swap="innerHTML"
                   method="post" data-action-form class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -41,6 +42,7 @@
                 Remove
               </button>
             </form>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
@@ -49,6 +51,7 @@
     {% endif %}
   </div>
 
+  {% if can_manage %}
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <h3 class="text-sm font-medium text-white">Add domains</h3>
     <form hx-post="/apps/{{ name }}/domains/add" hx-target="#modal-content" hx-swap="innerHTML"
@@ -91,4 +94,5 @@
     </p>
     {% endif %}
   </div>
+  {% endif %}
 </div>

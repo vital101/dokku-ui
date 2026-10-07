@@ -73,6 +73,7 @@
         </dd>
       </div>
     </dl>
+    {% if can_manage %}
     <form hx-post="/apps/{{ name }}/deploy/branch" hx-target="#modal-content" hx-swap="innerHTML"
           method="post" data-action-form class="mt-4 flex items-end gap-2 border-t border-slate-800/50 pt-4">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -89,8 +90,10 @@
         Save
       </button>
     </form>
+    {% endif %}
   </div>
 
+  {% if can_manage %}
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <h3 class="text-sm font-medium text-white">Deploy from git</h3>
     <p class="mt-1 text-xs text-slate-500">
@@ -126,7 +129,9 @@
       </div>
     </form>
   </div>
+  {% endif %}
 
+  {% if can_manage %}
   <div class="grid gap-6 lg:grid-cols-2">
     <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
       <h3 class="text-sm font-medium text-white">Deploy from image</h3>
@@ -167,6 +172,7 @@
       </form>
     </div>
   </div>
+  {% endif %}
 
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <div class="flex items-center justify-between">
@@ -195,6 +201,7 @@
         Copy
       </button>
     </div>
+    {% if can_manage %}
     <form hx-post="/apps/{{ name }}/webhooks" hx-target="#modal-content" hx-swap="innerHTML"
           method="post" data-action-form class="mt-4 grid items-end gap-4 lg:grid-cols-5">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -256,6 +263,38 @@
     <p class="mt-3 text-xs text-slate-500">
       Saving generates a webhook secret; GitHub must sign deliveries with it.
     </p>
+    {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-medium text-white">Deploy history</h3>
+      <a href="/apps/{{ name }}/activity" class="text-xs text-slate-400 hover:text-slate-200">All activity</a>
+    </div>
+    {% if history.is_empty() %}
+    <p class="mt-3 text-sm text-slate-400">No deploys recorded yet.</p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">When</th>
+          <th class="py-2 pr-4 font-medium">Action</th>
+          <th class="py-2 pr-4 font-medium">Actor</th>
+          <th class="py-2 font-medium">Outcome</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in history %}
+        <tr class="border-b border-slate-800/50 last:border-0">
+          <td class="py-2 pr-4 font-mono text-slate-400">{{ row.formatted_when() }}</td>
+          <td class="py-2 pr-4 font-mono text-white">{{ row.operation }}</td>
+          <td class="py-2 pr-4 font-mono text-slate-300">{{ row.actor_email_label() }}</td>
+          <td class="py-2 font-mono {{ row.outcome_css() }}">{{ row.outcome_label() }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
     {% endif %}
   </div>
 

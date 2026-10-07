@@ -104,6 +104,7 @@ impl RusshClient {
         &self,
         command: &str,
         sink: Option<tokio::sync::mpsc::Sender<String>>,
+        stdin: Option<&str>,
     ) -> Result<DokkuOutput, DokkuError> {
         let session = self.session_handle().await?;
         let channel = match session.channel_open_session().await {
@@ -118,7 +119,7 @@ impl RusshClient {
             }
         };
 
-        let output = match Self::exec_on_channel(channel, command, sink).await {
+        let output = match Self::exec_on_channel(channel, command, sink, stdin).await {
             Ok(output) => output,
             Err(err) => {
                 // A viewer-disconnect abort is expected and specific to the
@@ -136,11 +137,24 @@ impl RusshClient {
         mut channel: russh::Channel<russh::client::Msg>,
         command: &str,
         sink: Option<tokio::sync::mpsc::Sender<String>>,
+        stdin: Option<&str>,
     ) -> Result<DokkuOutput, DokkuError> {
         channel
             .exec(true, command)
             .await
             .map_err(|err| DokkuError::Connect(err.to_string()))?;
+        // Commands that read stdin (ssh-keys:add) get their payload written
+        // and an EOF so the remote `read` returns.
+        if let Some(stdin) = stdin {
+            channel
+                .data(stdin.as_bytes())
+                .await
+                .map_err(|err| DokkuError::Connect(err.to_string()))?;
+            channel
+                .eof()
+                .await
+                .map_err(|err| DokkuError::Connect(err.to_string()))?;
+        }
 
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -241,10 +255,11 @@ impl RusshClient {
         &self,
         command: &DokkuCommand,
         sink: Option<tokio::sync::mpsc::Sender<String>>,
+        stdin: Option<&str>,
     ) -> Result<DokkuOutput, DokkuError> {
         let remote_command = shell_command(&command.argv());
         let timeout = self.command_timeout(command);
-        let fut = self.run_command(&remote_command, sink);
+        let fut = self.run_command(&remote_command, sink, stdin);
         match timeout {
             Some(secs) => match tokio::time::timeout(secs, fut).await {
                 Ok(result) => result,
@@ -305,7 +320,15 @@ fn quote_arg(arg: &str) -> String {
 #[async_trait]
 impl DokkuClient for RusshClient {
     async fn exec(&self, command: &DokkuCommand) -> Result<DokkuOutput, DokkuError> {
-        self.execute(command, None).await
+        self.execute(command, None, None).await
+    }
+
+    async fn exec_with_stdin(
+        &self,
+        command: &DokkuCommand,
+        stdin: &str,
+    ) -> Result<DokkuOutput, DokkuError> {
+        self.execute(command, None, Some(stdin)).await
     }
 
     async fn exec_streaming(
@@ -313,7 +336,7 @@ impl DokkuClient for RusshClient {
         command: &DokkuCommand,
         sink: tokio::sync::mpsc::Sender<String>,
     ) -> Result<DokkuOutput, DokkuError> {
-        self.execute(command, Some(sink)).await
+        self.execute(command, Some(sink), None).await
     }
 }
 

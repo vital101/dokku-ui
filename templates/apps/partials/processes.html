@@ -7,7 +7,7 @@
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <h3 class="text-sm font-medium text-white">Formation</h3>
 
-    {% if scale_note.is_none() %}
+    {% if can_manage && scale_note.is_none() %}
     <form method="post" action="/apps/{{ name }}/scale"
           hx-post="/apps/{{ name }}/scale" hx-target="#modal-content" hx-swap="innerHTML"
           data-action-form>
@@ -21,7 +21,7 @@
           <th class="py-2 pr-4 font-medium">Desired</th>
           <th class="py-2 pr-4 font-medium">Running</th>
           <th class="py-2 pr-4 font-medium">Stopped</th>
-          {% if scale_note.is_none() %}
+          {% if can_manage && scale_note.is_none() %}
           <th class="py-2 font-medium">New scale</th>
           {% endif %}
         </tr>
@@ -33,7 +33,7 @@
           <td class="py-2 pr-4 text-slate-300">{{ row.desired_label() }}</td>
           <td class="py-2 pr-4 text-emerald-400">{{ row.running }}</td>
           <td class="py-2 pr-4 text-slate-400">{{ row.stopped }}</td>
-          {% if scale_note.is_none() %}
+          {% if can_manage && scale_note.is_none() %}
           <td class="py-2">
             {% if let Some(desired) = row.desired %}
               {% if row.process_type != "release" %}
@@ -52,7 +52,7 @@
       </tbody>
     </table>
 
-    {% if scale_note.is_none() %}
+    {% if can_manage && scale_note.is_none() %}
       <button type="submit"
               class="app-action mt-4 rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
         <span class="app-action-label">Apply scale</span>
@@ -109,6 +109,31 @@
     </p>
     {% if resource_rows.is_empty() %}
     <p class="mt-4 text-sm text-slate-400">No processes found.</p>
+    {% else if !can_manage %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Process</th>
+          <th class="py-2 pr-4 font-medium">Limit CPU</th>
+          <th class="py-2 pr-4 font-medium">Limit memory</th>
+          <th class="py-2 pr-4 font-medium">Limit swap</th>
+          <th class="py-2 pr-4 font-medium">Reserve CPU</th>
+          <th class="py-2 font-medium">Reserve memory</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for resource in resource_rows %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 font-mono text-white">{{ resource.process_type }}</td>
+          <td class="py-2 pr-4 text-slate-300">{% if resource.limit_cpu.is_empty() %}—{% else %}{{ resource.limit_cpu }}{% endif %}</td>
+          <td class="py-2 pr-4 text-slate-300">{% if resource.limit_memory.is_empty() %}—{% else %}{{ resource.limit_memory }}{% endif %}</td>
+          <td class="py-2 pr-4 text-slate-300">{% if resource.limit_memory_swap.is_empty() %}—{% else %}{{ resource.limit_memory_swap }}{% endif %}</td>
+          <td class="py-2 pr-4 text-slate-300">{% if resource.reserve_cpu.is_empty() %}—{% else %}{{ resource.reserve_cpu }}{% endif %}</td>
+          <td class="py-2 text-slate-300">{% if resource.reserve_memory.is_empty() %}—{% else %}{{ resource.reserve_memory }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
     {% else %}
     {% for resource in resource_rows %}
     <form method="post" action="/apps/{{ name }}/resources"

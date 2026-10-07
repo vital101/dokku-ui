@@ -9,6 +9,7 @@
     {% include "partials/loading.html" %}
   </div>
 
+  {% if can_manage %}
   <div class="flex gap-3">
     <form method="post" action="/apps/{{ name }}/start"
           hx-post="/apps/{{ name }}/start" hx-target="#modal-content" hx-swap="innerHTML"
@@ -53,5 +54,6 @@
       Delete app
     </a>
   </div>
+  {% endif %}
 </div>
 {% endblock %}

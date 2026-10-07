@@ -21,7 +21,7 @@ use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
     RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, error_fragment,
-    is_htmx, modal_error, run_synchronously, start_action_run,
+    is_htmx, modal_error, reauth_valid_here, run_synchronously, start_action_run,
 };
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
@@ -33,6 +33,7 @@ struct ListPage<'a> {
     csrf_token: &'a str,
     flash: Option<&'a FlashMessage>,
     plugin: ServicePlugin,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -40,6 +41,7 @@ struct ListPage<'a> {
 struct ListPartial {
     plugin: ServicePlugin,
     services: Vec<ServiceInfo>,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -66,6 +68,7 @@ struct ShowPage<'a> {
     plugin: ServicePlugin,
     service: &'a str,
     active_tab: &'static str,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -100,6 +103,13 @@ struct OverviewPartial<'a> {
     service: &'a str,
     csrf_token: &'a str,
     info: ServiceInfo,
+    can_manage: bool,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/dsn_revealed.html")]
+struct DsnRevealedPartial {
+    dsn: String,
 }
 
 #[derive(Template)]
@@ -110,6 +120,7 @@ struct LinksPartial<'a> {
     csrf_token: &'a str,
     links: Vec<String>,
     available_apps: Vec<String>,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -215,6 +226,7 @@ pub(super) struct DetailContext {
     pub(super) email: String,
     pub(super) csrf_token: String,
     pub(super) flash: Option<FlashMessage>,
+    pub(super) can_manage: bool,
 }
 
 pub(super) async fn detail_context(
@@ -235,6 +247,7 @@ pub(super) async fn detail_context(
         email: user.email,
         csrf_token,
         flash,
+        can_manage: user.role.can_manage_apps(),
     })
 }
 
@@ -253,6 +266,7 @@ pub async fn index(
         csrf_token: &csrf_token,
         flash: flash.as_ref(),
         plugin,
+        can_manage: user.role.can_manage_apps(),
     })
 }
 
@@ -262,11 +276,15 @@ pub async fn list_partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let plugin = plugin_from_slug(&path.into_inner())?;
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = format!("/services/{plugin}/partials/list");
     match plugin_services(&*state.dokku, plugin).await {
-        Ok(services) => render(&ListPartial { plugin, services }),
+        Ok(services) => render(&ListPartial {
+            plugin,
+            services,
+            can_manage: user.role.can_manage_apps(),
+        }),
         Err(err) => error_fragment(&retry_url, &err.to_string()),
     }
 }
@@ -304,6 +322,14 @@ pub async fn new_form(
 ) -> Result<HttpResponse, AppError> {
     let plugin = plugin_from_slug(&path.into_inner())?;
     let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            "Your role does not allow creating services.",
+        );
+        return Ok(see_other(&format!("/services/{plugin}")));
+    }
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
 
@@ -441,6 +467,7 @@ pub async fn show(
         plugin: ctx.plugin,
         service: ctx.service.as_str(),
         active_tab: "overview",
+        can_manage: ctx.can_manage,
     })
 }
 
@@ -493,7 +520,7 @@ pub async fn overview_partial(
     let (raw_plugin, raw_service) = path.into_inner();
     let plugin = plugin_from_slug(&raw_plugin)?;
     let service = service_from_slug(&raw_service)?;
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = format!("/services/{plugin}/{service}/partials/overview");
     match crate::dokku::service_info(&*state.dokku, plugin.as_str(), service.as_str()).await {
@@ -504,6 +531,7 @@ pub async fn overview_partial(
                 service: service.as_str(),
                 csrf_token: &csrf_token,
                 info,
+                can_manage: user.role.can_manage_apps(),
             })
         }
         Ok(None) => error_fragment(
@@ -511,6 +539,77 @@ pub async fn overview_partial(
             &format!("Service '{service}' was not found — it may have been destroyed."),
         ),
         Err(err) => error_fragment(&retry_url, &err.to_string()),
+    }
+}
+
+/// Reveals the service's connection string under re-auth, marked `no-store`,
+/// and records a `service.dsn.reveal` audit entry. Without a valid re-auth
+/// window the user is sent through `/reauth` first.
+pub async fn dsn_reveal(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+    _form: CsrfForm<super::apps::ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+    let retry_url = format!("/services/{plugin}/{service}/partials/overview");
+    if !reauth_valid_here(&session) {
+        return Ok(see_other(&format!(
+            "/reauth?next=/services/{plugin}/{service}"
+        )));
+    }
+    let info =
+        match crate::dokku::service_info(&*state.dokku, plugin.as_str(), service.as_str()).await {
+            Ok(Some(info)) => info,
+            Ok(None) => {
+                return error_fragment(&retry_url, "The service was not found.");
+            }
+            Err(err) => return error_fragment(&retry_url, &err.to_string()),
+        };
+    let Some(dsn) = info.dsn else {
+        return error_fragment(
+            &retry_url,
+            "No connection string was reported for this service.",
+        );
+    };
+    record_dsn_reveal(&state, &session, service.as_str()).await;
+    let mut response = render(&DsnRevealedPartial { dsn })?;
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+/// Best-effort `service.dsn.reveal` audit entry (no lines; the DSN itself
+/// never reaches the audit trail).
+async fn record_dsn_reveal(state: &AppState, session: &Session, service: &str) {
+    let actor = crate::web::fragments::current_actor(state, session).await;
+    if let Ok(run_id) = state
+        .action_runs
+        .insert_with(&crate::storage::runs::NewRun {
+            subject: service.to_owned(),
+            operation: "service.dsn.reveal".to_owned(),
+            target_kind: crate::storage::runs::TargetKind::Service,
+            actor,
+            parent_run_id: None,
+        })
+        .await
+    {
+        let _ = state
+            .action_runs
+            .finish(
+                &run_id,
+                &crate::storage::runs::RunOutcome {
+                    ok: true,
+                    message: "Connection string revealed.".to_owned(),
+                    redirect: None,
+                },
+            )
+            .await;
     }
 }
 
@@ -522,7 +621,7 @@ pub async fn links_partial(
     let (raw_plugin, raw_service) = path.into_inner();
     let plugin = plugin_from_slug(&raw_plugin)?;
     let service = service_from_slug(&raw_service)?;
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = format!("/services/{plugin}/{service}/partials/links");
     let links = match service_linked_apps(&*state.dokku, plugin, &service).await {
@@ -547,6 +646,7 @@ pub async fn links_partial(
         csrf_token: &csrf_token,
         links,
         available_apps,
+        can_manage: user.role.can_manage_apps(),
     })
 }
 
@@ -569,6 +669,54 @@ pub async fn logs_partial(
         }),
         Err(err) => error_fragment(&retry_url, &err.to_string()),
     }
+}
+
+/// Streams a service's logs live over SSE (`<plugin>:logs <svc> --tail 200`).
+/// Each viewer owns one SSH channel; dropping the stream aborts the channel
+/// without harming the shared session, exactly like the app log stream.
+pub async fn log_stream(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+
+    // A plugin the capability probe says is absent gets an explanatory SSE
+    // error instead of a failed SSH attempt.
+    if let Some(caps) = state.capabilities.current().await {
+        let support = caps.supports_plugin(plugin.as_str());
+        if matches!(support, Support::PluginMissing { .. }) {
+            let message = support.label();
+            let event = actix_web::web::Bytes::from(format!("event: error\ndata: {message}\n\n"));
+            let chunk: Result<actix_web::web::Bytes, std::io::Error> = Ok(event);
+            return Ok(HttpResponse::Ok()
+                .content_type("text/event-stream")
+                .insert_header(("Cache-Control", "no-store"))
+                .insert_header(("X-Accel-Buffering", "no"))
+                .streaming(futures_util::stream::iter(vec![chunk])));
+        }
+    }
+
+    let command = DokkuCommand::ServiceLogs {
+        plugin,
+        service,
+        num_lines: 200,
+        follow: true,
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+    let client = state.dokku.clone();
+    let task = tokio::spawn(async move {
+        let _ = client.exec_streaming(&command, tx).await;
+    });
+
+    Ok(HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-store"))
+        .insert_header(("X-Accel-Buffering", "no"))
+        .streaming(crate::web::logs::live_stream(rx, task)))
 }
 
 /// Live resource usage, fetched on demand by the Overview tab's Resources
@@ -628,6 +776,14 @@ pub async fn delete_confirm(
     let plugin = plugin_from_slug(&raw_plugin)?;
     let service = service_from_slug(&raw_service)?;
     let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        set_flash(
+            &session,
+            FlashLevel::Error,
+            "Your role does not allow destroying services.",
+        );
+        return Ok(see_other(&detail_url(plugin, &service)));
+    }
     let csrf_token = ensure_csrf(&session).await?;
     let flash = take_flash(&session);
 
@@ -648,7 +804,13 @@ pub async fn delete_confirm_modal(
     let (raw_plugin, raw_service) = path.into_inner();
     let plugin = plugin_from_slug(&raw_plugin)?;
     let service = service_from_slug(&raw_service)?;
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        return error_fragment(
+            &format!("/services/{plugin}/{service}/partials/overview"),
+            "Your role does not allow destroying services.",
+        );
+    }
     let csrf_token = ensure_csrf(&session).await?;
 
     render(&DeleteConfirmModalPartial {

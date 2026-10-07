@@ -11,8 +11,8 @@ use crate::domain::build::{
 };
 use crate::domain::command::DokkuCommand;
 use crate::domain::job::JobSpec;
-use crate::domain::parse::{parse_builder_report, parse_buildpacks_list};
-use crate::domain::types::BuilderReport;
+use crate::domain::parse::{parse_builder_report, parse_buildpacks_list, parse_scheduler_report};
+use crate::domain::types::{BuilderReport, SchedulerReport};
 use crate::error::AppError;
 use crate::storage::runs::TargetKind;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
@@ -47,7 +47,10 @@ struct BuildPartial<'a> {
     buildpacks: Vec<BuildpackRow>,
     builder: BuilderReport,
     builders: Vec<String>,
+    scheduler: SchedulerReport,
+    schedulers: Vec<String>,
     updated: String,
+    can_manage: bool,
 }
 
 fn partial_url(name: &str) -> String {
@@ -81,7 +84,7 @@ pub async fn partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name);
     let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -103,10 +106,33 @@ pub async fn partial(
         Ok(output) => output,
         Err(err) => return error_fragment(&retry_url, &err.to_string()),
     };
-    let builder_output = match state.dokku.exec(&DokkuCommand::BuilderReport { app }).await {
+    let builder_output = match state
+        .dokku
+        .exec(&DokkuCommand::BuilderReport { app: app.clone() })
+        .await
+    {
         Ok(output) => output,
         Err(err) => return error_fragment(&retry_url, &err.to_string()),
     };
+    let scheduler_output = match state
+        .dokku
+        .exec(&DokkuCommand::SchedulerReport { app: app.clone() })
+        .await
+    {
+        Ok(output) => output,
+        Err(err) => return error_fragment(&retry_url, &err.to_string()),
+    };
+    // Only schedulers the probe explicitly reports as installed are offered;
+    // an unprobed host falls back to docker-local alone so the UI never sends
+    // a scheduler the host does not have.
+    let mut schedulers = vec!["docker-local".to_owned()];
+    if let Some(caps) = state.capabilities.current().await {
+        for (plugin, name) in [("scheduler-k3s", "k3s"), ("scheduler-null", "null")] {
+            if caps.supports_plugin(plugin) == crate::domain::capabilities::Support::Supported {
+                schedulers.push(name.to_owned());
+            }
+        }
+    }
     let buildpacks = parse_buildpacks_list(&buildpacks_output.stdout)
         .into_iter()
         .enumerate()
@@ -122,7 +148,10 @@ pub async fn partial(
         buildpacks,
         builder: parse_builder_report(&builder_output.stdout),
         builders: BUILDERS.iter().map(|name| (*name).to_owned()).collect(),
+        scheduler: parse_scheduler_report(&scheduler_output.stdout),
+        schedulers,
         updated: format_age(snapshot.age()),
+        can_manage: user.role.can_manage_apps(),
     })
 }
 
@@ -138,6 +167,12 @@ pub struct BuilderForm {
     property: String,
     #[serde(default)]
     value: String,
+}
+
+#[derive(Deserialize)]
+pub struct SchedulerForm {
+    #[serde(default)]
+    selected: String,
 }
 
 fn parse_index(raw: &str) -> Result<Option<u32>, String> {
@@ -319,6 +354,35 @@ pub async fn builder_set(
         format!("Updating builder for {name}…"),
         format!("Builder updated for '{name}'."),
         format!("Queued: update builder for {name}."),
+    )
+    .await
+}
+
+pub async fn scheduler_set(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: CsrfForm<SchedulerForm>,
+) -> Result<HttpResponse, AppError> {
+    let name = path.into_inner();
+    let value = form.0.selected.trim().to_owned();
+    if !value.is_empty() && !crate::domain::scheduler::is_valid_scheduler(&value) {
+        return reject(&session, &req, &name, "Unknown scheduler.");
+    }
+    run_spec(
+        &state,
+        &session,
+        &req,
+        name.clone(),
+        vec![JobSpec::SchedulerSet {
+            app: name.clone(),
+            value: (!value.is_empty()).then_some(value),
+        }],
+        "scheduler.set",
+        format!("Updating scheduler for {name}…"),
+        format!("Scheduler updated for '{name}'."),
+        format!("Queued: update scheduler for {name}."),
     )
     .await
 }

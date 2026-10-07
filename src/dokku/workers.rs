@@ -2,7 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::auth::csrf::generate_token;
-use crate::domain::job::{CompletionRefresh, JobPayload};
+use crate::domain::command::DokkuCommand;
+use crate::domain::job::{CompletionRefresh, JobPayload, JobSpec};
+use crate::domain::parse::parse_app_links;
+use crate::domain::service_name::ServiceName;
+use crate::domain::service_plugin::ServicePlugin;
 use crate::storage::runs::{RunOutcome, SqliteRunsRepo};
 use crate::web::AppState;
 
@@ -174,6 +178,43 @@ async fn refresh_after(state: &AppState, run_id: &str, refresh: CompletionRefres
     }
 }
 
+/// Execution-time preconditions that cannot be guaranteed at enqueue time.
+/// A service destroy is re-checked for links here: an app can be linked in the
+/// window between enqueue and claim, and destroying a linked service would
+/// break it. The check fails closed — if links cannot be read, nothing runs.
+async fn precondition(state: &AppState, spec: &JobSpec) -> Result<(), DokkuError> {
+    let JobSpec::ServiceDestroy { plugin, service } = spec else {
+        return Ok(());
+    };
+    let plugin = ServicePlugin::try_from(plugin.as_str()).map_err(|err| DokkuError::Exit {
+        code: 2,
+        stderr: format!("invalid service plugin in job payload: {err}"),
+    })?;
+    let service = ServiceName::try_from(service.as_str()).map_err(|err| DokkuError::Exit {
+        code: 2,
+        stderr: format!("invalid service name in job payload: {err}"),
+    })?;
+    let output = state
+        .dokku
+        .exec(&DokkuCommand::ServiceLinks {
+            plugin,
+            service: service.clone(),
+        })
+        .await?;
+    let linked = parse_app_links(&output.stdout);
+    if linked.is_empty() {
+        Ok(())
+    } else {
+        Err(DokkuError::Exit {
+            code: 1,
+            stderr: format!(
+                "refusing to destroy {plugin}:{service}: still linked to {}",
+                linked.join(", ")
+            ),
+        })
+    }
+}
+
 /// Executes each step in order, streaming all output into the run. Stops at
 /// the first failure. The plan is rehydrated through the newtype constructors,
 /// so a tampered payload fails here — without touching the host.
@@ -205,6 +246,10 @@ async fn run_plan(
 
     let mut result: Result<(), DokkuError> = Ok(());
     for spec in &payload.plan {
+        if let Err(err) = precondition(state, spec).await {
+            result = Err(err);
+            break;
+        }
         let commands = match spec.to_commands() {
             Ok(commands) => commands,
             Err(err) => {

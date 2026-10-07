@@ -105,6 +105,27 @@ pub enum DokkuCommand {
         app: AppName,
         domains: Vec<DomainName>,
     },
+    PortsReport {
+        app: AppName,
+    },
+    PortsAdd {
+        app: AppName,
+        mappings: Vec<String>,
+    },
+    PortsSet {
+        app: AppName,
+        mappings: Vec<String>,
+    },
+    PortsRemove {
+        app: AppName,
+        mappings: Vec<String>,
+    },
+    PortsClear {
+        app: AppName,
+    },
+    ProxyReport {
+        app: AppName,
+    },
     ResourceReport {
         app: AppName,
     },
@@ -176,6 +197,9 @@ pub enum DokkuCommand {
         plugin: ServicePlugin,
         service: ServiceName,
         num_lines: u32,
+        /// `true` passes the plugin's `-t`/`--tail` follow flag, streaming the
+        /// container logs over SSE.
+        follow: bool,
     },
     ServiceExpose {
         plugin: ServicePlugin,
@@ -218,6 +242,14 @@ pub enum DokkuCommand {
         property: String,
         value: Option<String>,
     },
+    SchedulerReport {
+        app: AppName,
+    },
+    SchedulerSet {
+        app: AppName,
+        /// `None` clears the selection (falls back to the global default).
+        value: Option<String>,
+    },
     StorageReport,
     StorageListEntries,
     StorageUsage {
@@ -232,6 +264,13 @@ pub enum DokkuCommand {
         mount: MountSpec,
     },
     PluginList,
+    SshKeysList,
+    SshKeysAdd {
+        name: String,
+    },
+    SshKeysRemove {
+        name: String,
+    },
     AppLinks {
         plugin: String,
         app: AppName,
@@ -274,6 +313,21 @@ pub enum DokkuCommand {
     HttpAuthRemoveUser {
         app: AppName,
         username: String,
+    },
+    HttpAuthReport {
+        app: AppName,
+    },
+    HttpAuthAddAllowedIp {
+        app: AppName,
+        address: String,
+    },
+    HttpAuthRemoveAllowedIp {
+        app: AppName,
+        address: String,
+    },
+    HttpAuthSetAllowedIps {
+        app: AppName,
+        addresses: Vec<String>,
     },
     ConfigSet {
         app: AppName,
@@ -441,6 +495,30 @@ impl DokkuCommand {
                 argv.extend(domains.iter().map(|domain| domain.as_str().into()));
                 argv
             }
+            DokkuCommand::PortsReport { app } => {
+                vec!["ports:report".into(), app.as_str().into()]
+            }
+            DokkuCommand::PortsAdd { app, mappings } => {
+                let mut argv = vec!["ports:add".into(), app.as_str().into()];
+                argv.extend(mappings.iter().cloned());
+                argv
+            }
+            DokkuCommand::PortsSet { app, mappings } => {
+                let mut argv = vec!["ports:set".into(), app.as_str().into()];
+                argv.extend(mappings.iter().cloned());
+                argv
+            }
+            DokkuCommand::PortsRemove { app, mappings } => {
+                let mut argv = vec!["ports:remove".into(), app.as_str().into()];
+                argv.extend(mappings.iter().cloned());
+                argv
+            }
+            DokkuCommand::PortsClear { app } => {
+                vec!["ports:clear".into(), app.as_str().into()]
+            }
+            DokkuCommand::ProxyReport { app } => {
+                vec!["proxy:report".into(), app.as_str().into()]
+            }
             DokkuCommand::ResourceReport { app } => {
                 vec!["resource:report".into(), app.as_str().into()]
             }
@@ -580,14 +658,21 @@ impl DokkuCommand {
                 plugin,
                 service,
                 num_lines,
+                follow,
             } => vec![
                 format!("{plugin}:logs"),
                 service.as_str().into(),
                 // This plugin generation takes the tail count as the third
                 // positional argument with the (optional) follow flag second,
-                // so the flag slot must be an explicit empty string:
-                // `dokku redis:logs svc '' 200` -> `docker logs --tail 200`.
-                String::new(),
+                // so the flag slot must be an explicit empty string when not
+                // following: `dokku redis:logs svc '' 200` ->
+                // `docker logs --tail 200`. Following passes `--tail` (or
+                // `-t`), which the plugin translates to `--follow`.
+                if *follow {
+                    "--tail".into()
+                } else {
+                    String::new()
+                },
                 num_lines.to_string(),
             ],
             DokkuCommand::ServiceExpose {
@@ -662,6 +747,15 @@ impl DokkuCommand {
                 }
                 argv
             }
+            DokkuCommand::SchedulerReport { app } => {
+                vec!["scheduler:report".into(), app.as_str().into()]
+            }
+            DokkuCommand::SchedulerSet { app, value } => vec![
+                "scheduler:set".into(),
+                app.as_str().into(),
+                "selected".into(),
+                value.clone().unwrap_or_default(),
+            ],
             DokkuCommand::StorageReport => vec!["storage:report".into()],
             DokkuCommand::StorageListEntries => vec![
                 "storage:list-entries".into(),
@@ -685,6 +779,13 @@ impl DokkuCommand {
                 mount.locator(),
             ],
             DokkuCommand::PluginList => vec!["plugin:list".into()],
+            DokkuCommand::SshKeysList => vec!["ssh-keys:list".into()],
+            DokkuCommand::SshKeysAdd { name } => {
+                vec!["ssh-keys:add".into(), name.clone()]
+            }
+            DokkuCommand::SshKeysRemove { name } => {
+                vec!["ssh-keys:remove".into(), name.clone()]
+            }
             DokkuCommand::AppLinks { plugin, app } => {
                 vec![format!("{plugin}:app-links"), app.as_str().into()]
             }
@@ -733,6 +834,25 @@ impl DokkuCommand {
                 app.as_str().into(),
                 username.clone(),
             ],
+            DokkuCommand::HttpAuthReport { app } => {
+                vec!["http-auth:report".into(), app.as_str().into()]
+            }
+            DokkuCommand::HttpAuthAddAllowedIp { app, address } => vec![
+                "http-auth:add-allowed-ip".into(),
+                app.as_str().into(),
+                address.clone(),
+            ],
+            DokkuCommand::HttpAuthRemoveAllowedIp { app, address } => vec![
+                "http-auth:remove-allowed-ip".into(),
+                app.as_str().into(),
+                address.clone(),
+            ],
+            DokkuCommand::HttpAuthSetAllowedIps { app, addresses } => {
+                // No address arguments is the plugin's clear operation.
+                let mut argv = vec!["http-auth:set-allowed-ips".into(), app.as_str().into()];
+                argv.extend(addresses.iter().cloned());
+                argv
+            }
             DokkuCommand::ConfigSet { app, vars } => {
                 let mut argv = vec!["config:set".into(), app.as_str().into()];
                 argv.extend(vars.iter().map(|var| format!("{}={}", var.key, var.value)));
@@ -902,6 +1022,10 @@ impl DokkuCommand {
             | DokkuCommand::DomainsAdd { .. }
             | DokkuCommand::DomainsRemove { .. }
             | DokkuCommand::DomainsSet { .. }
+            | DokkuCommand::PortsAdd { .. }
+            | DokkuCommand::PortsSet { .. }
+            | DokkuCommand::PortsRemove { .. }
+            | DokkuCommand::PortsClear { .. }
             | DokkuCommand::ResourceLimit { .. }
             | DokkuCommand::ResourceReserve { .. }
             | DokkuCommand::ResourceLimitClear { .. }
@@ -915,11 +1039,15 @@ impl DokkuCommand {
             | DokkuCommand::HttpAuthDisable { .. }
             | DokkuCommand::HttpAuthAddUser { .. }
             | DokkuCommand::HttpAuthRemoveUser { .. }
+            | DokkuCommand::HttpAuthAddAllowedIp { .. }
+            | DokkuCommand::HttpAuthRemoveAllowedIp { .. }
+            | DokkuCommand::HttpAuthSetAllowedIps { .. }
             | DokkuCommand::BuildpacksSet { .. }
             | DokkuCommand::BuildpacksAdd { .. }
             | DokkuCommand::BuildpacksRemove { .. }
             | DokkuCommand::BuildpacksClear { .. }
             | DokkuCommand::BuilderSet { .. }
+            | DokkuCommand::SchedulerSet { .. }
             | DokkuCommand::GitSync { .. }
             | DokkuCommand::GitFromImage { .. }
             | DokkuCommand::GitFromArchive { .. }
@@ -931,7 +1059,8 @@ impl DokkuCommand {
             | DokkuCommand::LetsencryptSet { .. }
             | DokkuCommand::Logs { follow: true, .. }
             | DokkuCommand::NginxAccessLogs { follow: true, .. }
-            | DokkuCommand::NginxErrorLogs { follow: true, .. } => CommandTimeout::Indefinite,
+            | DokkuCommand::NginxErrorLogs { follow: true, .. }
+            | DokkuCommand::ServiceLogs { follow: true, .. } => CommandTimeout::Indefinite,
             _ => CommandTimeout::Default,
         }
     }
@@ -969,7 +1098,11 @@ impl DokkuCommand {
             DokkuCommand::HttpAuthEnable { .. }
             | DokkuCommand::HttpAuthDisable { .. }
             | DokkuCommand::HttpAuthAddUser { .. }
-            | DokkuCommand::HttpAuthRemoveUser { .. } => Requirement::Plugin {
+            | DokkuCommand::HttpAuthRemoveUser { .. }
+            | DokkuCommand::HttpAuthReport { .. }
+            | DokkuCommand::HttpAuthAddAllowedIp { .. }
+            | DokkuCommand::HttpAuthRemoveAllowedIp { .. }
+            | DokkuCommand::HttpAuthSetAllowedIps { .. } => Requirement::Plugin {
                 name: "http-auth".to_owned(),
             },
             DokkuCommand::LetsencryptList
@@ -1126,6 +1259,47 @@ mod tests {
             }
             .argv(),
             vec!["domains:set", "myapp", "one.example.com", "two.example.com"]
+        );
+    }
+
+    #[test]
+    fn ports_argv() {
+        let mappings = vec!["http:80:5000".to_owned(), "tcp:5432:5432".to_owned()];
+        assert_eq!(
+            DokkuCommand::PortsReport { app: app("myapp") }.argv(),
+            vec!["ports:report", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::PortsAdd {
+                app: app("myapp"),
+                mappings: mappings.clone(),
+            }
+            .argv(),
+            vec!["ports:add", "myapp", "http:80:5000", "tcp:5432:5432"]
+        );
+        assert_eq!(
+            DokkuCommand::PortsSet {
+                app: app("myapp"),
+                mappings: mappings.clone(),
+            }
+            .argv(),
+            vec!["ports:set", "myapp", "http:80:5000", "tcp:5432:5432"]
+        );
+        assert_eq!(
+            DokkuCommand::PortsRemove {
+                app: app("myapp"),
+                mappings: mappings.clone(),
+            }
+            .argv(),
+            vec!["ports:remove", "myapp", "http:80:5000", "tcp:5432:5432"]
+        );
+        assert_eq!(
+            DokkuCommand::PortsClear { app: app("myapp") }.argv(),
+            vec!["ports:clear", "myapp"]
+        );
+        assert_eq!(
+            DokkuCommand::ProxyReport { app: app("myapp") }.argv(),
+            vec!["proxy:report", "myapp"]
         );
     }
 
@@ -1618,6 +1792,7 @@ mod tests {
                 plugin: plugin("redis"),
                 service: service("cache"),
                 num_lines: 200,
+                follow: false,
             },
             DokkuCommand::ServiceStats {
                 plugin: plugin("redis"),
@@ -1937,9 +2112,20 @@ mod tests {
                 plugin: plugin("redis"),
                 service: service("cache"),
                 num_lines: 200,
+                follow: false,
             }
             .argv(),
             vec!["redis:logs", "cache", "", "200"]
+        );
+        assert_eq!(
+            DokkuCommand::ServiceLogs {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                num_lines: 200,
+                follow: true,
+            }
+            .argv(),
+            vec!["redis:logs", "cache", "--tail", "200"]
         );
     }
 

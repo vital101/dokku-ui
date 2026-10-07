@@ -46,7 +46,12 @@ struct DeployPartial<'a> {
     webhook: Option<super::webhooks::WebhookView>,
     webhook_url: String,
     updated: String,
+    can_manage: bool,
+    history: Vec<crate::storage::runs::RunSummary>,
 }
+
+/// Operations recorded as "deploys" on the app's Deploy tab.
+const DEPLOY_OPERATIONS: [&str; 3] = ["git.sync", "git.from-image", "git.from-archive"];
 
 fn partial_url(name: &str) -> String {
     format!("/apps/{name}/partials/deploy")
@@ -106,7 +111,7 @@ async fn render_partial(
     req: &HttpRequest,
     name: String,
 ) -> Result<HttpResponse, AppError> {
-    current_user(state, session).await?;
+    let user = current_user(state, session).await?;
 
     let retry_url = partial_url(&name);
     let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -140,6 +145,19 @@ async fn render_partial(
         }
     };
     let csrf_token = ensure_csrf(session).await?;
+    // Recent deploy runs for this app, filtered in SQL so unrelated activity
+    // can never crowd older deploys out of the card; a store failure degrades
+    // to an empty history card rather than taking the panel down.
+    let history = state
+        .action_runs
+        .list_for_target_operations(
+            crate::storage::runs::TargetKind::App,
+            &name,
+            &DEPLOY_OPERATIONS,
+            8,
+        )
+        .await
+        .unwrap_or_default();
     let connection = req.connection_info();
     render(&DeployPartial {
         name: &name,
@@ -157,6 +175,8 @@ async fn render_partial(
             name
         ),
         updated: format_age(snapshot.age()),
+        can_manage: user.role.can_manage_apps(),
+        history,
     })
 }
 

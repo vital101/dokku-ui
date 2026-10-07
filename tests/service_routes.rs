@@ -321,7 +321,14 @@ async fn service_overview_partial_renders_details_and_expose_form() {
         body.contains(r#"hx-get="/services/redis/candid/partials/stats""#),
         "stats card loads lazily: {body}"
     );
-    assert!(!body.contains("redis://"), "dsn never rendered: {body}");
+    assert!(
+        body.contains("redis://••••••••@dokku-redis-candid:6379"),
+        "the DSN renders masked: {body}"
+    );
+    assert!(
+        !body.contains("XXXXXX"),
+        "the stored password never renders: {body}"
+    );
 }
 
 #[tokio::test]
@@ -427,6 +434,7 @@ async fn service_logs_partial_renders_lines() {
             plugin: redis(),
             service: candid(),
             num_lines: 200,
+            follow: false,
         },
         Ok(DokkuOutput::ok(include_str!("fixtures/redis_logs.txt"))),
     );
@@ -1244,6 +1252,7 @@ async fn service_partials_return_retry_cards_on_dokku_errors() {
                 plugin: redis(),
                 service: candid(),
                 num_lines: 200,
+                follow: false,
             },
             Err(exit_error(1, "logs boom")),
         );
@@ -1647,4 +1656,175 @@ async fn service_stats_partial_unrecognised_output_returns_retry_card() {
     let body = get_body(resp).await;
 
     assert!(body.contains("No stats were reported"), "{body}");
+}
+
+#[tokio::test]
+async fn service_log_stream_follows_over_sse() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceLogs {
+            plugin: redis(),
+            service: candid(),
+            num_lines: 200,
+            follow: true,
+        },
+        Ok(DokkuOutput::ok(include_str!("fixtures/redis_logs.txt"))),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/logs/stream")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap_or("")),
+        Some("text/event-stream")
+    );
+    let body = get_body(resp).await;
+    assert!(
+        body.contains(
+            "event: line\ndata: 1:M 29 Sep 2026 10:00:00.102 * Ready to accept connections tcp"
+        ),
+        "{body}"
+    );
+    assert!(
+        client.calls().contains(&DokkuCommand::ServiceLogs {
+            plugin: redis(),
+            service: candid(),
+            num_lines: 200,
+            follow: true,
+        }),
+        "the follow command ran"
+    );
+}
+
+#[tokio::test]
+async fn service_log_stream_gates_a_missing_plugin_with_an_explanatory_event() {
+    let client = MockClient::new()
+        .stub(
+            DokkuCommand::DokkuVersion,
+            Ok(DokkuOutput::ok(include_str!("fixtures/dokku_version.txt"))),
+        )
+        .stub(
+            DokkuCommand::PluginList,
+            Ok(DokkuOutput::ok(
+                "=====> Plugins\n  postgres 1.36.4 enabled dokku postgres plugin\n",
+            )),
+        );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    state.capabilities.ensure_loaded().await.expect("probe");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/logs/stream")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "SSE errors stay 200");
+    let body = get_body(resp).await;
+    assert!(body.starts_with("event: error\ndata: "), "{body}");
+    assert!(body.contains("redis"), "{body}");
+}
+
+#[tokio::test]
+async fn dsn_reveal_requires_reauth_then_shows_the_connection_string_no_store() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceInfo {
+            plugin: "redis".into(),
+            service: "candid".into(),
+        },
+        Ok(DokkuOutput::ok(REDIS_INFO)),
+    );
+    let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    // Without a re-auth window the reveal bounces to /reauth.
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/dsn/reveal",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/reauth?next=/services/redis/candid");
+
+    // Re-auth, then the reveal returns the full DSN with no-store.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=/services/redis/candid")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let reauth_csrf = extract_csrf(&get_body(resp).await);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!(
+                "csrf_token={reauth_csrf}&password=correct-horse-battery&next=%2Fservices%2Fredis%2Fcandid"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/dsn/reveal",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("cache-control"),
+        Some(&actix_web::http::header::HeaderValue::from_static(
+            "no-store"
+        )),
+        "revealed credentials are never cached"
+    );
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("redis://:XXXXXX@dokku-redis-candid:6379"),
+        "{body}"
+    );
+    assert!(!body.contains("••••••••"), "unmasked on reveal: {body}");
+
+    // The reveal is in the audit trail.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("service.dsn.reveal"), "{body}");
 }

@@ -11,6 +11,7 @@ use dokku_ui::dokku::{
 use dokku_ui::domain::AppName;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::domain::job::{AppAction, CompletionRefresh, CompletionSpec, JobPayload, JobSpec};
+use dokku_ui::domain::{ServiceName, ServicePlugin};
 use dokku_ui::storage::runs::{Actor, NewRun, RunOutcome, TargetKind};
 use dokku_ui::web::AppState;
 
@@ -259,6 +260,159 @@ async fn destructive_jobs_are_never_retried() {
             .count(),
         1,
         "even a transient error never retries a destroy"
+    );
+}
+
+/// Enqueues a destructive service-destroy job (max one attempt).
+async fn enqueue_service_destroy(state: &AppState) -> (String, String) {
+    let run_id = state
+        .action_runs
+        .insert_with(&NewRun {
+            subject: "db".to_owned(),
+            operation: "service.destroy".to_owned(),
+            target_kind: TargetKind::Service,
+            actor: Actor {
+                user_id: None,
+                email: None,
+            },
+            parent_run_id: None,
+        })
+        .await
+        .expect("run");
+    let job_id = state
+        .jobs
+        .enqueue(
+            &run_id,
+            &JobPayload {
+                plan: vec![JobSpec::ServiceDestroy {
+                    plugin: "postgres".to_owned(),
+                    service: "db".to_owned(),
+                }],
+                completion: completion(),
+                redactions: Vec::new(),
+            },
+            1,
+        )
+        .await
+        .expect("job");
+    (run_id, job_id)
+}
+
+#[tokio::test]
+async fn service_destroy_rechecks_links_at_execution_time() {
+    // The enqueue-time check saw no links, but an app linked before the
+    // executor claimed the job. The execution-time precondition must refuse
+    // the destroy rather than break the app.
+    let plugin = ServicePlugin::try_from("postgres").expect("plugin");
+    let service = ServiceName::try_from("db").expect("service");
+    let client = MockClient::new()
+        .stub(
+            DokkuCommand::ServiceLinks {
+                plugin,
+                service: service.clone(),
+            },
+            Ok(DokkuOutput::ok(
+                "=====> postgres service links\n  alpha  \n",
+            )),
+        )
+        .stub(
+            DokkuCommand::ServiceDestroy {
+                plugin,
+                service: service.clone(),
+                force: true,
+            },
+            Ok(DokkuOutput::ok("-----> destroying\n")),
+        );
+    let (state, client_arc, _dir) = test_state_with_shared_client(client).await;
+    let (run_id, job_id) = enqueue_service_destroy(&state).await;
+
+    spawn_job_executor(state.clone(), job_id.clone(), job_id.clone());
+    let outcome = wait_for_outcome(&state, &run_id).await;
+
+    assert!(!outcome.ok, "{outcome:?}");
+    assert!(outcome.message.contains("still linked"), "{outcome:?}");
+    assert!(
+        !client_arc
+            .calls()
+            .iter()
+            .any(|call| matches!(call, DokkuCommand::ServiceDestroy { .. })),
+        "the destroy never touched the host"
+    );
+}
+
+#[tokio::test]
+async fn service_destroy_proceeds_when_still_unlinked() {
+    let plugin = ServicePlugin::try_from("postgres").expect("plugin");
+    let service = ServiceName::try_from("db").expect("service");
+    let client = MockClient::new()
+        .stub(
+            DokkuCommand::ServiceLinks {
+                plugin,
+                service: service.clone(),
+            },
+            Ok(DokkuOutput::ok("=====> postgres service links\n")),
+        )
+        .stub(
+            DokkuCommand::ServiceDestroy {
+                plugin,
+                service: service.clone(),
+                force: true,
+            },
+            Ok(DokkuOutput::ok("-----> destroying\n")),
+        );
+    let (state, client_arc, _dir) = test_state_with_shared_client(client).await;
+    let (run_id, job_id) = enqueue_service_destroy(&state).await;
+
+    spawn_job_executor(state.clone(), job_id.clone(), job_id.clone());
+    let outcome = wait_for_outcome(&state, &run_id).await;
+
+    assert!(outcome.ok, "{outcome:?}");
+    assert!(
+        client_arc.calls().contains(&DokkuCommand::ServiceDestroy {
+            plugin,
+            service,
+            force: true,
+        }),
+        "the destroy ran"
+    );
+}
+
+#[tokio::test]
+async fn service_destroy_fails_closed_when_link_check_errors() {
+    let plugin = ServicePlugin::try_from("postgres").expect("plugin");
+    let service = ServiceName::try_from("db").expect("service");
+    let client = MockClient::new()
+        .stub(
+            DokkuCommand::ServiceLinks {
+                plugin,
+                service: service.clone(),
+            },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "link check unavailable".into(),
+            }),
+        )
+        .stub(
+            DokkuCommand::ServiceDestroy {
+                plugin,
+                service: service.clone(),
+                force: true,
+            },
+            Ok(DokkuOutput::ok("-----> destroying\n")),
+        );
+    let (state, client_arc, _dir) = test_state_with_shared_client(client).await;
+    let (run_id, job_id) = enqueue_service_destroy(&state).await;
+
+    spawn_job_executor(state.clone(), job_id.clone(), job_id.clone());
+    let outcome = wait_for_outcome(&state, &run_id).await;
+
+    assert!(!outcome.ok, "{outcome:?}");
+    assert!(
+        !client_arc
+            .calls()
+            .iter()
+            .any(|call| matches!(call, DokkuCommand::ServiceDestroy { .. })),
+        "when links are unknown, nothing is destroyed"
     );
 }
 

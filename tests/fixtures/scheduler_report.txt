@@ -1,0 +1,4 @@
+=====> alpha scheduler information
+       Scheduler computed selected:   docker-local
+       Scheduler global selected:     docker-local
+       Scheduler selected:            

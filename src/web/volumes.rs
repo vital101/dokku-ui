@@ -81,6 +81,7 @@ struct MountsPartial<'a> {
     mounted_apps: Vec<AppMountsView>,
     mountable_apps: Vec<String>,
     total_mounts: usize,
+    can_manage: bool,
 }
 
 #[derive(Template)]
@@ -117,7 +118,7 @@ pub async fn list_partial(
     state: web::Data<AppState>,
     session: Session,
 ) -> Result<HttpResponse, AppError> {
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let apps = match app_mounts(&*state.dokku).await {
         Ok(apps) => apps,
@@ -149,6 +150,7 @@ pub async fn list_partial(
         mounted_apps,
         mountable_apps,
         total_mounts,
+        can_manage: user.role.can_manage_apps(),
     })
 }
 

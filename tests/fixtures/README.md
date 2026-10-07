@@ -21,8 +21,12 @@ domain parsers' unit tests and the `MockClient` integration suite.
 > argv live in `src/domain/command.rs`, in lockstep with the parsers.
 >
 > Service fixture DSNs contain credentials on the live host and are **redacted
-> to `XXXXXX`** here. The parser never reads the `Dsn` line and the UI never
-> renders it; a test asserts the DSN does not appear in `ServiceInfo`.
+> to `XXXXXX`** here. The parser now reads the `Dsn` line into `ServiceInfo`
+> (policy reversed in the P4 increment — see `GAPS.md` locked decision 4), but
+> the UI masks it by default (`scheme://••••••••@host/…`) and only the
+> re-authenticated reveal endpoint emits it, with `Cache-Control: no-store`
+> and an audit entry. A test asserts the masked form renders and the stored
+> password never does.
 >
 > **Synthetic fixtures:** the service-list, service-log and
 > `storage_report_empty.txt` fixtures (`*_list.txt`, `redis_logs.txt`,
@@ -33,6 +37,24 @@ domain parsers' unit tests and the `MockClient` integration suite.
 > + `subcommands.go` at dokku tag `v0.38.4`) and should be replaced by real
 > captures on the next host session. The stats/entries fixtures below are real
 > captures from 2026-10-04.
+>
+> **Ports/proxy/scheduler/http-auth/ssh-keys fixtures:** `ports_report.txt`,
+> `proxy_report.txt`, `scheduler_report.txt`, `http_auth_report.txt`, and
+> `ssh_keys_list.txt` are synthetic, source-verified against
+> dokku tag `v0.38.4` (`plugins/ports/report.go`, `plugins/proxy/report.go`,
+> `plugins/scheduler/report.go`, and `plugins/common/common.go::ReportSingleApp`
+> for the header/padding conventions; `plugins/ssh-keys/subcommands/list` with
+> the `sshcommand list` text format at `dokku/sshcommand`). The http-auth
+> report format comes from `dokku/dokku-http-auth` (`command-functions`,
+> `cmd-http-auth-report-single`). Replace with live captures on the next host
+> session.
+>
+> **Ports/proxy fixtures:** `ports_report.txt` and `proxy_report.txt` are
+> synthetic, source-verified against dokku tag `v0.38.4`
+> (`plugins/ports/report.go` + `plugins/proxy/report.go` through
+> `plugins/common/common.go::ReportSingleApp`, which fixes the
+> `=====> <app> <type> information` header and the `Key:` right-padded value
+> format). Replace with live captures on the next host session.
 >
 > **Added service plugins (mariadb, memcached, rabbitmq, clickhouse):** no new
 > fixtures — the list/info/log commands share the generic plain-text shapes
@@ -85,6 +107,11 @@ domain parsers' unit tests and the `MockClient` integration suite.
 | `buildpacks_list_empty.txt` | `dokku buildpacks:list <app>` | Real capture (2026-10-05): the `-----> <app> buildpack urls` header with no URLs. |
 | `builder_report.txt` | `dokku builder:report <app>` | Real capture (2026-10-05): `Builder selected:`, `Builder computed selected:`, etc. `builder:set <app> selected <builder>` sets; no value clears. |
 | `git_report.txt` | `dokku git:report dokku-ui` | Real capture (2026-10-06). Header `=====> <app> git information` + space-padded `Git <key>: value` lines. `Git sha` is `git rev-parse HEAD` on the app's bare repo — it literally prints `HEAD` on unborn refs, so the parser only accepts commit-hash-shaped values. `Git last updated at` is the deploy-branch ref mtime (unix seconds) and is empty when the branch ref does not exist yet. |
+| `ports_report.txt` | `dokku ports:report alpha` | Synthetic (source-verified v0.38.4): `=====> alpha ports information` + `Ports map:` / `Ports map detected:` lines. Drives the Ports tab. |
+| `proxy_report.txt` | `dokku proxy:report alpha` | Synthetic (source-verified v0.38.4): `Proxy enabled`, `Proxy computed type`, `Proxy global type`, `Proxy type`. Informational card on the Ports tab. |
+| `scheduler_report.txt` | `dokku scheduler:report alpha` | Synthetic (source-verified v0.38.4): `Scheduler selected` / `computed selected` / `global selected`. Scheduler card on the Build tab. |
+| `http_auth_report.txt` | `dokku http-auth:report alpha` | Synthetic (source-verified `dokku-http-auth` master): enabled, allowed IPs, scoped domains, users. Drives the allowed-IP bypass list. |
+| `ssh_keys_list.txt` | `dokku ssh-keys:list` | Synthetic (source-verified sshcommand text format): `SHA256:… NAME="…" SSHCOMMAND_ALLOWED_KEYS="no-agent-forwarding,…"` lines — the final field is the authorized_keys options list, not the key type. Drives the admin SSH-keys screen. |
 | `git_report_not_deployed.txt` | `dokku git:report starwars` | Real capture: no explicit deploy branch (computed falls back to the `--global` value, `master`), real sha. |
 | `git_report_fresh.txt` | `dokku git:report scratch-m20` | Real capture of a just-created app (scratch app, destroyed after): empty deploy branch and last-updated, `Git sha: HEAD`. |
 | `git_report_synced.txt` | `dokku git:report scratch-m20` (after `git:sync`) | Real capture: `git:sync` auto-set `deploy-branch` to the detected branch, real sha, last-updated set. |

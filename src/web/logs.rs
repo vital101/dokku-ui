@@ -114,7 +114,7 @@ struct StreamState {
 /// Forwards output chunks as SSE `line` events; the stream ends when the
 /// command finishes. Dropping the returned stream drops `rx`, which makes the
 /// client's next send fail and aborts the SSH channel.
-fn live_stream(
+pub(super) fn live_stream(
     rx: mpsc::Receiver<String>,
     task: tokio::task::JoinHandle<()>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
@@ -139,7 +139,7 @@ fn live_stream(
     )
 }
 
-fn line_events(chunk: &str) -> Bytes {
+pub(super) fn line_events(chunk: &str) -> Bytes {
     let mut body = String::new();
     for line in chunk.lines() {
         if line.is_empty() {

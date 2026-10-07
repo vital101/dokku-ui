@@ -398,3 +398,63 @@ async fn non_htmx_cron_run_queues_flashes_and_is_audited() {
     let body = get_body(resp).await;
     assert!(body.contains("cron.run"), "{body}");
 }
+
+#[tokio::test]
+async fn cron_bulk_toggles_fan_out_to_the_matching_tasks_only() {
+    let (state, client, _dir) = harness(seeded_app_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    // Suspend all: only the active task (a1b2c3) is touched.
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/cron/suspend-all", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(run_url(&body).starts_with("/actions/runs/"), "{body}");
+    wait_for_call(
+        &client,
+        &DokkuCommand::CronSuspend {
+            app: app_name("alpha"),
+            cron_id: "a1b2c3".into(),
+        },
+    )
+    .await;
+    assert!(
+        !client.calls().contains(&DokkuCommand::CronSuspend {
+            app: app_name("alpha"),
+            cron_id: "d4e5f6".into(),
+        }),
+        "the already-suspended task is left alone"
+    );
+
+    // Resume all: only the suspended task (d4e5f6) is touched.
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/alpha/cron/resume-all", format!("csrf_token={csrf}"))
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_call(
+        &client,
+        &DokkuCommand::CronResume {
+            app: app_name("alpha"),
+            cron_id: "d4e5f6".into(),
+        },
+    )
+    .await;
+    assert!(
+        !client.calls().contains(&DokkuCommand::CronResume {
+            app: app_name("alpha"),
+            cron_id: "a1b2c3".into(),
+        }),
+        "the active task is left alone"
+    );
+}

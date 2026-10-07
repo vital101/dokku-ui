@@ -20,9 +20,14 @@ pub fn hash_password(password: &Password) -> Result<String, PasswordError> {
         .map_err(|err| PasswordError::Hash(err.to_string()))
 }
 
+/// Verifies a password against a stored hash. A hash that cannot be parsed
+/// (corrupt row, or the `!proxy-auth` sentinel used for proxy-registered
+/// users) is a verification failure, not an internal error: callers render
+/// "invalid credentials" instead of a 500, and login stays closed either way.
 pub fn verify_password(password: &Password, stored_hash: &str) -> Result<bool, PasswordError> {
-    let hash =
-        PasswordHash::new(stored_hash).map_err(|err| PasswordError::Parse(err.to_string()))?;
+    let Ok(hash) = PasswordHash::new(stored_hash) else {
+        return Ok(false);
+    };
     Ok(Argon2::default()
         .verify_password(password.as_str().as_bytes(), &hash)
         .is_ok())
@@ -58,10 +63,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_stored_hash_is_an_error() {
-        assert!(matches!(
-            verify_password(&password("whatever password"), "not-a-phc-hash"),
-            Err(PasswordError::Parse(_))
-        ));
+    fn malformed_stored_hash_fails_verification_instead_of_erroring() {
+        // Covers corrupt rows and the `!proxy-auth` sentinel: callers must see
+        // "invalid credentials", never a 500.
+        assert!(
+            !verify_password(&password("whatever password"), "not-a-phc-hash").expect("verify"),
+            "an unparseable hash can never match"
+        );
+        assert!(!verify_password(&password("whatever password"), "!proxy-auth").expect("verify"),);
     }
 }

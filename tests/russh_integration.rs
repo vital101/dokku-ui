@@ -27,7 +27,9 @@ AAAEB7P5LeMSaA4no7ja1k70GczXC0xwVyIJVS8rCzu3W9vJ2BooJZLofhKNemFb1rFNAY
 Llmb0f7XLvYo8YLAj4NDAAAAFWphY2tATWFjLmh5cGVyaW9uLmxhbg==
 -----END OPENSSH PRIVATE KEY-----"#;
 
-struct FakeDokku;
+struct FakeDokku {
+    stdin: Arc<std::sync::Mutex<Vec<String>>>,
+}
 
 impl server::Handler for FakeDokku {
     type Error = russh::Error;
@@ -46,6 +48,24 @@ impl server::Handler for FakeDokku {
         Ok(())
     }
 
+    /// Records stdin written by the client and completes the `ssh-keys:add`
+    /// command with it (the real plugin reads the key from stdin).
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.stdin
+            .lock()
+            .expect("stdin lock")
+            .push(String::from_utf8_lossy(data).into_owned());
+        session.data(channel, "-----> Importing SSH key...\n")?;
+        session.exit_status_request(channel, 0)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
     async fn exec_request(
         &mut self,
         channel: ChannelId,
@@ -57,6 +77,11 @@ impl server::Handler for FakeDokku {
             "apps:list" => {
                 session.data(channel, "=====> My Apps\nmyapp\napi.internal\n")?;
                 session.exit_status_request(channel, 0)?;
+            }
+            // The response arrives in `data()` once the key payload is
+            // written, mirroring the real plugin's stdin read.
+            "ssh-keys:add test-key" => {
+                return Ok(());
             }
             "ps:report myapp --format json" => {
                 session.data(
@@ -413,6 +438,7 @@ async fn service_logs_preserves_the_empty_positional_flag() {
             plugin: dokku_ui::domain::ServicePlugin::try_from("redis").expect("plugin"),
             service: dokku_ui::domain::ServiceName::try_from("candid").expect("service"),
             num_lines: 200,
+            follow: false,
         })
         .await
         .expect("service logs succeed");
@@ -427,11 +453,22 @@ async fn spawn_fake_dokku() -> (
     tokio::task::JoinHandle<()>,
     Arc<AtomicUsize>,
 ) {
+    let (addr, server, connections, _stdin) = spawn_fake_dokku_with_stdin().await;
+    (addr, server, connections)
+}
+
+async fn spawn_fake_dokku_with_stdin() -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<()>,
+    Arc<AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let connections = Arc::new(AtomicUsize::new(0));
+    let stdin = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let host_key = PrivateKey::from_openssh(HOST_KEY).expect("parse host key");
     let config = Arc::new(server::Config {
@@ -440,6 +477,7 @@ async fn spawn_fake_dokku() -> (
     });
 
     let connections_for_task = connections.clone();
+    let stdin_for_task = stdin.clone();
     let server = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -447,11 +485,42 @@ async fn spawn_fake_dokku() -> (
             };
             connections_for_task.fetch_add(1, Ordering::SeqCst);
             let config = config.clone();
+            let stdin = stdin_for_task.clone();
             tokio::spawn(async move {
-                let _ = server::run_stream(config, stream, FakeDokku).await;
+                let _ = server::run_stream(config, stream, FakeDokku { stdin }).await;
             });
         }
     });
 
-    (addr, server, connections)
+    (addr, server, connections, stdin)
+}
+
+#[tokio::test]
+async fn exec_with_stdin_delivers_the_payload_and_reads_the_result() {
+    let (addr, server, _connections, stdin) = spawn_fake_dokku_with_stdin().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    let client = client(addr, &key_path).await;
+    let payload = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc jack@laptop\n";
+    let output = client
+        .exec_with_stdin(
+            &DokkuCommand::SshKeysAdd {
+                name: "test-key".into(),
+            },
+            payload,
+        )
+        .await
+        .expect("ssh-keys:add succeeds");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, "-----> Importing SSH key...\n");
+    assert_eq!(
+        stdin.lock().expect("stdin lock").clone(),
+        vec![payload.to_owned()],
+        "the key reached the remote stdin"
+    );
+
+    server.abort();
 }

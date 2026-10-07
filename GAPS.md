@@ -25,10 +25,13 @@ webhooks, multi-server, reverse-proxy auth, operating).
    detection framework** (see below) instead of per-feature version checks.
    Features whose commands do not exist on 0.38.4 and cannot be shimmed by the
    host helper are capability-gated (hidden with an explanatory state).
-4. **DSN/credential reveal is a policy decision still open.** The current
-   codebase deliberately never parses or renders DSNs and a test enforces it;
-   Pro's service detail page reveals connection strings. Parity requires
-   reversing that policy explicitly (or accepting a documented divergence).
+4. **DSN/credential reveal: reversed (resolved).** Pro's service detail page
+   reveals connection strings; parity required the old "DSNs never surface"
+   invariant to be deliberately broken. `ServiceInfo.dsn` is now parsed and
+   masked by default; the re-auth-gated `POST /services/{plugin}/{svc}/dsn/reveal`
+   returns the unmasked value with `Cache-Control: no-store` and a
+   `service.dsn.reveal` audit entry. Run lines were already URL-credential
+   masked.
 5. **Multi-user auth/RBAC: own SQLite RBAC.** Roles (`admin`/`operator`/
    `viewer`) live in our `users` table behind a pure `authorize()` check
    (`src/auth/rbac.rs`), with per-app/service grants as the natural extension.
@@ -75,9 +78,13 @@ webhooks, multi-server, reverse-proxy auth, operating).
   Sync from git (`git:sync`); Deploy from image; Deploy from archive.
 - **Platform**: REST JSON:API under `/@api/` with JWT auth, Swagger UI +
   OpenAPI, atomic `/operations` batches with command coalescing and
-  collection replacement; durable Activity/Job logs (90-day activity TTL,
-  7-day log TTL, secret redaction, lineage, per-app/service/user views,
-  live-tailing over WebSocket); background job queue with retries.
+  collection replacement (app-scoped endpoints cover env vars, domains,
+  ports, formations, buildpacks, resources, certificates, letsencrypt,
+  http auth, maintenance mode, the webhook config, and builder/scheduler
+  settings); per-app port management; durable Activity/Job logs (90-day
+  activity TTL, 7-day log TTL, secret redaction, lineage,
+  per-app/service/user views, live-tailing over WebSocket); background job
+  queue with retries.
 - **Identity**: multi-user accounts with passwords, reset tokens/links, SSH
   keys; teams (owners/members) with command/app/service grants; internal
   per-app/per-service teams; reverse-proxy header authentication with trusted
@@ -95,7 +102,7 @@ webhooks, multi-server, reverse-proxy auth, operating).
 |---|---|---|---|
 | Create / destroy / start / stop / restart / rebuild | ✅ | ✅ | Ours streams via SSE; mutating actions have no timeout |
 | Scale processes | ✅ | ✅ | Ours capped at 100; Pro also edits resources |
-| Rename app | ✅ | ✅ | `apps:rename`, optional skip-rebuild (P1) |
+| Rename app | ✅ | ✅ | `apps:rename`; Pro's optional skip-rebuild needs a newer dokku than 0.38.4 — capability-gated |
 | Deploy lock (`apps:lock`/`unlock`) | ✅ | ✅ | P1; real UI state |
 | Maintenance mode | ✅ | ✅ | `maintenance` plugin; `Plugin`-gated explanatory state when absent |
 | Env var view | ✅ | ✅ reveal/copy | Masked by default; reveal under re-auth with `no-store` (P0) |
@@ -103,9 +110,9 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | Domains view | ✅ | ✅ | Ours includes a DNS pre-check Pro hints at |
 | Domains add/remove/set | ✅ | ✅ | `domains:add/remove/set` (P1) |
 | Resource limit/reserve/CPU editing | ✅ | ✅ | `resource:limit/reserve` + clears (P1); rebuild applies |
-| Build configuration (buildpacks order, builder, build dir, scheduler and scheduler props) | ✅ | ✅ | Buildpacks order + builder/build-dir (P1); scheduler props host-specific |
-| Cron tab (list, run-now, suspend/resume individual & app-wide) | ✅ | ✅ | `cron:list --format json` + run/suspend/resume (P1) |
-| HTTP basic auth (users + allowed IPs) | ✅ | ✅ | `http-auth` plugin, `Plugin`-gated (P1); passwords redacted from run lines |
+| Build configuration (buildpacks order, builder, build dir, scheduler and scheduler props) | ✅ buildpacks + builder + scheduler | ✅ | Buildpacks order + builder/build-dir + scheduler selection landed (P1/P4); per-app scheduler *properties* (docker-local init process, parallel count; k3s namespaces) do not exist on 0.38.4 — the Build tab says so |
+| Cron tab (list, run-now, suspend/resume individual & app-wide) | ✅ | ✅ | `cron:list --format json` + run-now + per-task suspend/resume (P1); app-wide suspend/resume fans out one command per task in a single queued run (0.38.4 has no app-wide command) |
+| HTTP basic auth (users + allowed IPs) | ✅ | ✅ | `http-auth` plugin, `Plugin`-gated; enable/disable/add-user/remove-user + allowed-IP bypasses (`add/remove-allowed-ip`, `set-allowed-ips`, blank clears) landed; passwords redacted from run lines |
 | Multi-user accounts + roles | ✅ | ✅ | Own SQLite RBAC: `admin`/`operator`/`viewer`, enforced per request in the auth middleware; Users screen (P3 increment) |
 | Self-service password change | ✅ | ✅ | Current-password verification + policy |
 | Password reset links | ✅ | ✅ | Admin-generated one-time link (24h, single-use) built from the instance public URL; only the SHA-256 hash is stored, link pages are `no-store`, and both a reset and a self-service change revoke the user's other sessions |
@@ -121,12 +128,13 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | Manual certificate upload / activate | ❌ | ✅ | Deferred: PEM cannot survive the SSH argv re-split; design note in `PLAN.md` §20 covers a stdin-tarball client capability |
 | Server-wide auto-renew cron toggle | ✅ | ✅ | `letsencrypt:cron-job --add/--remove`; no status query on plugin 0.20.4, so the card is action-only |
 | k3s cert-manager integration | ❌ | ✅ | Environment-specific; divergent unless host runs k3s |
+| Proxy/port management (`ports:add/set/remove/report`, proxy status) | ✅ | ✅ | Ports tab with `ports:report/add/set/remove/clear` + read-only `proxy:report` status; native commands on 0.38.4 (source-verified), no companion helper needed |
 | Live log tail + pause/follow | ✅ | ✅ | Pro uses WebSocket; our SSE streams over SSH |
 | Log source selector (app / nginx access / nginx error) | ✅ | ✅ | Capability-gated per source |
 | Process filtering of application logs | ✅ | ✅ | `logs --ps <process>` via the live panel and bounded viewer |
 | Last build/image status | ✅ | ✅ | `builds:report` |
-| Build logs + deploy history | ◐ | ✅ | Activity records operations; failed deploy logs card on the Deploy tab |
-| Per-service live logs | ◐ static tail | ✅ | Plugin ignores tail count on 0.38.4; we re-tail client-side |
+| Build logs + deploy history | ✅ | ✅ | Activity records operations; failed deploy logs card + a per-app deploy-history table fed from `action_runs` (`git.*` runs) on the Deploy tab |
+| Per-service live logs | ✅ | ✅ | `GET /services/{plugin}/{svc}/logs/stream` SSE (`--tail` as the follow flag); the bounded viewer still re-tails client-side |
 | App live CPU/memory | ❌ | not documented | Not a Pro gap; no native dokku stats command |
 | Activity/audit tab (app / service / user) | ✅ | ✅ | `/activity`, per-app, per-service; actor attribution |
 | Durable audit, secret redaction, lineage, retention | ✅ | ✅ | `action_runs` + `action_run_lines`; TTL settings; `JobPayload.redactions` |
@@ -136,11 +144,11 @@ webhooks, multi-server, reverse-proxy auth, operating).
 
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
-| Service lifecycle + link/unlink | ✅ | ✅ | Destroy is blocked while apps are linked (fail-closed when the link check cannot run); the check is at enqueue time — an execution-time precondition is the follow-up |
+| Service lifecycle + link/unlink | ✅ | ✅ | Destroy is blocked while apps are linked at enqueue time **and** re-checked in the executor (fail-closed when the check errors) |
 | Service create advanced options (image/tag, env, extra args) | ✅ | ✅ | `--image`/`--image-version`/`--custom-env`/`--config-options`, source-verified against the installed 1.x plugin generation |
-| Connection string / credential reveal | ❌ deliberate | ✅ | **Open policy decision** — test asserts DSNs never surface |
+| Connection string / credential reveal | ✅ | ✅ | Policy reversed (P4): DSN parsed, masked by default, re-auth-gated reveal with `no-store` + audit; never in run lines |
 | Service Activity tab | ✅ | ✅ | `/services/{plugin}/{service}/activity` |
-| Datastore plugin coverage | ◐ 8 (pg/mysql/redis/mongo/mariadb/memcached/rabbitmq/clickhouse) | 18 official plugins | Sidebar is capability-driven (only installed plugins show); adding more is a catalog entry + data-dir mapping |
+| Datastore plugin coverage | ✅ 12 | 18 official plugins | Full dokku-org set (postgres/mysql/redis/mongo/mariadb/memcached/rabbitmq/clickhouse/couchdb/elasticsearch/nats/solr); sidebar is capability-driven. Pro also names community plugins (influxdb, neo4j, rsync, vault) — catalog additions when needed |
 | Expose/unexpose service ports | ✅ | not documented | We exceed the documented Pro surface |
 | Service live stats (mem/CPU/data/disk) | ✅ | not documented | Our fixed read-only scripts; cgroup v2 only |
 | Volumes page (mounts, mount/unmount, usage, host disk) | ✅ | not documented | We exceed the documented Pro surface |
@@ -152,13 +160,13 @@ webhooks, multi-server, reverse-proxy auth, operating).
 | Capability | dokku-ui | Dokku Pro | Notes |
 |---|---|---|---|
 | Multi-user accounts | ✅ | ✅ | Admin creates users with an initial password; roles admin/operator/viewer |
-| Password set / reset token & link | ◐ | ✅ | Self-service change is in; reset links need the public-URL flow |
-| SSH key management | ❌ | ✅ | Maps to dokku `ssh-keys` |
+| Password set / reset token & link | ✅ | ✅ | Self-service change and admin-generated one-time reset links (24h, single-use, public-URL based) |
+| SSH key management | ✅ | ✅ | Admin `/keys` screen over `ssh-keys:list/add/remove`; the public key travels on stdin (`DokkuClient::exec_with_stdin`), add/remove are audited as `ssh-key.*` |
 | Teams (owners/members) | ❌ | ✅ | Pro ships a `teams` host plugin; own RBAC covers the app-level need |
 | Command/app/service scoped grants | ❌ | ✅ | Enforced via host plugin triggers; own RBAC is role-level today |
 | Internal per-app / per-service teams | ❌ | ✅ | Auto-managed `dokku@app--…`/`dokku@service--…` |
 | Per-user activity audit | ✅ | ✅ | `/activity?user=`, actor attribution on every run |
-| Reverse-proxy authentication (trusted header + CIDR, auto-registration) | ❌ | ✅ | Env-only; small once multi-user exists (now unblocked) |
+| Reverse-proxy authentication (trusted header + CIDR, auto-registration) | ✅ | ✅ | Env-only: `TRUSTED_PROXY_CIDRS`, `PROXY_AUTH_HEADER`, `PROXY_AUTH_DEFAULT_ROLE`; header honored only for trusted peer addresses; auto-registered users cannot password-login |
 | REST JSON:API + JWT access/refresh tokens | ❌ | ✅ | |
 | Swagger UI + OpenAPI spec | ❌ | ✅ | |
 | Atomic batch operations (`/operations`, coalescing, collection replacement) | ❌ | ✅ | Coalescing is the complex half |
@@ -251,7 +259,8 @@ One reusable mechanism so we stop hand-rolling version checks:
 - Pro is closed-source; every parity item is an independent implementation.
 - We intentionally exceed Pro (documented surface) on: volumes UI, service
   stats, expose/unexpose, vhost DNS pre-check, `/healthz`, horizontal scaling.
-- DSN non-exposure remains a divergence until the policy decision flips.
+- DSN reveal now matches Pro (masked by default, re-auth-gated reveal); the
+  fixtures keep `XXXXXX` redactions.
 
 ## Suggested sequencing (when implementation starts)
 
@@ -390,8 +399,15 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
   (`/palette.json` + `static/js/palette.js`, role-gated entries); dashboard
   "deleting…" badge from unfinished destroy runs.
 - **Still open in P3**: REST JSON:API + JWT + Swagger + batch operations,
-  multi-server, reverse-proxy auth, SSH-key management, teams/scoped grants,
-  plugin management (companion helper), git HTTP server, DSN reveal policy.
+  multi-server, teams/scoped grants, plugin management (companion helper),
+  git HTTP server, manual certificate upload (deferred — design note in
+  `PLAN.md` §20).
+- **P4 closed the remaining SSH-only gaps**: proxy/port management, per-app
+  scheduler selection, app-wide cron fan-out, http-auth allowed-IP bypasses,
+  service live logs, datastore coverage 8 → 12 (full dokku-org set), viewer UI
+  hiding, execution-time destroy precondition, deploy history, SSH keys (with
+  a stdin client capability), reverse-proxy header auth, and the DSN reveal
+  policy flip. See "P4 status" below.
 
 ## P3 follow-up (implemented)
 
@@ -406,14 +422,62 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
 - **Destroy-while-linked guard**: `service.destroy` checks `<plugin>:links`
   first and refuses with the linked app list; a failed link check fails closed
   (never destroy when links are unknown). The check runs when the job is
-  enqueued — an app linked in the millisecond window before the executor
-  claims the job can still be destroyed; execution-time precondition tracked
-  as follow-up.
+  enqueued **and** again in the executor (`workers::precondition`), closing the
+  millisecond TOCTOU window; links unknown ⇒ the job fails closed.
 - **`letsencrypt:set`**: email and staging are editable from the TLS tab as
   audited runs (`letsencrypt:set <app> <property> [value]`), re-validated at
   job rehydration; blank fields are left untouched. The email must also be
   free of single quotes because it travels as SSH argv (the `xargs` re-split
   cannot carry them).
+
+## P4 status (implemented)
+
+All remaining SSH-only gaps plus the two open policy decisions landed:
+
+- **Ports tab** (`src/web/ports.rs`, migration-free): `ports:report/add/set/remove/clear`
+  and read-only `proxy:report`; mappings are pure-validated
+  (`src/domain/port.rs`) and re-validated at job rehydration. Commands and
+  report formats source-verified against dokku `v0.38.4`; fixtures are
+  synthetic/source-verified until the next host capture.
+- **Scheduler selection** (Build tab): `scheduler:report/set <app> selected`
+  only — 0.38.4's `scheduler:set` has no per-scheduler property namespaces
+  (`plugins/scheduler/scheduler.go`), so the per-scheduler property gap is
+  documented as a version divergence rather than chased.
+- **App-wide cron toggles**: `cron:suspend/resume` need a task id on 0.38.4,
+  so the UI's "Suspend all"/"Resume all" fan out one command per matching task
+  in a single queued run.
+- **http-auth allowed IPs**: `add-allowed-ip`, `remove-allowed-ip`,
+  `set-allowed-ips` (blank clears); `is_valid_allowed_ip` shape-validates
+  nginx-style addresses (IPv4/IPv6 CIDR, `all`, `unix:`) and the plugin
+  re-validates at command time. Plugin remains absent on the target host →
+  capability-gated explanatory state.
+- **Per-service live logs**: `/services/{plugin}/{svc}/logs/stream` SSE,
+  reusing the app-stream plumbing; the follow flag rides the plugin's `$2`
+  (`--tail`) with the tail count as `$3`.
+- **Datastore coverage 8 → 12**: adds couchdb, elasticsearch, nats, solr —
+  the full dokku-org datastore set; data dirs follow the official images
+  (nats keeps none, like memcached).
+- **Viewer UI hiding completed**: `can_manage` flows through every
+  mutation-bearing page/partial; create pages redirect; the middleware 403 is
+  unchanged and authoritative. The palette hides `New app` from viewers.
+- **Destroy execution-time precondition** (`workers::precondition`): the
+  `<plugin>:links` check is repeated at claim time and fails closed.
+- **Deploy history**: the Deploy tab lists recent `git.sync`/`git.from-image`/
+  `git.from-archive` runs (actor + outcome) from `action_runs`, with a link to
+  the app's activity page.
+- **SSH keys + stdin client capability**: `DokkuClient::exec_with_stdin`
+  (russh channel data + EOF; mock records payloads) backs the admin `/keys`
+  screen (`ssh-keys:list/add/remove`); `ssh-key.*` runs are audited without
+  lines and keys never travel in argv.
+- **Reverse-proxy header auth**: env-only `TRUSTED_PROXY_CIDRS` (empty ⇒ off),
+  `PROXY_AUTH_HEADER` (default `x-forwarded-user`), and
+  `PROXY_AUTH_DEFAULT_ROLE` (default `viewer`); the header is honored only
+  when the direct peer address is inside a trusted CIDR, users auto-register
+  with the unusable `!proxy-auth` password hash, and the session is renewed
+  before the user is bound.
+- **DSN reveal**: locked decision 4 reversed — DSNs are parsed and masked by
+  default; `POST /services/{plugin}/{svc}/dsn/reveal` is re-auth-gated,
+  `no-store`, and audited as `service.dsn.reveal`.
 
 ## Refreshing this document
 
@@ -423,3 +487,16 @@ All P0 workstreams are landed and green (`make test`, `make lint`,
   top-level nav entries are the signal that the parity target moved.
 - Update the "Locked decisions" only with an explicit call; everything else
   is descriptive.
+
+Last re-check 2026-10-07: the pro.dokku.com/docs nav is unchanged from the
+audit above (`features/commands` documents the host `dokku-pro` binary CLI —
+a documented divergence). This review corrected the build-configuration,
+cron, and http-auth rows to ◐, added the proxy/ports row, clarified the
+rename skip-rebuild note, and enumerated the missing official datastore
+plugins.
+
+P4 implementation pass (2026-10-07): all remaining SSH-only rows are ✅; the
+two open decisions (DSN reveal, reverse-proxy auth) are resolved as above.
+What remains is companion-helper work (plugin management, teams/scoped
+grants, git HTTP), the JSON:API layer, multi-server, and manual certificate
+upload (stdin-tarball design, `PLAN.md` §20).

@@ -3222,6 +3222,14 @@ fn plugin_probed_client() -> MockClient {
                 "=====> Plugins\n  apps 0.38.4 enabled dokku core apps plugin\n  maintenance 1.0.0 enabled dokku maintenance plugin\n  http-auth 1.0.0 enabled dokku http auth plugin\n",
             )),
         )
+        .stub(
+            DokkuCommand::HttpAuthReport {
+                app: app_name("alpha"),
+            },
+            Ok(DokkuOutput::ok(include_str!(
+                "fixtures/http_auth_report.txt"
+            ))),
+        )
 }
 
 #[tokio::test]
@@ -3289,6 +3297,22 @@ async fn settings_plugin_sections_expose_actions_when_supported() {
     );
     assert!(
         body.contains(r#"hx-post="/apps/alpha/http-auth/remove-user""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/http-auth/add-allowed-ip""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/http-auth/set-allowed-ips""#),
+        "{body}"
+    );
+    assert!(
+        body.contains("10.0.0.0/8"),
+        "the bypass list renders: {body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/apps/alpha/http-auth/remove-allowed-ip""#),
         "{body}"
     );
 }
@@ -3494,4 +3518,92 @@ async fn http_auth_add_user_validates_and_queues_on_the_no_js_path() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("http-auth.add-user"), "{body}");
+}
+
+#[tokio::test]
+async fn hx_http_auth_allowed_ips_validate_and_run() {
+    let client = plugin_probed_client()
+        .stub(
+            DokkuCommand::HttpAuthAddAllowedIp {
+                app: app_name("alpha"),
+                address: "10.0.0.0/8".into(),
+            },
+            Ok(DokkuOutput::ok(
+                "-----> Adding 10.0.0.0/8 to allowed ip list\n",
+            )),
+        )
+        .stub(
+            DokkuCommand::HttpAuthSetAllowedIps {
+                app: app_name("alpha"),
+                addresses: Vec::new(),
+            },
+            Ok(DokkuOutput::ok(
+                "-----> Setting allowed ip list for alpha\n",
+            )),
+        );
+    let (state, client, _dir) = harness(client).await;
+    state.capabilities.ensure_loaded().await.expect("probe");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/http-auth/add-allowed-ip",
+            format!("csrf_token={csrf}&address=10.0.0.0%2F8"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(run_url(&body).starts_with("/actions/runs/"), "{body}");
+    wait_for_call(
+        &client,
+        &DokkuCommand::HttpAuthAddAllowedIp {
+            app: app_name("alpha"),
+            address: "10.0.0.0/8".into(),
+        },
+    )
+    .await;
+
+    // Invalid addresses never reach the host.
+    let calls_before = client.calls().len();
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/http-auth/add-allowed-ip",
+            format!("csrf_token={csrf}&address=10.0.0.999"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "htmx errors stay 200");
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+    assert_eq!(client.calls().len(), calls_before, "nothing ran");
+
+    // A blank replace clears the whole list.
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/apps/alpha/http-auth/set-allowed-ips",
+            format!("csrf_token={csrf}&addresses="),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_call(
+        &client,
+        &DokkuCommand::HttpAuthSetAllowedIps {
+            app: app_name("alpha"),
+            addresses: Vec::new(),
+        },
+    )
+    .await;
 }

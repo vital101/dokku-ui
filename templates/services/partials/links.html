@@ -8,6 +8,7 @@
       {% for app in links %}
       <li class="flex items-center justify-between py-2">
         <a href="/apps/{{ app }}" class="font-mono text-sm text-white hover:underline">{{ app }}</a>
+        {% if can_manage %}
         <form method="post" action="/services/{{ plugin }}/{{ service }}/unlink"
               hx-post="/services/{{ plugin }}/{{ service }}/unlink" hx-target="#modal-content" hx-swap="innerHTML"
               data-action-form>
@@ -18,12 +19,14 @@
             <span class="app-action-label">Unlink</span>
           </button>
         </form>
+        {% endif %}
       </li>
       {% endfor %}
     </ul>
     {% endif %}
   </div>
 
+  {% if can_manage %}
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
     <h3 class="text-sm font-medium text-white">Link an app</h3>
     {% if available_apps.is_empty() %}
@@ -52,4 +55,5 @@
     </p>
     {% endif %}
   </div>
+  {% endif %}
 </div>

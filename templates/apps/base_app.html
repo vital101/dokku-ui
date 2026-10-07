@@ -41,6 +41,10 @@
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "domains" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Domains
   </a>
+  <a href="/apps/{{ name }}/ports"
+     class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "ports" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
+    Ports
+  </a>
   <a href="/apps/{{ name }}/logs"
      class="rounded-t-md px-3 py-2 text-sm font-medium {% if active_tab == "logs" %}border-b-2 border-emerald-500 text-white{% else %}text-slate-400 hover:text-white{% endif %}">
     Logs

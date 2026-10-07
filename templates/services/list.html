@@ -6,10 +6,12 @@
 {% block content %}
 <div class="flex items-center justify-between">
   <p class="text-sm text-slate-400">Datastore services provided by the {{ plugin }} plugin.</p>
+  {% if can_manage %}
   <a href="/services/{{ plugin }}/new"
      class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
     New service
   </a>
+  {% endif %}
 </div>
 
 <div id="app-panel" class="mt-6"

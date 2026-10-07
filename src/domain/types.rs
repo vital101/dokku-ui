@@ -91,6 +91,67 @@ impl SslReport {
     }
 }
 
+/// One authorized key from `ssh-keys:list` (text format). The text output
+/// carries the authorized_keys options (`SSHCOMMAND_ALLOWED_KEYS`), not the
+/// key type — the type only exists inside the public key itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SshKey {
+    pub fingerprint: String,
+    pub name: String,
+    /// Comma-separated sshd options the key is restricted to
+    /// (`no-agent-forwarding,no-user-rc,…`).
+    pub options: String,
+}
+
+/// The `Http auth …` section of `http-auth:report` (plain text).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HttpAuthReport {
+    pub enabled: bool,
+    pub allowed_ips: Vec<String>,
+    pub domains: Vec<String>,
+    pub users: Vec<String>,
+}
+
+/// The `Scheduler …` section of `scheduler:report` (plain text on 0.38.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SchedulerReport {
+    pub selected: String,
+    pub computed_selected: String,
+    pub global_selected: String,
+}
+
+/// The `Ports map` / `Ports map detected` sections of `ports:report`
+/// (plain text on 0.38.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PortsReport {
+    pub configured: Vec<String>,
+    pub detected: Vec<String>,
+}
+
+/// The proxy section of `proxy:report` (plain text on 0.38.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProxyReport {
+    pub enabled: bool,
+    pub computed_type: String,
+    pub global_type: String,
+    pub proxy_type: String,
+}
+
+impl ProxyReport {
+    /// The type actually in effect: the app's selection or the global one.
+    pub fn effective_type(&self) -> &str {
+        if self.computed_type.is_empty() {
+            if self.proxy_type.is_empty() {
+                &self.global_type
+            } else {
+                &self.proxy_type
+            }
+        } else {
+            &self.computed_type
+        }
+    }
+}
+
 /// One scheduled cron task from `cron:list --format json` (dokku v0.38.4
 /// `CronTask` struct). `task_in_maintenance` is the suspend state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,9 +232,11 @@ pub struct ServiceLink {
 }
 
 /// Details for a single linked service, parsed from the plain-text
-/// `<plugin>:info <service>` report. The DSN is deliberately never parsed into
-/// this struct.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `<plugin>:info <service>` report. The DSN is parsed but never rendered
+/// unmasked except through the re-authenticated reveal flow. `Debug` redacts
+/// the DSN and serialization omits it entirely, so neither a stray log line
+/// nor a serialized copy can leak credentials.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServiceInfo {
     pub plugin: String,
     pub service: String,
@@ -183,6 +246,25 @@ pub struct ServiceInfo {
     pub internal_ip: String,
     pub id_short: String,
     pub linked_apps: Vec<String>,
+    /// The connection string including credentials; mask before display.
+    #[serde(default, skip_serializing)]
+    pub dsn: Option<String>,
+}
+
+impl std::fmt::Debug for ServiceInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceInfo")
+            .field("plugin", &self.plugin)
+            .field("service", &self.service)
+            .field("status", &self.status)
+            .field("version", &self.version)
+            .field("exposed_ports", &self.exposed_ports)
+            .field("internal_ip", &self.internal_ip)
+            .field("id_short", &self.id_short)
+            .field("linked_apps", &self.linked_apps)
+            .field("dsn", &self.masked_dsn())
+            .finish()
+    }
 }
 
 impl ServiceInfo {
@@ -196,7 +278,16 @@ impl ServiceInfo {
             internal_ip: String::new(),
             id_short: String::new(),
             linked_apps: Vec::new(),
+            dsn: None,
         }
+    }
+
+    /// The connection string with credentials replaced by the fixed mask
+    /// (`redis://••••••••@host:6379`), safe for default rendering.
+    pub fn masked_dsn(&self) -> Option<String> {
+        self.dsn
+            .as_deref()
+            .map(|dsn| crate::domain::redact::redact_line(dsn, &[]))
     }
 
     pub fn status_label(&self) -> &str {

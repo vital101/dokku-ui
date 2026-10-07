@@ -46,6 +46,9 @@ struct CronPartial<'a> {
     csrf_token: &'a str,
     rows: Vec<CronRow>,
     updated: String,
+    can_manage: bool,
+    any_active: bool,
+    any_suspended: bool,
 }
 
 fn partial_url(name: &str) -> String {
@@ -79,7 +82,7 @@ pub async fn partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name);
     let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -97,7 +100,7 @@ pub async fn partial(
         Ok(output) => output,
         Err(err) => return error_fragment(&retry_url, &err.to_string()),
     };
-    let rows = parse_cron_tasks(&output.stdout)
+    let rows: Vec<CronRow> = parse_cron_tasks(&output.stdout)
         .into_iter()
         .map(|task| CronRow {
             id: task.id,
@@ -109,11 +112,16 @@ pub async fn partial(
         })
         .collect();
     let csrf_token = ensure_csrf(&session).await?;
+    let any_active = rows.iter().any(|row| !row.suspended);
+    let any_suspended = rows.iter().any(|row| row.suspended);
     render(&CronPartial {
         name: &name,
         csrf_token: &csrf_token,
         rows,
         updated: format_age(snapshot.age()),
+        can_manage: user.role.can_manage_apps(),
+        any_active,
+        any_suspended,
     })
 }
 
@@ -174,6 +182,139 @@ pub async fn resume(
         &form.0.cron_id,
     )
     .await
+}
+
+pub async fn suspend_all(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<super::apps::ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    bulk(&state, &session, &req, path.into_inner(), true).await
+}
+
+pub async fn resume_all(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<String>,
+    _form: CsrfForm<super::apps::ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    bulk(&state, &session, &req, path.into_inner(), false).await
+}
+
+/// 0.38.4's `cron:suspend`/`cron:resume` require a task id (no app-wide
+/// flag); the UI's "all" toggle fans out one command per matching task in a
+/// single queued run.
+async fn bulk(
+    state: &AppState,
+    session: &Session,
+    req: &HttpRequest,
+    name: String,
+    suspend: bool,
+) -> Result<HttpResponse, AppError> {
+    let app = match AppName::try_from(name.clone()) {
+        Ok(app) => app,
+        Err(err) => {
+            let message = format!("Invalid app name: {err}");
+            if is_htmx(req) {
+                return modal_error(message);
+            }
+            set_flash(session, FlashLevel::Error, message);
+            return Ok(see_other("/"));
+        }
+    };
+    let verb = if suspend { "suspend" } else { "resume" };
+    let redirect_to = format!("/apps/{name}/cron");
+    let output = match state.dokku.exec(&DokkuCommand::CronList { app }).await {
+        Ok(output) => output,
+        Err(err) => {
+            let message = format!("Could not list cron tasks: {err}");
+            if is_htmx(req) {
+                return modal_error(message);
+            }
+            set_flash(session, FlashLevel::Error, message);
+            return Ok(see_other(&redirect_to));
+        }
+    };
+    let plan: Vec<JobSpec> = parse_cron_tasks(&output.stdout)
+        .into_iter()
+        // Suspend the active tasks; resume the suspended ones.
+        .filter(|task| task.task_in_maintenance != suspend)
+        .map(|task| {
+            if suspend {
+                JobSpec::CronSuspend {
+                    app: name.clone(),
+                    cron_id: task.id,
+                }
+            } else {
+                JobSpec::CronResume {
+                    app: name.clone(),
+                    cron_id: task.id,
+                }
+            }
+        })
+        .collect();
+    if plan.is_empty() {
+        let message = format!("No cron tasks to {verb}.");
+        if is_htmx(req) {
+            return modal_error(message);
+        }
+        set_flash(session, FlashLevel::Error, message);
+        return Ok(see_other(&redirect_to));
+    }
+
+    let completion = RunCompletion {
+        success_message: format!(
+            "Cron tasks {} for '{name}'.",
+            if suspend { "suspended" } else { "resumed" }
+        ),
+        redirect: None,
+        refresh: RunRefresh::None,
+    };
+    if is_htmx(req) {
+        return start_action_run(
+            state,
+            session,
+            &RunRequest {
+                subject: name.clone(),
+                operation: format!("cron.{verb}-all"),
+                target_kind: TargetKind::App,
+                title: format!("{} all cron tasks for {name}…", ucfirst(verb)),
+                plan,
+                completion,
+                redactions: Vec::new(),
+                refresh_url: Some(partial_url(&name)),
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        state,
+        session,
+        &name,
+        &format!("cron.{verb}-all"),
+        TargetKind::App,
+        &plan,
+        &completion,
+        &[],
+    )
+    .await?;
+    set_flash(
+        session,
+        FlashLevel::Success,
+        format!("Queued: {verb} all cron tasks for {name}."),
+    );
+    Ok(see_other(&redirect_to))
+}
+
+fn ucfirst(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 async fn mutate(

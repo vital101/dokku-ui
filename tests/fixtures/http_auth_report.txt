@@ -1,0 +1,5 @@
+=====> alpha http-auth information
+       Http auth enabled:              true
+       Http auth allowed ips:          10.0.0.0/8 192.168.1.5
+       Http auth domains:              
+       Http auth users:                admin

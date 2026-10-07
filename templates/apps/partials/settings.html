@@ -12,6 +12,7 @@
         <span class="inline-flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-400">
           Locked
         </span>
+        {% if can_manage %}
         <form hx-post="/apps/{{ name }}/unlock" hx-target="#modal-content" hx-swap="innerHTML"
               method="post" data-action-form class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -19,10 +20,12 @@
             Unlock
           </button>
         </form>
+        {% endif %}
         {% else %}
         <span class="inline-flex items-center gap-2 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
           Unlocked
         </span>
+        {% if can_manage %}
         <form hx-post="/apps/{{ name }}/lock" hx-target="#modal-content" hx-swap="innerHTML"
               method="post" data-action-form class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -30,6 +33,7 @@
             Lock
           </button>
         </form>
+        {% endif %}
         {% endif %}
       </div>
     </div>
@@ -41,6 +45,7 @@
       Renaming retires the old containers and rebuilds under the new name. The
       app's data, config, and domains move with it.
     </p>
+    {% if can_manage %}
     <form hx-post="/apps/{{ name }}/rename" hx-target="#modal-content" hx-swap="innerHTML"
           method="post" data-action-form class="mt-4 flex items-end gap-2">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -54,6 +59,7 @@
         Rename
       </button>
     </form>
+    {% endif %}
   </div>
 
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
@@ -68,7 +74,7 @@
         <p class="mt-1 text-sm text-slate-400">{{ maintenance_label }}</p>
         {% endif %}
       </div>
-      {% if maintenance_available %}
+      {% if maintenance_available && can_manage %}
       <div class="flex items-center gap-2">
         <form hx-post="/apps/{{ name }}/maintenance/enable" hx-target="#modal-content" hx-swap="innerHTML"
               method="post" data-action-form class="inline">
@@ -102,7 +108,7 @@
         <p class="mt-1 text-sm text-slate-400">{{ http_auth_label }}</p>
         {% endif %}
       </div>
-      {% if http_auth_available %}
+      {% if http_auth_available && can_manage %}
       <div class="flex items-center gap-2">
         <form hx-post="/apps/{{ name }}/http-auth/enable" hx-target="#modal-content" hx-swap="innerHTML"
               method="post" data-action-form class="inline">
@@ -121,7 +127,7 @@
       </div>
       {% endif %}
     </div>
-    {% if http_auth_available %}
+    {% if http_auth_available && can_manage %}
     <div class="mt-4 grid gap-4 lg:grid-cols-2">
       <form hx-post="/apps/{{ name }}/http-auth/add-user" hx-target="#modal-content" hx-swap="innerHTML"
             method="post" data-action-form class="flex items-end gap-2">
@@ -154,6 +160,69 @@
           Remove
         </button>
       </form>
+    </div>
+    {% endif %}
+
+    {% if http_auth_available %}
+    <div class="mt-6 border-t border-slate-800/50 pt-4">
+      <h4 class="text-sm font-medium text-white">Allowed IPs (basic-auth bypass)</h4>
+      <p class="mt-1 text-xs text-slate-500">
+        Requests from these addresses skip basic auth. The list applies to all
+        domains.
+      </p>
+      {% if let Some(auth) = http_auth %}
+        {% if auth.allowed_ips.is_empty() %}
+        <p class="mt-2 text-sm text-slate-400">No bypass addresses.</p>
+        {% else %}
+        <ul class="mt-3 divide-y divide-slate-800/60">
+          {% for address in auth.allowed_ips %}
+          <li class="flex items-center justify-between py-2">
+            <span class="font-mono text-sm text-white">{{ address }}</span>
+            {% if can_manage %}
+            <form hx-post="/apps/{{ name }}/http-auth/remove-allowed-ip" hx-target="#modal-content" hx-swap="innerHTML"
+                  method="post" data-action-form class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="address" value="{{ address }}">
+              <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+                Remove
+              </button>
+            </form>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% if can_manage %}
+        <form hx-post="/apps/{{ name }}/http-auth/add-allowed-ip" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="mt-4 flex items-end gap-2">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="flex-1">
+            <label for="auth-add-ip" class="mb-1 block text-sm text-slate-400">Add address</label>
+            <input id="auth-add-ip" type="text" name="address" required placeholder="10.0.0.0/8"
+                   class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+          </div>
+          <button type="submit"
+                  class="app-action rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+            Add
+          </button>
+        </form>
+        <form hx-post="/apps/{{ name }}/http-auth/set-allowed-ips" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="mt-4 flex items-end gap-2">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="flex-1">
+            <label for="auth-set-ips" class="mb-1 block text-sm text-slate-400">Replace all (blank clears)</label>
+            <input id="auth-set-ips" type="text" name="addresses" value="{{ auth.allowed_ips.join(" ") }}"
+                   class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+          </div>
+          <button type="submit"
+                  class="app-action rounded-md bg-slate-800 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-700">
+            Replace
+          </button>
+        </form>
+        {% endif %}
+      {% else %}
+      <p class="mt-2 text-sm text-slate-400">Allowed IPs are unavailable.</p>
+      {% endif %}
     </div>
     {% endif %}
   </div>

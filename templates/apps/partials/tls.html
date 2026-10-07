@@ -42,6 +42,7 @@
       </div>
     </dl>
     {% endif %}
+    {% if can_manage %}
     <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-800/50 pt-4">
       {% if !active %}
       <form hx-post="/apps/{{ name }}/tls/enable" hx-target="#modal-content" hx-swap="innerHTML"
@@ -76,9 +77,10 @@
       </form>
     </div>
     {% endif %}
+    {% endif %}
   </div>
 
-  {% if letsencrypt_available %}
+  {% if letsencrypt_available && can_manage %}
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <h3 class="text-sm font-medium text-white">Let's Encrypt settings</h3>
     <p class="mt-1 text-sm text-slate-400">
@@ -124,7 +126,7 @@
         <p class="mt-1 text-sm text-slate-400">{{ letsencrypt_label }}</p>
         {% endif %}
       </div>
-      {% if letsencrypt_available %}
+      {% if letsencrypt_available && can_manage %}
       <div class="flex items-center gap-2">
         <form hx-post="/apps/{{ name }}/tls/cron-job/add" hx-target="#modal-content" hx-swap="innerHTML"
               method="post" data-action-form class="inline">

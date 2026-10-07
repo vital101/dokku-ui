@@ -45,11 +45,14 @@ pub async fn palette(
         item("Dashboard", "/", "Navigate"),
         item("Activity", "/activity", "Navigate"),
         item("Volumes", "/volumes", "Navigate"),
-        item("New app", "/apps/new", "Actions"),
         item("Change password", "/password", "Navigate"),
     ];
+    if user.role.can_manage_apps() {
+        items.push(item("New app", "/apps/new", "Actions"));
+    }
     if user.role.is_admin() {
         items.push(item("Users", "/users", "Navigate"));
+        items.push(item("SSH keys", "/keys", "Navigate"));
         items.push(item("Settings", "/settings", "Navigate"));
     }
     for app in &snapshot.apps {

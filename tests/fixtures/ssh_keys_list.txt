@@ -1,0 +1,2 @@
+SHA256:AbCdEf1234567890abcdef1234567890abcdef123456 NAME="jack@laptop" SSHCOMMAND_ALLOWED_KEYS="no-agent-forwarding,no-user-rc,no-X11-forwarding,no-port-forwarding"
+SHA256:1234567890abcdef1234567890abcdef1234567890 NAME="deploy@ci" SSHCOMMAND_ALLOWED_KEYS="no-agent-forwarding,no-user-rc,no-X11-forwarding,no-port-forwarding"

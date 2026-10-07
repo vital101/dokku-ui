@@ -2,7 +2,27 @@
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
     <div class="flex items-center justify-between">
       <h3 class="text-sm font-medium text-white">Cron tasks</h3>
-      <span class="text-xs text-slate-500">updated {{ updated }}</span>
+      <div class="flex items-center gap-2">
+        {% if can_manage && any_active %}
+        <form hx-post="/apps/{{ name }}/cron/suspend-all" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+            Suspend all
+          </button>
+        </form>
+        {% endif %}
+        {% if can_manage && any_suspended %}
+        <form hx-post="/apps/{{ name }}/cron/resume-all" hx-target="#modal-content" hx-swap="innerHTML"
+              method="post" data-action-form class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="app-action rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500">
+            Resume all
+          </button>
+        </form>
+        {% endif %}
+        <span class="text-xs text-slate-500">updated {{ updated }}</span>
+      </div>
     </div>
     {% if rows.is_empty() %}
     <p class="mt-4 text-sm text-slate-400">
@@ -17,7 +37,9 @@
           <th class="py-2 pr-4 font-medium">Command</th>
           <th class="py-2 pr-4 font-medium">Concurrency</th>
           <th class="py-2 pr-4 font-medium">State</th>
+          {% if can_manage %}
           <th class="py-2 font-medium"></th>
+          {% endif %}
         </tr>
       </thead>
       <tbody>
@@ -36,6 +58,7 @@
             <span class="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-400">active</span>
             {% endif %}
           </td>
+          {% if can_manage %}
           <td class="py-2 text-right">
             <div class="flex justify-end gap-2">
               <form hx-post="/apps/{{ name }}/cron/run" hx-target="#modal-content" hx-swap="innerHTML"
@@ -67,6 +90,7 @@
               {% endif %}
             </div>
           </td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>

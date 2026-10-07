@@ -305,3 +305,13 @@ pub(super) async fn current_user(
         .await?
         .ok_or_else(|| AppError::Internal("session user no longer exists".into()))
 }
+
+/// Whether the session carries an unexpired re-auth window (set by
+/// `/reauth`, needed by the sensitive reveal/edit actions).
+pub(super) fn reauth_valid_here(session: &Session) -> bool {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    match session.get::<i64>(crate::auth::reauth::REAUTH_UNTIL) {
+        Ok(Some(until)) => crate::auth::reauth::reauth_valid(now, until),
+        _ => false,
+    }
+}

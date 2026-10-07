@@ -45,6 +45,7 @@ struct DomainsPartial<'a> {
     rows: Vec<DomainRow>,
     current_list: String,
     updated: String,
+    can_manage: bool,
 }
 
 fn partial_url(name: &str) -> String {
@@ -78,7 +79,7 @@ pub async fn partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name);
     let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -113,6 +114,7 @@ pub async fn partial(
         rows,
         current_list,
         updated: format_age(snapshot.age()),
+        can_manage: user.role.can_manage_apps(),
     })
 }
 

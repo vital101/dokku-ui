@@ -10,6 +10,9 @@
   if (!panel) return;
 
   var app = panel.getAttribute("data-app");
+  // Service panels set an explicit stream URL; app panels build source-aware
+  // URLs from the data-app attribute.
+  var streamBase = panel.getAttribute("data-stream-base");
   var log = panel.querySelector("[data-live-log]");
   var toggle = panel.querySelector("[data-log-toggle]");
   var processInput = panel.querySelector("[data-log-process]");
@@ -21,6 +24,9 @@
   }
 
   function streamUrl() {
+    if (streamBase) {
+      return streamBase + "?tail=1";
+    }
     var url =
       "/apps/" + app + "/logs/stream?source=" + currentSource + "&tail=1";
     var process = processFilter();

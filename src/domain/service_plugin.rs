@@ -7,7 +7,7 @@ use std::str::FromStr;
 /// is built. The sidebar renders only the plugins the host actually has
 /// installed (via the capabilities probe), so this list can name the wider
 /// official catalog.
-pub const SERVICE_PLUGINS: [&str; 8] = [
+pub const SERVICE_PLUGINS: [&str; 12] = [
     "postgres",
     "mysql",
     "redis",
@@ -16,6 +16,10 @@ pub const SERVICE_PLUGINS: [&str; 8] = [
     "memcached",
     "rabbitmq",
     "clickhouse",
+    "couchdb",
+    "elasticsearch",
+    "nats",
+    "solr",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -41,6 +45,10 @@ impl ServicePlugin {
             "memcached" => "Memcached",
             "rabbitmq" => "RabbitMQ",
             "clickhouse" => "ClickHouse",
+            "couchdb" => "CouchDB",
+            "elasticsearch" => "Elasticsearch",
+            "nats" => "NATS",
+            "solr" => "Apache Solr",
             _ => self.0,
         }
     }
@@ -49,16 +57,20 @@ impl ServicePlugin {
     /// Used by the stats script's `du`/`df` calls; verified against the
     /// installed plugin generations' `/proc/mounts` output (the added plugins
     /// follow their official images' data directories; memcached keeps no
-    /// persistent volume, so usage measures the container root).
+    /// persistent volume, so usage measures the container root — nats is the
+    /// same, holding nothing across a restart).
     pub fn data_dir(&self) -> &'static str {
         match self.0 {
             "postgres" => "/var/lib/postgresql/data",
             "mysql" | "mariadb" => "/var/lib/mysql",
             "redis" => "/data",
             "mongo" => "/data/db",
-            "memcached" => "/",
+            "memcached" | "nats" => "/",
             "rabbitmq" => "/var/lib/rabbitmq",
             "clickhouse" => "/var/lib/clickhouse",
+            "couchdb" => "/opt/couchdb/data",
+            "elasticsearch" => "/usr/share/elasticsearch/data",
+            "solr" => "/var/solr",
             _ => "/data",
         }
     }
@@ -119,6 +131,10 @@ mod tests {
             ("memcached", "Memcached"),
             ("rabbitmq", "RabbitMQ"),
             ("clickhouse", "ClickHouse"),
+            ("couchdb", "CouchDB"),
+            ("elasticsearch", "Elasticsearch"),
+            ("nats", "NATS"),
+            ("solr", "Apache Solr"),
         ] {
             let plugin = ServicePlugin::try_from(raw).expect("supported");
             assert_eq!(plugin.as_str(), raw);
@@ -150,6 +166,10 @@ mod tests {
                 "memcached",
                 "rabbitmq",
                 "clickhouse",
+                "couchdb",
+                "elasticsearch",
+                "nats",
+                "solr",
             ]
         );
     }
@@ -165,6 +185,10 @@ mod tests {
             ("memcached", "/"),
             ("rabbitmq", "/var/lib/rabbitmq"),
             ("clickhouse", "/var/lib/clickhouse"),
+            ("couchdb", "/opt/couchdb/data"),
+            ("elasticsearch", "/usr/share/elasticsearch/data"),
+            ("nats", "/"),
+            ("solr", "/var/solr"),
         ] {
             assert_eq!(
                 ServicePlugin::try_from(raw).expect("supported").data_dir(),

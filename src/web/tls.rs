@@ -43,6 +43,7 @@ struct TlsPartial<'a> {
     entry: Option<LetsencryptEntry>,
     ssl: Option<SslReport>,
     updated: String,
+    can_manage: bool,
 }
 
 fn partial_url(name: &str) -> String {
@@ -85,7 +86,7 @@ pub async fn partial(
     path: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     let name = path.into_inner();
-    current_user(&state, &session).await?;
+    let user = current_user(&state, &session).await?;
 
     let retry_url = partial_url(&name);
     let (snapshot, app) = match state.snapshot.resolve_app(&name).await {
@@ -145,6 +146,7 @@ pub async fn partial(
         entry,
         ssl,
         updated: format_age(snapshot.age()),
+        can_manage: user.role.can_manage_apps(),
     })
 }
 

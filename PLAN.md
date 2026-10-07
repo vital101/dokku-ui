@@ -638,6 +638,58 @@ Until then the Deploy tab exposes the SSH push URL, which needs no host changes.
   which dokku's SSH `xargs` re-split cannot carry; `staging` requires an
   explicit `true`/`false` because plugin 0.20.4 has no clear form), an audited
   run from the TLS tab, and re-validation at job rehydration.
-- **Not in this increment**: SSH-key management, teams, plugin management,
-  REST JSON:API/JWT/Swagger, multi-server, reverse-proxy auth, git HTTP,
-  DSN reveal.
+- **Not in this increment**: teams, plugin management, REST
+  JSON:API/JWT/Swagger, multi-server, git HTTP (all landed later or tracked in
+  `GAPS.md`; SSH keys, reverse-proxy auth, and DSN reveal landed in §23).
+
+## 23. P4 increment (implemented)
+
+Closes the remaining SSH-only gaps and the two open policy decisions
+(`GAPS.md` "P4 status"):
+
+- **Ports/proxy** (`src/web/ports.rs`, `src/domain/port.rs`): `ports:report/
+  add/set/remove/clear` + read-only `proxy:report`, source-verified against
+  dokku `v0.38.4` (`plugins/ports/{subcommands,report,functions}.go`,
+  `plugins/proxy/report.go`); mappings are single-line, quote-free tokens
+  (bare port or `scheme:host:container`), capped at 20, and re-validated at
+  job rehydration. The UI's Ports tab renders configured vs detected mappings
+  and the proxy status card.
+- **Scheduler selection** (Build tab): `scheduler:report/set <app> selected`;
+  0.38.4 has no per-scheduler property namespaces, so per-app scheduler
+  *properties* remain a version divergence. `k3s`/`null` are offered only when
+  `plugin:list` reports the matching scheduler plugin.
+- **App-wide cron**: 0.38.4's `cron:suspend`/`resume` require a task id; the
+  "all" buttons build a multi-command job from a live `cron:list`.
+- **http-auth allowed IPs**: `add-allowed-ip`/`remove-allowed-ip`/
+  `set-allowed-ips` (blank clears); `is_valid_allowed_ip` mirrors nginx
+  `allow` (IPv4/IPv6 CIDR, `all`, `unix:`), quote/whitespace-free.
+- **Service live logs**: `/services/{plugin}/{svc}/logs/stream` SSE reuses the
+  app-stream plumbing; the plugin generation takes the follow flag as `$2`
+  (`--tail`) and the count as `$3`.
+- **Datastore coverage 8 → 12**: couchdb/elasticsearch/nats/solr complete the
+  dokku-org set; nats keeps no persistent volume (like memcached) so stats
+  measure the container root.
+- **Viewer UI hiding**: `can_manage` is threaded through every mutation-bearing
+  page/partial (and the palette); the middleware 403 stays authoritative.
+- **Destroy precondition** (`src/dokku/workers.rs::precondition`): the links
+  check repeats at execution time and fails closed.
+- **Deploy history**: the Deploy tab lists recent `git.*` runs from
+  `action_runs`.
+- **SSH keys + stdin capability**: `DokkuClient::exec_with_stdin` writes the
+  payload to the SSH channel and sends EOF (`RusshClient`); the `MockClient`
+  records `(command, stdin)` pairs. The admin `/keys` screen runs
+  `ssh-keys:list/add/remove`; add/remove are audited as `ssh-key.*` with no
+  lines, and key material never travels in argv.
+- **Reverse-proxy header auth** (`src/auth/proxy.rs`, middleware): env-only
+  `TRUSTED_PROXY_CIDRS` (empty disables), `PROXY_AUTH_HEADER` (default
+  `x-forwarded-user`), `PROXY_AUTH_DEFAULT_ROLE` (default `viewer`). The
+  header is honored only when `req.peer_addr()` is inside a trusted CIDR;
+  users auto-register with the non-verifiable `!proxy-auth` hash and the
+  session is renewed before binding.
+- **DSN reveal** (locked decision 4 reversed): `ServiceInfo.dsn` is parsed,
+  masked by default via `domain::redact`, and unmasked only through the
+  re-auth-gated `POST /services/{plugin}/{svc}/dsn/reveal` (`no-store`, audit
+  run `service.dsn.reveal`).
+- **Not in this increment**: companion-helper work (plugin management,
+  teams/scoped grants, git HTTP), REST JSON:API/JWT/Swagger, multi-server,
+  manual certificate upload.

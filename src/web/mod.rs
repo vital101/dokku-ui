@@ -11,10 +11,12 @@ mod favicon;
 mod flash;
 mod fragments;
 mod instance_settings;
+mod keys;
 mod logs;
 mod pages;
 mod palette;
 mod password_reset;
+mod ports;
 mod reauth;
 mod render;
 mod runs;
@@ -132,6 +134,12 @@ pub fn build_app(
         .route("/users/{id}/delete", web::post().to(users::delete))
         .route("/users/{id}/reset", web::post().to(users::reset_link))
         .service(
+            web::resource("/keys")
+                .route(web::get().to(keys::index))
+                .route(web::post().to(keys::add)),
+        )
+        .route("/keys/remove", web::post().to(keys::remove))
+        .service(
             web::resource("/reset/{token}")
                 .route(web::get().to(password_reset::form))
                 .route(web::post().to(password_reset::submit)),
@@ -185,6 +193,18 @@ pub fn build_app(
             "/apps/{name}/http-auth/remove-user",
             web::post().to(apps::http_auth_remove_user),
         )
+        .route(
+            "/apps/{name}/http-auth/add-allowed-ip",
+            web::post().to(apps::http_auth_add_allowed_ip),
+        )
+        .route(
+            "/apps/{name}/http-auth/remove-allowed-ip",
+            web::post().to(apps::http_auth_remove_allowed_ip),
+        )
+        .route(
+            "/apps/{name}/http-auth/set-allowed-ips",
+            web::post().to(apps::http_auth_set_allowed_ips),
+        )
         .route("/apps/{name}/build", web::get().to(build::page))
         .route("/apps/{name}/partials/build", web::get().to(build::partial))
         .route(
@@ -206,6 +226,10 @@ pub fn build_app(
         .route(
             "/apps/{name}/build/builder",
             web::post().to(build::builder_set),
+        )
+        .route(
+            "/apps/{name}/build/scheduler",
+            web::post().to(build::scheduler_set),
         )
         .route("/apps/{name}/deploy", web::get().to(deploy::page))
         .route(
@@ -259,6 +283,14 @@ pub fn build_app(
         .route("/apps/{name}/cron/run", web::post().to(cron::run))
         .route("/apps/{name}/cron/suspend", web::post().to(cron::suspend))
         .route("/apps/{name}/cron/resume", web::post().to(cron::resume))
+        .route(
+            "/apps/{name}/cron/suspend-all",
+            web::post().to(cron::suspend_all),
+        )
+        .route(
+            "/apps/{name}/cron/resume-all",
+            web::post().to(cron::resume_all),
+        )
         .route("/apps/{name}/domains", web::get().to(domains::page))
         .route(
             "/apps/{name}/partials/domains",
@@ -270,6 +302,12 @@ pub fn build_app(
             web::post().to(domains::remove),
         )
         .route("/apps/{name}/domains/set", web::post().to(domains::set))
+        .route("/apps/{name}/ports", web::get().to(ports::page))
+        .route("/apps/{name}/partials/ports", web::get().to(ports::partial))
+        .route("/apps/{name}/ports/add", web::post().to(ports::add))
+        .route("/apps/{name}/ports/set", web::post().to(ports::set))
+        .route("/apps/{name}/ports/remove", web::post().to(ports::remove))
+        .route("/apps/{name}/ports/clear", web::post().to(ports::clear))
         .route("/apps/{name}/settings", web::get().to(apps::settings))
         .route(
             "/apps/{name}/partials/settings",
@@ -351,6 +389,10 @@ pub fn build_app(
             web::get().to(services::logs_page),
         )
         .route(
+            "/services/{plugin}/{service}/logs/stream",
+            web::get().to(services::log_stream),
+        )
+        .route(
             "/services/{plugin}/{service}/activity",
             web::get().to(activity::service_activity),
         )
@@ -361,6 +403,10 @@ pub fn build_app(
         .route(
             "/services/{plugin}/{service}/partials/overview",
             web::get().to(services::overview_partial),
+        )
+        .route(
+            "/services/{plugin}/{service}/dsn/reveal",
+            web::post().to(services::dsn_reveal),
         )
         .route(
             "/services/{plugin}/{service}/partials/links",

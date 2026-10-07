@@ -1,0 +1,5 @@
+=====> alpha proxy information
+       Proxy computed type:           nginx
+       Proxy enabled:                 true
+       Proxy global type:             nginx
+       Proxy type:                    
