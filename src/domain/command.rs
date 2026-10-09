@@ -30,6 +30,30 @@ fn service_stats_script(data_dir: &str) -> String {
     SERVICE_STATS_SCRIPT.replace("__DATA_DIR__", data_dir)
 }
 
+/// Appends the option flags shared by `create`/`upgrade`/`clone` on the
+/// installed service-plugin generation: `--image`, `--image-version`,
+/// `--custom-env`, `--config-options`. The flags follow every positional name
+/// (`<plugin>:clone <svc> <new> --flag value`); source-verified against
+/// dokku-postgres 1.36.4 and dokku-redis 1.42.1.
+fn push_service_create_options(argv: &mut Vec<String>, options: &ServiceCreateOptions) {
+    if let Some(image) = &options.image {
+        argv.push("--image".into());
+        argv.push(image.clone());
+    }
+    if let Some(version) = &options.image_version {
+        argv.push("--image-version".into());
+        argv.push(version.clone());
+    }
+    if let Some(custom_env) = &options.custom_env {
+        argv.push("--custom-env".into());
+        argv.push(custom_env.clone());
+    }
+    if let Some(config_options) = &options.config_options {
+        argv.push("--config-options".into());
+        argv.push(config_options.clone());
+    }
+}
+
 /// How long a command may run. See [`DokkuCommand::timeout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandTimeout {
@@ -213,6 +237,25 @@ pub enum DokkuCommand {
     ServiceStats {
         plugin: ServicePlugin,
         service: ServiceName,
+    },
+    ServicePromote {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        app: AppName,
+    },
+    ServiceUpgrade {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        options: ServiceCreateOptions,
+        /// `-R|--restart-apps true` (installed generation takes the value,
+        /// source-verified against dokku-postgres 1.36.4 / dokku-redis 1.42.1).
+        restart_apps: bool,
+    },
+    ServiceClone {
+        plugin: ServicePlugin,
+        service: ServiceName,
+        new_service: ServiceName,
+        options: ServiceCreateOptions,
     },
     BuildpacksList {
         app: AppName,
@@ -595,22 +638,7 @@ impl DokkuCommand {
                 // Flags follow the service name: the plugin's `service_create`
                 // parses `"${@:2}"` (dokku-postgres 1.36.4 `functions`).
                 let mut argv = vec![format!("{plugin}:create"), service.as_str().into()];
-                if let Some(image) = &options.image {
-                    argv.push("--image".into());
-                    argv.push(image.clone());
-                }
-                if let Some(version) = &options.image_version {
-                    argv.push("--image-version".into());
-                    argv.push(version.clone());
-                }
-                if let Some(custom_env) = &options.custom_env {
-                    argv.push("--custom-env".into());
-                    argv.push(custom_env.clone());
-                }
-                if let Some(config_options) = &options.config_options {
-                    argv.push("--config-options".into());
-                    argv.push(config_options.clone());
-                }
+                push_service_create_options(&mut argv, options);
                 argv
             }
             DokkuCommand::ServiceDestroy {
@@ -694,6 +722,45 @@ impl DokkuCommand {
                 "-c".into(),
                 service_stats_script(plugin.data_dir()),
             ],
+            DokkuCommand::ServicePromote {
+                plugin,
+                service,
+                app,
+            } => vec![
+                format!("{plugin}:promote"),
+                service.as_str().into(),
+                app.as_str().into(),
+            ],
+            DokkuCommand::ServiceUpgrade {
+                plugin,
+                service,
+                options,
+                restart_apps,
+            } => {
+                let mut argv = vec![format!("{plugin}:upgrade"), service.as_str().into()];
+                push_service_create_options(&mut argv, options);
+                if *restart_apps {
+                    // The installed generation parses `-R` as a value flag
+                    // (`-R|--restart-apps "true"`), not a boolean.
+                    argv.push("--restart-apps".into());
+                    argv.push("true".into());
+                }
+                argv
+            }
+            DokkuCommand::ServiceClone {
+                plugin,
+                service,
+                new_service,
+                options,
+            } => {
+                let mut argv = vec![
+                    format!("{plugin}:clone"),
+                    service.as_str().into(),
+                    new_service.as_str().into(),
+                ];
+                push_service_create_options(&mut argv, options);
+                argv
+            }
             DokkuCommand::BuildpacksList { app } => {
                 vec!["buildpacks:list".into(), app.as_str().into()]
             }
@@ -1017,6 +1084,9 @@ impl DokkuCommand {
             | DokkuCommand::ServiceUnlink { .. }
             | DokkuCommand::ServiceExpose { .. }
             | DokkuCommand::ServiceUnexpose { .. }
+            | DokkuCommand::ServicePromote { .. }
+            | DokkuCommand::ServiceUpgrade { .. }
+            | DokkuCommand::ServiceClone { .. }
             | DokkuCommand::StorageMount { .. }
             | DokkuCommand::StorageUnmount { .. }
             | DokkuCommand::DomainsAdd { .. }
@@ -1087,7 +1157,10 @@ impl DokkuCommand {
             | DokkuCommand::ServiceLogs { plugin, .. }
             | DokkuCommand::ServiceExpose { plugin, .. }
             | DokkuCommand::ServiceUnexpose { plugin, .. }
-            | DokkuCommand::ServiceStats { plugin, .. } => Requirement::Plugin {
+            | DokkuCommand::ServiceStats { plugin, .. }
+            | DokkuCommand::ServicePromote { plugin, .. }
+            | DokkuCommand::ServiceUpgrade { plugin, .. }
+            | DokkuCommand::ServiceClone { plugin, .. } => Requirement::Plugin {
                 name: plugin.as_str().to_owned(),
             },
             DokkuCommand::MaintenanceEnable { .. } | DokkuCommand::MaintenanceDisable { .. } => {
@@ -1741,6 +1814,23 @@ mod tests {
                 plugin: plugin("postgres"),
                 service: service("db"),
             },
+            DokkuCommand::ServicePromote {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                app: app("myapp"),
+            },
+            DokkuCommand::ServiceUpgrade {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                options: ServiceCreateOptions::default(),
+                restart_apps: true,
+            },
+            DokkuCommand::ServiceClone {
+                plugin: plugin("postgres"),
+                service: service("db"),
+                new_service: service("db-copy"),
+                options: ServiceCreateOptions::default(),
+            },
             DokkuCommand::StorageMount {
                 app: app("myapp"),
                 mount: MountSpec::try_from("/host:/data").expect("mount"),
@@ -2151,6 +2241,78 @@ mod tests {
     }
 
     #[test]
+    fn service_promote_argv() {
+        assert_eq!(
+            DokkuCommand::ServicePromote {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                app: app("myapp"),
+            }
+            .argv(),
+            vec!["redis:promote", "cache", "myapp"]
+        );
+    }
+
+    #[test]
+    fn service_upgrade_argv_carries_options_and_restart_apps() {
+        let options = ServiceCreateOptions::parse(None, Some("7.4"), Some("A=b"), None)
+            .expect("valid options");
+        assert_eq!(
+            DokkuCommand::ServiceUpgrade {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                options,
+                restart_apps: true,
+            }
+            .argv(),
+            vec![
+                "redis:upgrade",
+                "cache",
+                "--image-version",
+                "7.4",
+                "--custom-env",
+                "A=b",
+                "--restart-apps",
+                "true",
+            ]
+        );
+        assert_eq!(
+            DokkuCommand::ServiceUpgrade {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                options: ServiceCreateOptions::default(),
+                restart_apps: false,
+            }
+            .argv(),
+            vec!["redis:upgrade", "cache"]
+        );
+    }
+
+    #[test]
+    fn service_clone_argv_carries_the_target_name_and_options() {
+        let options =
+            ServiceCreateOptions::parse(Some("redis"), Some("7.4"), None, None).expect("valid");
+        assert_eq!(
+            DokkuCommand::ServiceClone {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                new_service: service("cache-copy"),
+                options,
+            }
+            .argv(),
+            vec![
+                "redis:clone",
+                "cache",
+                "cache-copy",
+                "--image",
+                "redis",
+                "--image-version",
+                "7.4",
+            ]
+        );
+    }
+
+    #[test]
     fn storage_report_argv() {
         assert_eq!(DokkuCommand::StorageReport.argv(), vec!["storage:report"]);
     }
@@ -2356,6 +2518,33 @@ mod tests {
                 name: "redis".into()
             }
         );
+        for command in [
+            DokkuCommand::ServicePromote {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                app: app("myapp"),
+            },
+            DokkuCommand::ServiceUpgrade {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                options: ServiceCreateOptions::default(),
+                restart_apps: false,
+            },
+            DokkuCommand::ServiceClone {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                new_service: service("cache-copy"),
+                options: ServiceCreateOptions::default(),
+            },
+        ] {
+            assert_eq!(
+                command.requirement(),
+                Requirement::Plugin {
+                    name: "redis".into()
+                },
+                "{command:?}"
+            );
+        }
     }
 
     #[test]

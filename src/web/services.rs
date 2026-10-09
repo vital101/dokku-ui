@@ -1395,3 +1395,314 @@ pub async fn unlink(
     );
     Ok(see_other(&links_url))
 }
+
+/// Promotes the service to the app's primary URL variable (`<plugin>:promote`),
+/// restarting the app. Mirrors the link/unlink plumbing.
+pub async fn promote(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<LinkForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+
+    let app = match AppName::try_from(form.0.app.trim()) {
+        Ok(app) => app,
+        Err(err) => {
+            let message = format!("Invalid app name: {err}");
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&format!("/services/{plugin}/{service}/links")));
+        }
+    };
+    let links_url = format!("/services/{plugin}/{service}/links");
+    let success_message = format!("Promoted '{service}' for '{app}'.");
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.promote".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Promoting {service} for {app}…"),
+                plan: vec![JobSpec::ServicePromote {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                    app: app.as_str().to_owned(),
+                }],
+                completion: RunCompletion {
+                    success_message,
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                redactions: Vec::new(),
+                refresh_url: Some(format!("/services/{plugin}/{service}/partials/links")),
+            },
+        )
+        .await;
+    }
+
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.promote",
+        TargetKind::Service,
+        &[JobSpec::ServicePromote {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+            app: app.as_str().to_owned(),
+        }],
+        &RunCompletion {
+            success_message,
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+        &[],
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: promote {service} for {app}."),
+    );
+    Ok(see_other(&links_url))
+}
+
+#[derive(Deserialize)]
+pub struct UpgradeForm {
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    image_version: Option<String>,
+    #[serde(default)]
+    custom_env: Option<String>,
+    #[serde(default)]
+    config_options: Option<String>,
+    /// The form checkbox is present only when checked; any submitted value
+    /// restarts the linked apps around the upgrade.
+    #[serde(default)]
+    restart_apps: Option<String>,
+}
+
+/// Upgrades the service to a new image version (`<plugin>:upgrade`). An empty
+/// form is meaningful: the plugin moves the service to the latest release of
+/// its current major version.
+pub async fn upgrade(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<UpgradeForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    let form = form.0;
+
+    let fail = |message: String| {
+        if is_htmx(&req) {
+            modal_error(message)
+        } else {
+            set_flash(&session, FlashLevel::Error, message);
+            Ok(see_other(&detail_url(plugin, &service)))
+        }
+    };
+
+    let options = match ServiceCreateOptions::parse(
+        form.image.as_deref(),
+        form.image_version.as_deref(),
+        form.custom_env.as_deref(),
+        form.config_options.as_deref(),
+    ) {
+        Ok(options) => options,
+        Err(err) => return fail(err.to_string()),
+    };
+    let restart_apps = form.restart_apps.is_some();
+    let redactions = options.redaction_fragments();
+    let success_message = format!("Service '{service}' upgraded.");
+    let refresh_url = format!("/services/{plugin}/{service}/partials/overview");
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.upgrade".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Upgrading {service}…"),
+                plan: vec![JobSpec::ServiceUpgrade {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                    options,
+                    restart_apps,
+                }],
+                completion: RunCompletion {
+                    success_message,
+                    redirect: None,
+                    refresh: RunRefresh::None,
+                },
+                redactions,
+                refresh_url: Some(refresh_url),
+            },
+        )
+        .await;
+    }
+
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.upgrade",
+        TargetKind::Service,
+        &[JobSpec::ServiceUpgrade {
+            plugin: plugin.as_str().to_owned(),
+            service: service.as_str().to_owned(),
+            options,
+            restart_apps,
+        }],
+        &RunCompletion {
+            success_message,
+            redirect: None,
+            refresh: RunRefresh::None,
+        },
+        &redactions,
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: upgrade {service}."),
+    );
+    Ok(see_other(&detail_url(plugin, &service)))
+}
+
+#[derive(Deserialize)]
+pub struct CloneForm {
+    name: String,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    image_version: Option<String>,
+    #[serde(default)]
+    custom_env: Option<String>,
+    #[serde(default)]
+    config_options: Option<String>,
+}
+
+/// Clones the service into a new one (`<plugin>:clone`), copying its data.
+/// Succeeds by redirecting to the new service's page.
+pub async fn clone(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<CloneForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    let form = form.0;
+    let name = form.name.trim().to_owned();
+
+    let fail = |message: String| {
+        if is_htmx(&req) {
+            modal_error(message)
+        } else {
+            set_flash(&session, FlashLevel::Error, message);
+            Ok(see_other(&detail_url(plugin, &service)))
+        }
+    };
+
+    let new_service = match ServiceName::try_from(name.as_str()) {
+        Ok(new_service) => new_service,
+        Err(err) => return fail(format!("Invalid service name: {err}")),
+    };
+    if new_service == service {
+        return fail("Choose a name that differs from the source service.".to_owned());
+    }
+
+    let options = match ServiceCreateOptions::parse(
+        form.image.as_deref(),
+        form.image_version.as_deref(),
+        form.custom_env.as_deref(),
+        form.config_options.as_deref(),
+    ) {
+        Ok(options) => options,
+        Err(err) => return fail(err.to_string()),
+    };
+    let redactions = options.redaction_fragments();
+    let redirect_to = detail_url(plugin, &new_service);
+    let success_message = format!("Service '{service}' cloned to '{new_service}'.");
+
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.clone".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Cloning {service} to {new_service}…"),
+                plan: vec![JobSpec::ServiceClone {
+                    plugin: plugin.as_str().to_owned(),
+                    service: service.as_str().to_owned(),
+                    new_service: new_service.as_str().to_owned(),
+                    options,
+                }],
+                completion: RunCompletion {
+                    success_message,
+                    redirect: Some(redirect_to.clone()),
+                    refresh: RunRefresh::None,
+                },
+                redactions,
+                refresh_url: None,
+            },
+        )
+        .await;
+    }
+
+    let source_detail = detail_url(plugin, &service);
+    // Attributed to the source service on both paths; the subject is copied
+    // out before `service` moves into the command.
+    let source_subject = service.as_str().to_owned();
+    let command = DokkuCommand::ServiceClone {
+        plugin,
+        service,
+        new_service,
+        options,
+    };
+    match run_synchronously(
+        &state,
+        &session,
+        &source_subject,
+        "service.clone",
+        TargetKind::Service,
+        command,
+        &success_message,
+        &redactions,
+    )
+    .await
+    {
+        Ok(_) => {
+            set_flash(&session, FlashLevel::Success, success_message);
+            Ok(see_other(&redirect_to))
+        }
+        Err(err) => {
+            set_flash(
+                &session,
+                FlashLevel::Error,
+                format!("Failed to clone service: {err}"),
+            );
+            Ok(see_other(&source_detail))
+        }
+    }
+}

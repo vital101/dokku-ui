@@ -9,20 +9,35 @@
       <li class="flex items-center justify-between py-2">
         <a href="/apps/{{ app }}" class="font-mono text-sm text-white hover:underline">{{ app }}</a>
         {% if can_manage %}
-        <form method="post" action="/services/{{ plugin }}/{{ service }}/unlink"
-              hx-post="/services/{{ plugin }}/{{ service }}/unlink" hx-target="#modal-content" hx-swap="innerHTML"
-              data-action-form>
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="app" value="{{ app }}">
-          <button type="submit"
-                  class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
-            <span class="app-action-label">Unlink</span>
-          </button>
-        </form>
+        <div class="flex items-center gap-2">
+          <form method="post" action="/services/{{ plugin }}/{{ service }}/promote"
+                hx-post="/services/{{ plugin }}/{{ service }}/promote" hx-target="#modal-content" hx-swap="innerHTML"
+                data-action-form>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="app" value="{{ app }}">
+            <button type="submit" title="Make this service the app's primary URL"
+                    class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-700">
+              <span class="app-action-label">Promote</span>
+            </button>
+          </form>
+          <form method="post" action="/services/{{ plugin }}/{{ service }}/unlink"
+                hx-post="/services/{{ plugin }}/{{ service }}/unlink" hx-target="#modal-content" hx-swap="innerHTML"
+                data-action-form>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="app" value="{{ app }}">
+            <button type="submit"
+                    class="app-action rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+              <span class="app-action-label">Unlink</span>
+            </button>
+          </form>
+        </div>
         {% endif %}
       </li>
       {% endfor %}
     </ul>
+    <p class="mt-2 text-xs text-slate-500">
+      Promote makes this service the app's primary URL variable and restarts the app.
+    </p>
     {% endif %}
   </div>
 

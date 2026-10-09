@@ -329,6 +329,14 @@ async fn service_overview_partial_renders_details_and_expose_form() {
         !body.contains("XXXXXX"),
         "the stored password never renders: {body}"
     );
+    assert!(
+        body.contains(r#"hx-post="/services/redis/candid/upgrade""#),
+        "upgrade card renders: {body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/services/redis/candid/clone""#),
+        "clone card renders: {body}"
+    );
 }
 
 #[tokio::test]
@@ -393,6 +401,7 @@ async fn service_links_partial_lists_links_and_available_apps() {
     );
     assert!(body.contains(r#"href="/apps/alpha""#));
     assert!(body.contains(r#"hx-post="/services/redis/candid/unlink""#));
+    assert!(body.contains(r#"hx-post="/services/redis/candid/promote""#));
     assert!(body.contains(r#"<option value="beta">beta</option>"#));
     assert!(
         !body.contains(r#"<option value="alpha">alpha</option>"#),
@@ -865,6 +874,174 @@ async fn hx_service_link_validates_app_and_streams() {
 }
 
 #[tokio::test]
+async fn hx_service_promote_validates_app_and_streams() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServicePromote {
+            plugin: redis(),
+            service: candid(),
+            app: dokku_ui::domain::AppName::try_from("alpha").expect("app"),
+        },
+        Ok(DokkuOutput::ok("-----> promoted\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/promote",
+            format!("csrf_token={csrf}&app=Bad_App"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/promote",
+            format!("csrf_token={csrf}&app=alpha"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Promoting candid for alpha"), "{body}");
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+
+    assert!(client.calls().contains(&DokkuCommand::ServicePromote {
+        plugin: redis(),
+        service: candid(),
+        app: dokku_ui::domain::AppName::try_from("alpha").expect("app"),
+    }));
+}
+
+#[tokio::test]
+async fn hx_service_upgrade_validates_options_and_streams() {
+    let options = ServiceCreateOptions::parse(None, Some("7.4"), None, None).expect("options");
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceUpgrade {
+            plugin: redis(),
+            service: candid(),
+            options,
+            restart_apps: true,
+        },
+        Ok(DokkuOutput::ok("-----> upgraded\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/upgrade",
+            format!("csrf_token={csrf}&config_options=bad%27quote"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::ServiceUpgrade { .. })),
+        "no upgrade command for invalid options"
+    );
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/upgrade",
+            format!("csrf_token={csrf}&image_version=7.4&restart_apps=true"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Upgrading candid"), "{body}");
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+
+    assert!(client.calls().contains(&DokkuCommand::ServiceUpgrade {
+        plugin: redis(),
+        service: candid(),
+        options: ServiceCreateOptions::parse(None, Some("7.4"), None, None).expect("options"),
+        restart_apps: true,
+    }));
+}
+
+#[tokio::test]
+async fn hx_service_clone_validates_name_and_streams() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceClone {
+            plugin: redis(),
+            service: candid(),
+            new_service: ServiceName::try_from("candid-copy").expect("name"),
+            options: ServiceCreateOptions::default(),
+        },
+        Ok(DokkuOutput::ok("-----> cloned\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    for name in ["Bad Name", "candid"] {
+        let resp = test::call_service(
+            &app,
+            hx_form_request(
+                "/services/redis/candid/clone",
+                format!("csrf_token={csrf}&name={}", name.replace(' ', "+")),
+            )
+            .cookie(cookie.clone())
+            .to_request(),
+        )
+        .await;
+        let body = get_body(resp).await;
+        assert!(body.contains("data-modal-error"), "{name}: {body}");
+    }
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/clone",
+            format!("csrf_token={csrf}&name=candid-copy"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Cloning candid to candid-copy"), "{body}");
+    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
+    assert!(events.contains(r#""ok":true"#), "{events}");
+    assert!(
+        events.contains(r#""redirect":"/services/redis/candid-copy""#),
+        "{events}"
+    );
+
+    assert!(client.calls().contains(&DokkuCommand::ServiceClone {
+        plugin: redis(),
+        service: candid(),
+        new_service: ServiceName::try_from("candid-copy").expect("name"),
+        options: ServiceCreateOptions::default(),
+    }));
+}
+
+#[tokio::test]
 async fn service_new_form_renders_create_form() {
     let (state, _client, _dir) = test_state_with_shared_client(service_list_stub()).await;
     let app = test::init_service(build_app(state)).await;
@@ -1025,6 +1202,78 @@ async fn create_service_non_htmx_flashes_and_redirects() {
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("Service &#39;cache&#39; created."), "{body}");
+}
+
+#[tokio::test]
+async fn clone_service_non_htmx_flashes_and_redirects() {
+    let client = service_list_stub().stub(
+        DokkuCommand::ServiceClone {
+            plugin: redis(),
+            service: candid(),
+            new_service: ServiceName::try_from("candid-copy").expect("service"),
+            options: ServiceCreateOptions::default(),
+        },
+        Ok(DokkuOutput::ok("")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    // A same-name target flashes and redirects back without calling dokku.
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/clone",
+            format!("csrf_token={csrf}&name=candid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/services/redis/candid");
+    assert!(
+        client
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, DokkuCommand::ServiceClone { .. })),
+        "no clone command for a same-name target"
+    );
+
+    // A valid clone runs synchronously and redirects to the new service.
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/clone",
+            format!("csrf_token={csrf}&name=candid-copy"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/services/redis/candid-copy");
+    assert!(client.calls().contains(&DokkuCommand::ServiceClone {
+        plugin: redis(),
+        service: candid(),
+        new_service: ServiceName::try_from("candid-copy").expect("service"),
+        options: ServiceCreateOptions::default(),
+    }));
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Service &#39;candid&#39; cloned to &#39;candid-copy&#39;."),
+        "{body}"
+    );
 }
 
 #[tokio::test]

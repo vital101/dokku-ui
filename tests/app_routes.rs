@@ -240,6 +240,9 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         ("/services/postgres/cache/unexpose", ""),
         ("/services/postgres/cache/link", "app=alpha"),
         ("/services/postgres/cache/unlink", "app=alpha"),
+        ("/services/postgres/cache/promote", "app=alpha"),
+        ("/services/postgres/cache/upgrade", "image_version=16"),
+        ("/services/postgres/cache/clone", "name=cache-copy"),
         ("/volumes/mount", "app=alpha&host=/h&container=/c"),
         ("/volumes/unmount", "app=alpha&spec=/h:/c"),
     ] {
@@ -848,6 +851,9 @@ async fn app_posts_without_valid_csrf_are_rejected() {
         ("/services/postgres/cache/unexpose", ""),
         ("/services/postgres/cache/link", "app=alpha"),
         ("/services/postgres/cache/unlink", "app=alpha"),
+        ("/services/postgres/cache/promote", "app=alpha"),
+        ("/services/postgres/cache/upgrade", "image_version=16"),
+        ("/services/postgres/cache/clone", "name=cache-copy"),
         ("/volumes/mount", "app=alpha&host=/h&container=/c"),
         ("/volumes/unmount", "app=alpha&spec=/h:/c"),
     ] {

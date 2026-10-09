@@ -202,6 +202,26 @@ pub enum JobSpec {
         service: String,
         app: String,
     },
+    ServicePromote {
+        plugin: String,
+        service: String,
+        app: String,
+    },
+    ServiceUpgrade {
+        plugin: String,
+        service: String,
+        #[serde(default)]
+        options: ServiceCreateOptions,
+        #[serde(default)]
+        restart_apps: bool,
+    },
+    ServiceClone {
+        plugin: String,
+        service: String,
+        new_service: String,
+        #[serde(default)]
+        options: ServiceCreateOptions,
+    },
     ConfigSet {
         app: String,
         vars: Vec<EnvVar>,
@@ -636,6 +656,60 @@ impl JobSpec {
                     plugin,
                     service,
                     app,
+                }])
+            }
+            JobSpec::ServicePromote {
+                plugin,
+                service,
+                app,
+            } => {
+                let (plugin, service) = parse_service(plugin, service)?;
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::ServicePromote {
+                    plugin,
+                    service,
+                    app,
+                }])
+            }
+            JobSpec::ServiceUpgrade {
+                plugin,
+                service,
+                options,
+                restart_apps,
+            } => {
+                let (plugin, service) = parse_service(plugin, service)?;
+                options
+                    .validate()
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                Ok(vec![DokkuCommand::ServiceUpgrade {
+                    plugin,
+                    service,
+                    options: options.clone(),
+                    restart_apps: *restart_apps,
+                }])
+            }
+            JobSpec::ServiceClone {
+                plugin,
+                service,
+                new_service,
+                options,
+            } => {
+                let (plugin, service) = parse_service(plugin, service)?;
+                let new_service = ServiceName::try_from(new_service.as_str())
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                if new_service == service {
+                    return Err(JobSpecError::Invalid(
+                        "clone target must differ from the source service".to_owned(),
+                    ));
+                }
+                options
+                    .validate()
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                Ok(vec![DokkuCommand::ServiceClone {
+                    plugin,
+                    service,
+                    new_service,
+                    options: options.clone(),
                 }])
             }
             JobSpec::ConfigSet { app, vars } => {
@@ -1086,6 +1160,109 @@ mod tests {
         assert!(
             tampered.to_commands().is_err(),
             "tampered options must not reach the host"
+        );
+    }
+
+    #[test]
+    fn service_promote_upgrade_clone_rehydrate_and_revalidate() {
+        assert_eq!(
+            JobSpec::ServicePromote {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                app: "alpha".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::ServicePromote {
+                plugin: crate::domain::ServicePlugin::try_from("redis").expect("redis"),
+                service: crate::domain::ServiceName::try_from("candid").expect("candid"),
+                app: app("alpha"),
+            }]
+        );
+        assert!(
+            JobSpec::ServicePromote {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                app: "Bad_App".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid app names are rejected"
+        );
+
+        let commands = JobSpec::ServiceUpgrade {
+            plugin: "redis".into(),
+            service: "candid".into(),
+            options: ServiceCreateOptions {
+                image_version: Some("7.4".into()),
+                ..Default::default()
+            },
+            restart_apps: true,
+        }
+        .to_commands()
+        .expect("commands");
+        let DokkuCommand::ServiceUpgrade {
+            options,
+            restart_apps,
+            ..
+        } = &commands[0]
+        else {
+            panic!("expected service upgrade");
+        };
+        assert_eq!(options.image_version.as_deref(), Some("7.4"));
+        assert!(*restart_apps);
+        assert!(
+            JobSpec::ServiceUpgrade {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                options: ServiceCreateOptions {
+                    config_options: Some("bad'quote".into()),
+                    ..Default::default()
+                },
+                restart_apps: false,
+            }
+            .to_commands()
+            .is_err(),
+            "tampered upgrade options must not reach the host"
+        );
+
+        assert_eq!(
+            JobSpec::ServiceClone {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                new_service: "candid-copy".into(),
+                options: ServiceCreateOptions::default(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::ServiceClone {
+                plugin: crate::domain::ServicePlugin::try_from("redis").expect("redis"),
+                service: crate::domain::ServiceName::try_from("candid").expect("candid"),
+                new_service: crate::domain::ServiceName::try_from("candid-copy").expect("copy"),
+                options: ServiceCreateOptions::default(),
+            }]
+        );
+        assert!(
+            JobSpec::ServiceClone {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                new_service: "candid".into(),
+                options: ServiceCreateOptions::default(),
+            }
+            .to_commands()
+            .is_err(),
+            "same-name clones are rejected"
+        );
+        assert!(
+            JobSpec::ServiceClone {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                new_service: "Bad Name".into(),
+                options: ServiceCreateOptions::default(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid clone names are rejected"
         );
     }
 

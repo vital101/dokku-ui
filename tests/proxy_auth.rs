@@ -106,7 +106,7 @@ async fn trusted_proxy_header_authenticates_and_auto_registers() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = get_body(resp).await;
-    assert!(body.contains("Dashboard"), "{body}");
+    assert!(body.contains("Apps"), "{body}");
 
     let repo = SqliteUsersRepo::new(state.db.clone());
     let user = repo

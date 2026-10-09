@@ -456,6 +456,18 @@ pub fn build_app(
             "/services/{plugin}/{service}/unlink",
             web::post().to(services::unlink),
         )
+        .route(
+            "/services/{plugin}/{service}/promote",
+            web::post().to(services::promote),
+        )
+        .route(
+            "/services/{plugin}/{service}/upgrade",
+            web::post().to(services::upgrade),
+        )
+        .route(
+            "/services/{plugin}/{service}/clone",
+            web::post().to(services::clone),
+        )
         .route("/volumes", web::get().to(volumes::index))
         .route(
             "/volumes/partials/list",

@@ -669,7 +669,7 @@ async fn palette_exposes_admin_entries_to_admins_only() {
     let body = get_body(resp).await;
     assert!(body.contains("/users"), "{body}");
     assert!(body.contains("/settings"), "{body}");
-    assert!(body.contains("Dashboard"), "{body}");
+    assert!(body.contains(r#""label":"Apps""#), "{body}");
 
     let viewer = login(&app, "viewer@example.com", "correct-horse-battery").await;
     let resp = test::call_service(

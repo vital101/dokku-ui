@@ -42,7 +42,7 @@ pub async fn palette(
         .unwrap_or_default();
 
     let mut items = vec![
-        item("Dashboard", "/", "Navigate"),
+        item("Apps", "/", "Navigate"),
         item("Activity", "/activity", "Navigate"),
         item("Volumes", "/volumes", "Navigate"),
         item("Change password", "/password", "Navigate"),
