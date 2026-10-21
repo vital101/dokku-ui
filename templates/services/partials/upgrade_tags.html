@@ -1,0 +1,12 @@
+{% if tags_available %}
+<select id="upgrade-version" name="image_version"
+        class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+  {% for tag in tags %}
+  <option value="{{ tag }}" {% if tag.as_str() == current.as_str() %}selected{% endif %}>{{ tag }}</option>
+  {% endfor %}
+</select>
+{% else %}
+<input id="upgrade-version" type="text" name="image_version" value="{{ current }}"
+       class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+<p class="mt-1 text-xs text-slate-500">Available tags could not be loaded from Docker Hub; enter one directly.</p>
+{% endif %}

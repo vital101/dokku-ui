@@ -5,6 +5,7 @@ pub mod auth;
 pub mod dokku;
 pub mod domain;
 pub mod error;
+pub mod images;
 pub mod settings;
 pub mod storage;
 pub mod web;
@@ -25,6 +26,13 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
         capabilities.clone(),
         std::time::Duration::from_secs(settings.snapshot_refresh_secs),
     );
+    let image_source: Arc<dyn images::ImageTagSource> =
+        Arc::new(images::DockerHubSource::new().map_err(io::Error::other)?);
+    let image_tags = Arc::new(images::ImageTagStore::new(
+        image_source,
+        storage::image_tags::SqliteImageTagCache::new(pool.clone()),
+        settings.image_tags_ttl_secs,
+    ));
     let state = web::AppState {
         action_runs: Arc::new(storage::runs::SqliteRunsRepo::with_policy(
             pool.clone(),
@@ -40,7 +48,11 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
         settings: settings.clone(),
         dokku: client,
         snapshot,
-        webhooks: Arc::new(storage::webhooks::SqliteWebhooksRepo::new(pool)),
+        webhooks: Arc::new(storage::webhooks::SqliteWebhooksRepo::new(pool.clone())),
+        image_tags,
+        service_image_config: Arc::new(
+            storage::service_image_config::SqliteServiceImageConfig::new(pool),
+        ),
     };
     // The durable job workers: they reclaim expired leases and run any queued
     // jobs whose enqueuing process died. Prompt execution still happens in the

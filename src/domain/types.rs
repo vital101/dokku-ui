@@ -249,6 +249,15 @@ pub struct ServiceInfo {
     /// The connection string including credentials; mask before display.
     #[serde(default, skip_serializing)]
     pub dsn: Option<String>,
+    /// Current `--config-options` value (empty when unset).
+    #[serde(default)]
+    pub config_options: String,
+    #[serde(default)]
+    pub initial_network: String,
+    #[serde(default)]
+    pub post_create_network: String,
+    #[serde(default)]
+    pub post_start_network: String,
 }
 
 impl std::fmt::Debug for ServiceInfo {
@@ -263,6 +272,10 @@ impl std::fmt::Debug for ServiceInfo {
             .field("id_short", &self.id_short)
             .field("linked_apps", &self.linked_apps)
             .field("dsn", &self.masked_dsn())
+            .field("config_options", &self.config_options)
+            .field("initial_network", &self.initial_network)
+            .field("post_create_network", &self.post_create_network)
+            .field("post_start_network", &self.post_start_network)
             .finish()
     }
 }
@@ -279,6 +292,10 @@ impl ServiceInfo {
             id_short: String::new(),
             linked_apps: Vec::new(),
             dsn: None,
+            config_options: String::new(),
+            initial_network: String::new(),
+            post_create_network: String::new(),
+            post_start_network: String::new(),
         }
     }
 

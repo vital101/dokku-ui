@@ -806,6 +806,10 @@ pub fn parse_service_info(output: &str, plugin: &str, service: &str) -> Option<S
                 info.linked_apps = value.split_whitespace().map(str::to_owned).collect();
             }
             "dsn" => info.dsn = (!value.is_empty()).then_some(value),
+            "config options" => info.config_options = value,
+            "initial network" => info.initial_network = value,
+            "post create network" => info.post_create_network = value,
+            "post start network" => info.post_start_network = value,
             _ => {}
         }
     }
@@ -1812,6 +1816,16 @@ mod tests {
             !json.contains("secret") && !json.contains("dsn"),
             "serialization omits the DSN: {json}"
         );
+    }
+
+    #[test]
+    fn service_info_parses_config_options_and_networks() {
+        let output = "=====> x redis service information\n       Config options:       --shm-size 1g\n       Initial network:      internal\n       Post create network:  net-a,net-b\n       Post start network:   net-c\n       Status:               running\n";
+        let info = parse_service_info(output, "redis", "x").expect("info");
+        assert_eq!(info.config_options, "--shm-size 1g");
+        assert_eq!(info.initial_network, "internal");
+        assert_eq!(info.post_create_network, "net-a,net-b");
+        assert_eq!(info.post_start_network, "net-c");
     }
 
     #[test]

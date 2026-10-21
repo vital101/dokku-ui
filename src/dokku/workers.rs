@@ -108,6 +108,7 @@ async fn execute_job(state: AppState, job_id: String, owner: String) {
                 message: job.payload.completion.success_message,
                 redirect: job.payload.completion.redirect,
             };
+            record_service_image_config(&state, &job.payload.plan).await;
             refresh_after(&state, &job.run_id, job.payload.completion.refresh).await;
             let _ = state.jobs.complete(&job_id).await;
             let _ = state.action_runs.finish(&job.run_id, &outcome).await;
@@ -175,6 +176,89 @@ async fn refresh_after(state: &AppState, run_id: &str, refresh: CompletionRefres
             }
         }
         CompletionRefresh::None => {}
+    }
+}
+
+/// Records the custom env a successful create/upgrade/clone applied, and clears
+/// it after a successful destroy. The installed plugin generation cannot report
+/// custom env back, and `<plugin>:upgrade` clears it unless resubmitted, so
+/// the bookkeeping must follow the command rather than precede it.
+async fn record_service_image_config(state: &AppState, plan: &[JobSpec]) {
+    for spec in plan {
+        match spec {
+            JobSpec::ServiceCreate {
+                plugin,
+                service,
+                options,
+            } => {
+                put_service_env(
+                    state,
+                    plugin,
+                    service,
+                    options.custom_env.as_deref().unwrap_or(""),
+                )
+                .await;
+            }
+            JobSpec::ServiceUpgrade {
+                plugin,
+                service,
+                options,
+            } => {
+                put_service_env(
+                    state,
+                    plugin,
+                    service,
+                    options.base.custom_env.as_deref().unwrap_or(""),
+                )
+                .await;
+            }
+            JobSpec::ServiceClone {
+                plugin,
+                new_service,
+                options,
+                ..
+            } => {
+                put_service_env(
+                    state,
+                    plugin,
+                    new_service,
+                    options.custom_env.as_deref().unwrap_or(""),
+                )
+                .await;
+            }
+            JobSpec::ServiceDestroy { plugin, service } => {
+                let (Ok(plugin), Ok(service)) = (
+                    ServicePlugin::try_from(plugin.as_str()),
+                    ServiceName::try_from(service.as_str()),
+                ) else {
+                    continue;
+                };
+                if let Err(err) = state
+                    .service_image_config
+                    .delete(plugin.as_str(), service.as_str())
+                    .await
+                {
+                    tracing::warn!(error = %err, "failed to clear stored service custom env");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn put_service_env(state: &AppState, plugin: &str, service: &str, custom_env: &str) {
+    let (Ok(plugin), Ok(service)) = (
+        ServicePlugin::try_from(plugin),
+        ServiceName::try_from(service),
+    ) else {
+        return;
+    };
+    if let Err(err) = state
+        .service_image_config
+        .put(plugin.as_str(), service.as_str(), custom_env)
+        .await
+    {
+        tracing::warn!(error = %err, "failed to record service custom env");
     }
 }
 

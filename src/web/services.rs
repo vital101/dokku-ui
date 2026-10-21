@@ -9,14 +9,17 @@ use crate::dokku::{DokkuError, plugin_services, service_linked_apps, service_log
 use crate::domain::AppName;
 use crate::domain::Support;
 use crate::domain::command::DokkuCommand;
+use crate::domain::git::is_valid_image_ref;
+use crate::domain::image_tag::{docker_hub_repo, select_tags, split_image_ref};
 use crate::domain::job::{JobSpec, ServiceAction as JobServiceAction};
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_service_list};
 use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
+use crate::domain::service_upgrade::ServiceUpgradeOptions;
 use crate::domain::types::ServiceInfo;
 use crate::error::AppError;
-use crate::storage::runs::TargetKind;
+use crate::storage::runs::{NewRun, RunOutcome, TargetKind};
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
@@ -104,6 +107,27 @@ struct OverviewPartial<'a> {
     csrf_token: &'a str,
     info: ServiceInfo,
     can_manage: bool,
+    supports_upgrade: bool,
+    upgrade_image: String,
+    upgrade_tag: String,
+    /// A UI-recorded row exists (distinguishes UI-managed from CLI-created).
+    stored_env_present: bool,
+    /// The stored env is non-empty, so the card masks it behind re-auth.
+    has_stored_env: bool,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/upgrade_tags.html")]
+struct UpgradeTagsPartial {
+    current: String,
+    tags: Vec<String>,
+    tags_available: bool,
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/upgrade_env.html")]
+struct UpgradeEnvPartial {
+    custom_env: String,
 }
 
 #[derive(Template)]
@@ -390,6 +414,10 @@ pub async fn create(
     };
     let redactions = options.redaction_fragments();
     let redirect_to = detail_url(plugin, &service);
+    // The worker records this after a successful job. The synchronous no-JS
+    // path bypasses the worker, so capture what it must record on success.
+    let applied_env = options.custom_env.clone().unwrap_or_default();
+    let service_key = service.as_str().to_owned();
 
     if is_htmx(&req) {
         return start_action_run(
@@ -434,6 +462,13 @@ pub async fn create(
     .await
     {
         Ok(_) => {
+            if let Err(err) = state
+                .service_image_config
+                .put(plugin.as_str(), &service_key, &applied_env)
+                .await
+            {
+                tracing::warn!(error = %err, "failed to record service custom env");
+            }
             set_flash(
                 &session,
                 FlashLevel::Success,
@@ -525,6 +560,16 @@ pub async fn overview_partial(
     let retry_url = format!("/services/{plugin}/{service}/partials/overview");
     match crate::dokku::service_info(&*state.dokku, plugin.as_str(), service.as_str()).await {
         Ok(Some(info)) => {
+            let (upgrade_image, upgrade_tag) = split_image_ref(&info.version);
+            let upgrade_tag = upgrade_tag.unwrap_or_default();
+            let stored_env = state
+                .service_image_config
+                .get(plugin.as_str(), service.as_str())
+                .await
+                .ok()
+                .flatten();
+            let stored_env_present = stored_env.is_some();
+            let has_stored_env = stored_env.as_deref().is_some_and(|env| !env.is_empty());
             let csrf_token = ensure_csrf(&session).await?;
             render(&OverviewPartial {
                 plugin,
@@ -532,6 +577,11 @@ pub async fn overview_partial(
                 csrf_token: &csrf_token,
                 info,
                 can_manage: user.role.can_manage_apps(),
+                supports_upgrade: plugin.supports_upgrade(),
+                upgrade_image,
+                upgrade_tag,
+                stored_env_present,
+                has_stored_env,
             })
         }
         Ok(None) => error_fragment(
@@ -540,6 +590,289 @@ pub async fn overview_partial(
         ),
         Err(err) => error_fragment(&retry_url, &err.to_string()),
     }
+}
+
+#[derive(Deserialize)]
+pub struct UpgradeTagsQuery {
+    #[serde(default)]
+    image: String,
+    #[serde(default)]
+    current: String,
+}
+
+fn is_safe_tag(value: &str) -> bool {
+    value.len() <= 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn upgrade_tags_fallback(
+    current: &str,
+    tags: Vec<String>,
+    available: bool,
+) -> Result<HttpResponse, AppError> {
+    render(&UpgradeTagsPartial {
+        current: current.to_owned(),
+        tags,
+        tags_available: available,
+    })
+}
+
+/// Lazily loads the Docker Hub tag list for the upgrade selector. The overview
+/// renders the current tag as a text input first, so an unreachable Docker Hub
+/// (or a slow refresh) never blocks the card or leaves the form without a
+/// submittable value.
+pub async fn upgrade_tags_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+    query: web::Query<UpgradeTagsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let _service = service_from_slug(&raw_service)?;
+    let user = current_user(&state, &session).await?;
+    if !plugin.supports_upgrade() || !user.role.can_manage_apps() {
+        return Ok(HttpResponse::Forbidden().finish());
+    }
+    // The GET parameters only shape the display; the upgrade form re-validates
+    // everything it submits before enqueuing a job.
+    let current = if is_safe_tag(&query.current) {
+        query.current.as_str()
+    } else {
+        ""
+    };
+    if !is_valid_image_ref(&query.image) {
+        return upgrade_tags_fallback(current, Vec::new(), false);
+    }
+    match state.image_tags.tags(&docker_hub_repo(&query.image)).await {
+        Ok(raw) if !raw.is_empty() => {
+            let tags = select_tags(&raw, Some(current), 150);
+            let available = tags.iter().any(|tag| tag != current);
+            upgrade_tags_fallback(current, tags, available)
+        }
+        _ => upgrade_tags_fallback(current, Vec::new(), false),
+    }
+}
+
+/// Reveals the stored custom env under re-auth, mirroring the app-config
+/// reveal. The overview never receives the value; this response is marked
+/// `no-store` and records an audit entry.
+pub async fn reveal_image_env(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    _form: CsrfForm<ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    let user = current_user(&state, &session).await?;
+    if !user.role.can_manage_apps() {
+        return Ok(HttpResponse::Forbidden().finish());
+    }
+    if !reauth_valid_here(&session) {
+        let next = detail_url(plugin, &service);
+        if is_htmx(&req) {
+            // A full-page redirect: swapping the reauth form into the env
+            // field would leave the upgrade form unusable.
+            return Ok(HttpResponse::Ok()
+                .insert_header(("HX-Redirect", format!("/reauth?next={next}")))
+                .finish());
+        }
+        return Ok(see_other(&format!("/reauth?next={next}")));
+    }
+    let custom_env = state
+        .service_image_config
+        .get(plugin.as_str(), service.as_str())
+        .await?
+        .unwrap_or_default();
+    record_image_env_reveal(&state, &session, service.as_str()).await;
+    let mut response = render(&UpgradeEnvPartial { custom_env })?;
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+/// Records a `service.image-env.reveal` audit entry (best-effort, no lines).
+async fn record_image_env_reveal(state: &AppState, session: &Session, service: &str) {
+    let actor = current_user(state, session)
+        .await
+        .map(|user| crate::storage::runs::Actor {
+            user_id: Some(user.id),
+            email: Some(user.email),
+        })
+        .unwrap_or(crate::storage::runs::Actor {
+            user_id: None,
+            email: None,
+        });
+    if let Ok(run_id) = state
+        .action_runs
+        .insert_with(&NewRun {
+            subject: service.to_owned(),
+            operation: "service.image-env.reveal".to_owned(),
+            target_kind: TargetKind::Service,
+            actor,
+            parent_run_id: None,
+        })
+        .await
+    {
+        let _ = state
+            .action_runs
+            .finish(
+                &run_id,
+                &RunOutcome {
+                    ok: true,
+                    message: "Stored custom env revealed.".to_owned(),
+                    redirect: None,
+                },
+            )
+            .await;
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpgradeForm {
+    #[serde(default)]
+    image: String,
+    #[serde(default)]
+    image_version: String,
+    #[serde(default)]
+    custom_env: String,
+    /// `stored` reuses the server-side value (the overview masks it);
+    /// `replace` uses the submitted field (revealed/edited).
+    #[serde(default = "default_env_mode")]
+    env_mode: String,
+    #[serde(default)]
+    config_options: String,
+    /// Checkbox: present when checked.
+    #[serde(default)]
+    restart_apps: Option<String>,
+    #[serde(default)]
+    shm_size: String,
+    #[serde(default)]
+    initial_network: String,
+    #[serde(default)]
+    post_create_network: String,
+    #[serde(default)]
+    post_start_network: String,
+}
+
+fn opt(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn default_env_mode() -> String {
+    "replace".to_owned()
+}
+
+/// Upgrades a service's image/version and re-applies env + config options.
+/// The installed plugin generation clears custom env and config options when
+/// the matching flags are omitted, so the form always resubmits them.
+pub async fn upgrade(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    path: web::Path<(String, String)>,
+    form: CsrfForm<UpgradeForm>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    if !plugin.supports_upgrade() {
+        let message = format!("{plugin}:upgrade is not available for this plugin generation.");
+        if is_htmx(&req) {
+            return modal_error(message);
+        }
+        set_flash(&session, FlashLevel::Error, message);
+        return Ok(see_other(&detail_url(plugin, &service)));
+    }
+    let form = form.0;
+    // The overview masks a stored env, so `stored` mode reuses it server-side
+    // rather than round-tripping the secret through the browser.
+    let custom_env = if form.env_mode == "stored" {
+        state
+            .service_image_config
+            .get(plugin.as_str(), service.as_str())
+            .await
+            .ok()
+            .flatten()
+            .filter(|env| !env.is_empty())
+    } else {
+        opt(&form.custom_env).map(str::to_owned)
+    };
+    let options = match ServiceUpgradeOptions::parse(
+        opt(&form.image),
+        opt(&form.image_version),
+        custom_env.as_deref(),
+        opt(&form.config_options),
+        form.restart_apps.is_some(),
+        opt(&form.shm_size),
+        opt(&form.initial_network),
+        opt(&form.post_create_network),
+        opt(&form.post_start_network),
+    ) {
+        Ok(options) => options,
+        Err(err) => {
+            let message = err.to_string();
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other(&detail_url(plugin, &service)));
+        }
+    };
+    let redactions = options.redaction_fragments();
+    let refresh_url = format!("/services/{plugin}/{service}/partials/overview");
+    let completion = RunCompletion {
+        success_message: format!("Image upgraded for '{service}'."),
+        redirect: None,
+        refresh: RunRefresh::None,
+    };
+    let plan = vec![JobSpec::ServiceUpgrade {
+        plugin: plugin.as_str().to_owned(),
+        service: service.as_str().to_owned(),
+        options,
+    }];
+    if is_htmx(&req) {
+        return start_action_run(
+            &state,
+            &session,
+            &RunRequest {
+                subject: service.as_str().to_owned(),
+                operation: "service.upgrade".to_owned(),
+                target_kind: TargetKind::Service,
+                title: format!("Upgrading {service}…"),
+                plan,
+                completion,
+                redactions,
+                refresh_url: Some(refresh_url),
+            },
+        )
+        .await;
+    }
+    let _ = enqueue_action_run(
+        &state,
+        &session,
+        service.as_str(),
+        "service.upgrade",
+        TargetKind::Service,
+        &plan,
+        &completion,
+        &redactions,
+    )
+    .await?;
+    set_flash(
+        &session,
+        FlashLevel::Success,
+        format!("Queued: upgrade image for {service}."),
+    );
+    Ok(see_other(&detail_url(plugin, &service)))
 }
 
 /// Reveals the service's connection string under re-auth, marked `no-store`,
@@ -1040,6 +1373,8 @@ pub async fn destroy(
     }
 
     let list_url = format!("/services/{plugin}");
+    // The job executor drops the stored custom env only after the destroy
+    // succeeds, so a failed or link-blocked destroy keeps the prefill.
     if is_htmx(&req) {
         return start_action_run(
             &state,
@@ -1477,115 +1812,6 @@ pub async fn promote(
 }
 
 #[derive(Deserialize)]
-pub struct UpgradeForm {
-    #[serde(default)]
-    image: Option<String>,
-    #[serde(default)]
-    image_version: Option<String>,
-    #[serde(default)]
-    custom_env: Option<String>,
-    #[serde(default)]
-    config_options: Option<String>,
-    /// The form checkbox is present only when checked; any submitted value
-    /// restarts the linked apps around the upgrade.
-    #[serde(default)]
-    restart_apps: Option<String>,
-}
-
-/// Upgrades the service to a new image version (`<plugin>:upgrade`). An empty
-/// form is meaningful: the plugin moves the service to the latest release of
-/// its current major version.
-pub async fn upgrade(
-    state: web::Data<AppState>,
-    session: Session,
-    req: HttpRequest,
-    path: web::Path<(String, String)>,
-    form: CsrfForm<UpgradeForm>,
-) -> Result<HttpResponse, AppError> {
-    let (raw_plugin, raw_service) = path.into_inner();
-    let plugin = plugin_from_slug(&raw_plugin)?;
-    let service = service_from_slug(&raw_service)?;
-    let form = form.0;
-
-    let fail = |message: String| {
-        if is_htmx(&req) {
-            modal_error(message)
-        } else {
-            set_flash(&session, FlashLevel::Error, message);
-            Ok(see_other(&detail_url(plugin, &service)))
-        }
-    };
-
-    let options = match ServiceCreateOptions::parse(
-        form.image.as_deref(),
-        form.image_version.as_deref(),
-        form.custom_env.as_deref(),
-        form.config_options.as_deref(),
-    ) {
-        Ok(options) => options,
-        Err(err) => return fail(err.to_string()),
-    };
-    let restart_apps = form.restart_apps.is_some();
-    let redactions = options.redaction_fragments();
-    let success_message = format!("Service '{service}' upgraded.");
-    let refresh_url = format!("/services/{plugin}/{service}/partials/overview");
-
-    if is_htmx(&req) {
-        return start_action_run(
-            &state,
-            &session,
-            &RunRequest {
-                subject: service.as_str().to_owned(),
-                operation: "service.upgrade".to_owned(),
-                target_kind: TargetKind::Service,
-                title: format!("Upgrading {service}…"),
-                plan: vec![JobSpec::ServiceUpgrade {
-                    plugin: plugin.as_str().to_owned(),
-                    service: service.as_str().to_owned(),
-                    options,
-                    restart_apps,
-                }],
-                completion: RunCompletion {
-                    success_message,
-                    redirect: None,
-                    refresh: RunRefresh::None,
-                },
-                redactions,
-                refresh_url: Some(refresh_url),
-            },
-        )
-        .await;
-    }
-
-    let _ = enqueue_action_run(
-        &state,
-        &session,
-        service.as_str(),
-        "service.upgrade",
-        TargetKind::Service,
-        &[JobSpec::ServiceUpgrade {
-            plugin: plugin.as_str().to_owned(),
-            service: service.as_str().to_owned(),
-            options,
-            restart_apps,
-        }],
-        &RunCompletion {
-            success_message,
-            redirect: None,
-            refresh: RunRefresh::None,
-        },
-        &redactions,
-    )
-    .await?;
-    set_flash(
-        &session,
-        FlashLevel::Success,
-        format!("Queued: upgrade {service}."),
-    );
-    Ok(see_other(&detail_url(plugin, &service)))
-}
-
-#[derive(Deserialize)]
 pub struct CloneForm {
     name: String,
     #[serde(default)]
@@ -1642,6 +1868,10 @@ pub async fn clone(
     let redactions = options.redaction_fragments();
     let redirect_to = detail_url(plugin, &new_service);
     let success_message = format!("Service '{service}' cloned to '{new_service}'.");
+    // The worker records this after a successful job; the synchronous no-JS
+    // path bypasses the worker.
+    let applied_env = options.custom_env.clone().unwrap_or_default();
+    let new_service_key = new_service.as_str().to_owned();
 
     if is_htmx(&req) {
         return start_action_run(
@@ -1693,6 +1923,13 @@ pub async fn clone(
     .await
     {
         Ok(_) => {
+            if let Err(err) = state
+                .service_image_config
+                .put(plugin.as_str(), &new_service_key, &applied_env)
+                .await
+            {
+                tracing::warn!(error = %err, "failed to record cloned service custom env");
+            }
             set_flash(&session, FlashLevel::Success, success_message);
             Ok(see_other(&redirect_to))
         }

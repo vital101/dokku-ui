@@ -146,6 +146,7 @@ webhooks, multi-server, reverse-proxy auth, operating).
 |---|---|---|---|
 | Service lifecycle + link/unlink | ✅ | ✅ | Destroy is blocked while apps are linked at enqueue time **and** re-checked in the executor (fail-closed when the check errors) |
 | Service create advanced options (image/tag, env, extra args) | ✅ | ✅ | `--image`/`--image-version`/`--custom-env`/`--config-options`, source-verified against the installed 1.x plugin generation |
+| Service image upgrade | ✅ | ✅ | "Change image" card on the service Overview: `<plugin>:upgrade` + lazy version dropdown from Docker Hub tags cached in SQLite (two- and three-component schemes); env/config options are resubmitted (the plugin clears them on omission), custom env is tracked locally and masked until a re-auth reveal |
 | Connection string / credential reveal | ✅ | ✅ | Policy reversed (P4): DSN parsed, masked by default, re-auth-gated reveal with `no-store` + audit; never in run lines |
 | Service Activity tab | ✅ | ✅ | `/services/{plugin}/{service}/activity` |
 | Datastore plugin coverage | ✅ 12 | 18 official plugins | Full dokku-org set (postgres/mysql/redis/mongo/mariadb/memcached/rabbitmq/clickhouse/couchdb/elasticsearch/nats/solr); sidebar is capability-driven. Pro also names community plugins (influxdb, neo4j, rsync, vault) — catalog additions when needed |

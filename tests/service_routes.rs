@@ -13,7 +13,7 @@ use common::{
 use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::domain::{ServiceCreateOptions, ServiceName, ServicePlugin};
-use dokku_ui::web::build_app;
+use dokku_ui::web::{AppState, build_app};
 
 const REDIS_LIST: &str = include_str!("fixtures/redis_list.txt");
 const REDIS_INFO: &str = include_str!("fixtures/redis_info.txt");
@@ -924,66 +924,6 @@ async fn hx_service_promote_validates_app_and_streams() {
 }
 
 #[tokio::test]
-async fn hx_service_upgrade_validates_options_and_streams() {
-    let options = ServiceCreateOptions::parse(None, Some("7.4"), None, None).expect("options");
-    let client = service_list_stub().stub(
-        DokkuCommand::ServiceUpgrade {
-            plugin: redis(),
-            service: candid(),
-            options,
-            restart_apps: true,
-        },
-        Ok(DokkuOutput::ok("-----> upgraded\n")),
-    );
-    let (state, client, _dir) = test_state_with_shared_client(client).await;
-    let app = test::init_service(build_app(state)).await;
-    let cookie = complete_setup(&app).await;
-    let csrf = service_shell_csrf(&app, &cookie).await;
-
-    let resp = test::call_service(
-        &app,
-        hx_form_request(
-            "/services/redis/candid/upgrade",
-            format!("csrf_token={csrf}&config_options=bad%27quote"),
-        )
-        .cookie(cookie.clone())
-        .to_request(),
-    )
-    .await;
-    let body = get_body(resp).await;
-    assert!(body.contains("data-modal-error"), "{body}");
-    assert!(
-        client
-            .calls()
-            .iter()
-            .all(|call| !matches!(call, DokkuCommand::ServiceUpgrade { .. })),
-        "no upgrade command for invalid options"
-    );
-
-    let resp = test::call_service(
-        &app,
-        hx_form_request(
-            "/services/redis/candid/upgrade",
-            format!("csrf_token={csrf}&image_version=7.4&restart_apps=true"),
-        )
-        .cookie(cookie.clone())
-        .to_request(),
-    )
-    .await;
-    let body = get_body(resp).await;
-    assert!(body.contains("Upgrading candid"), "{body}");
-    let (_, events) = sse_events(&app, &run_url(&body), &cookie).await;
-    assert!(events.contains(r#""ok":true"#), "{events}");
-
-    assert!(client.calls().contains(&DokkuCommand::ServiceUpgrade {
-        plugin: redis(),
-        service: candid(),
-        options: ServiceCreateOptions::parse(None, Some("7.4"), None, None).expect("options"),
-        restart_apps: true,
-    }));
-}
-
-#[tokio::test]
 async fn hx_service_clone_validates_name_and_streams() {
     let client = service_list_stub().stub(
         DokkuCommand::ServiceClone {
@@ -1216,7 +1156,7 @@ async fn clone_service_non_htmx_flashes_and_redirects() {
         Ok(DokkuOutput::ok("")),
     );
     let (state, client, _dir) = test_state_with_shared_client(client).await;
-    let app = test::init_service(build_app(state)).await;
+    let app = test::init_service(build_app(state.clone())).await;
     let cookie = complete_setup(&app).await;
     let csrf = service_shell_csrf(&app, &cookie).await;
 
@@ -1260,6 +1200,16 @@ async fn clone_service_non_htmx_flashes_and_redirects() {
         new_service: ServiceName::try_from("candid-copy").expect("service"),
         options: ServiceCreateOptions::default(),
     }));
+    assert_eq!(
+        state
+            .service_image_config
+            .get("redis", "candid-copy")
+            .await
+            .expect("get")
+            .as_deref(),
+        Some(""),
+        "the clone is recorded as UI-managed without a stale env"
+    );
 
     let resp = test::call_service(
         &app,
@@ -2076,4 +2026,581 @@ async fn dsn_reveal_requires_reauth_then_shows_the_connection_string_no_store() 
     .await;
     let body = get_body(resp).await;
     assert!(body.contains("service.dsn.reveal"), "{body}");
+}
+
+fn service_info_stub() -> MockClient {
+    service_list_stub().stub(
+        DokkuCommand::ServiceInfo {
+            plugin: "redis".into(),
+            service: "candid".into(),
+        },
+        Ok(DokkuOutput::ok(REDIS_INFO)),
+    )
+}
+
+async fn wait_for_service_upgrade(client: &Arc<MockClient>) {
+    for _ in 0..200 {
+        if client.calls().iter().any(|call| {
+            matches!(call, DokkuCommand::ServiceUpgrade { plugin, service, .. }
+                if plugin.as_str() == "redis" && service.as_str() == "candid")
+        }) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("service upgrade never ran");
+}
+
+async fn wait_for_stored_env(state: &AppState, expected: Option<&str>) {
+    for _ in 0..200 {
+        let actual = state
+            .service_image_config
+            .get("redis", "candid")
+            .await
+            .expect("get");
+        if actual.as_deref() == expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("stored env never became {expected:?}");
+}
+
+#[tokio::test]
+async fn upgrade_card_masks_stored_env_and_lazy_loads_tags() {
+    let (mut state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    common::set_image_tags(
+        &mut state,
+        vec!["7.2.4".into(), "7.4.11".into(), "8.8.3".into()],
+    );
+    state
+        .service_image_config
+        .put("redis", "candid", "USER=alpha")
+        .await
+        .expect("store env");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/overview")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Change image"), "{body}");
+    assert!(
+        !body.contains(r#"value="USER=alpha""#),
+        "the overview must not embed the stored secret: {body}"
+    );
+    assert!(
+        body.contains(r#"placeholder="Stored value hidden""#),
+        "env is masked: {body}"
+    );
+    assert!(
+        body.contains(r#"name="env_mode" value="stored""#),
+        "unrevealed submissions reuse the server value: {body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/services/redis/candid/image-config/reveal""#),
+        "reveal affordance is present: {body}"
+    );
+    assert!(
+        body.contains(
+            r#"hx-get="/services/redis/candid/partials/upgrade-tags?image=redis&current=7.2.4""#
+        ),
+        "tags are loaded lazily: {body}"
+    );
+    assert!(
+        body.contains(r#"hx-post="/services/redis/candid/upgrade""#),
+        "{body}"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/upgrade-tags?image=redis&current=7.2.4")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains(r#"value="7.2.4" selected"#),
+        "current tag selected: {body}"
+    );
+    assert!(
+        body.contains(r#"value="8.8.3""#),
+        "available tags offered: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_card_without_stored_env_shows_the_cli_caution() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/overview")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("Change image"), "{body}");
+    assert!(
+        body.contains("configured outside this UI"),
+        "no row means CLI-created: {body}"
+    );
+    assert!(
+        body.contains(r#"name="env_mode" value="replace""#),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_card_with_a_ui_empty_env_shows_no_caution() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    state
+        .service_image_config
+        .put("redis", "candid", "")
+        .await
+        .expect("store empty env");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/overview")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(!body.contains("configured outside this UI"), "{body}");
+    assert!(!body.contains("Stored value hidden"), "{body}");
+}
+
+#[tokio::test]
+async fn upgrade_tags_partial_offers_postgres_two_component_versions() {
+    let (mut state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    common::set_image_tags(
+        &mut state,
+        vec![
+            "16".into(),
+            "16.2".into(),
+            "16.2-bookworm".into(),
+            "17.11".into(),
+            "18.6".into(),
+            "latest".into(),
+        ],
+    );
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/postgres/candid/partials/upgrade-tags?image=postgres&current=16.2")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains(r#"value="16.2" selected"#), "{body}");
+    assert!(body.contains(r#"value="18.6""#), "{body}");
+    assert!(body.contains(r#"value="17.11""#), "{body}");
+    assert!(
+        !body.contains(r#"value="16""#),
+        "moving alias excluded: {body}"
+    );
+    assert!(!body.contains(r#"value="latest""#), "{body}");
+}
+
+#[tokio::test]
+async fn upgrade_tags_partial_falls_back_to_a_text_input_without_tags() {
+    let (mut state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    common::set_image_tags_failing(&mut state);
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/upgrade-tags?image=redis&current=7.2.4")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "htmx fragments stay 200");
+    let body = get_body(resp).await;
+    assert!(
+        body.contains(r#"<input id="upgrade-version" type="text" name="image_version""#),
+        "fallback is a text input: {body}"
+    );
+    assert!(body.contains("could not be loaded"), "{body}");
+    assert!(body.contains(r#"value="7.2.4""#), "{body}");
+}
+
+#[tokio::test]
+async fn upgrade_tags_partial_rejects_unsupported_plugins_and_viewers() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let admin = complete_setup(&app).await;
+    common::seed_user_with_role(
+        &state,
+        "viewer@example.com",
+        "correct-horse-battery",
+        dokku_ui::auth::rbac::Role::Viewer,
+    )
+    .await;
+    let viewer = common::login(&app, "viewer@example.com", "correct-horse-battery").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/solr/candid/partials/upgrade-tags?image=solr&current=9.4.0")
+            .cookie(admin.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/upgrade-tags?image=redis&current=7.2.4")
+            .cookie(viewer)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn hx_upgrade_enqueues_and_records_env() {
+    let client = service_info_stub().stub(
+        DokkuCommand::ServiceUpgrade {
+            plugin: redis(),
+            service: candid(),
+            options: dokku_ui::domain::ServiceUpgradeOptions::parse(
+                Some("redis"),
+                Some("7.4.11"),
+                Some("USER=alpha"),
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("options"),
+        },
+        Ok(DokkuOutput::ok("-----> Upgrading candid to redis:7.4.11\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/upgrade",
+            format!(
+                "csrf_token={csrf}&image=redis&image_version=7.4.11&env_mode=replace&custom_env=USER%3Dalpha"
+            ),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(run_url(&body).starts_with("/actions/runs/"), "{body}");
+    wait_for_service_upgrade(&client).await;
+    wait_for_stored_env(&state, Some("USER=alpha")).await;
+}
+
+#[tokio::test]
+async fn upgrade_uses_the_stored_env_when_the_card_is_masked() {
+    let client = service_info_stub().stub(
+        DokkuCommand::ServiceUpgrade {
+            plugin: redis(),
+            service: candid(),
+            options: dokku_ui::domain::ServiceUpgradeOptions::parse(
+                Some("redis"),
+                Some("7.4.11"),
+                Some("USER=alpha"),
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("options"),
+        },
+        Ok(DokkuOutput::ok("-----> Upgrading candid to redis:7.4.11\n")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    state
+        .service_image_config
+        .put("redis", "candid", "USER=alpha")
+        .await
+        .expect("store env");
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/upgrade",
+            format!(
+                "csrf_token={csrf}&image=redis&image_version=7.4.11&env_mode=stored&custom_env="
+            ),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_service_upgrade(&client).await;
+    wait_for_stored_env(&state, Some("USER=alpha")).await;
+}
+
+#[tokio::test]
+async fn failed_upgrade_keeps_the_previous_stored_env() {
+    let client = service_info_stub().stub(
+        DokkuCommand::ServiceUpgrade {
+            plugin: redis(),
+            service: candid(),
+            options: dokku_ui::domain::ServiceUpgradeOptions::parse(
+                Some("redis"),
+                Some("7.4.11"),
+                Some("USER=beta"),
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("options"),
+        },
+        Err(exit_error(1, "image not found")),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    state
+        .service_image_config
+        .put("redis", "candid", "USER=alpha")
+        .await
+        .expect("store env");
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/upgrade",
+            format!(
+                "csrf_token={csrf}&image=redis&image_version=7.4.11&env_mode=replace&custom_env=USER%3Dbeta"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_service_upgrade(&client).await;
+
+    for _ in 0..200 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/services/redis/candid/activity")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        if get_body(resp).await.contains("failed") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        state
+            .service_image_config
+            .get("redis", "candid")
+            .await
+            .expect("get")
+            .as_deref(),
+        Some("USER=alpha"),
+        "a failed upgrade must not overwrite the applied env"
+    );
+}
+
+#[tokio::test]
+async fn upgrade_rejects_bad_input_without_a_command() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/upgrade",
+            format!("csrf_token={csrf}&image=redis&image_version=7.4.11&shm_size=1+h"),
+        )
+        .cookie(cookie)
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "htmx errors stay 200");
+    let body = get_body(resp).await;
+    assert!(body.contains("data-modal-error"), "{body}");
+}
+
+#[tokio::test]
+async fn upgrade_hidden_for_viewers() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    common::seed_user_with_role(
+        &state,
+        "viewer@example.com",
+        "correct-horse-battery",
+        dokku_ui::auth::rbac::Role::Viewer,
+    )
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let viewer = common::login(&app, "viewer@example.com", "correct-horse-battery").await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/overview")
+            .cookie(viewer)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(!body.contains("Change image"), "{body}");
+}
+
+#[tokio::test]
+async fn image_env_reveal_requires_reauth_then_returns_no_store() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_info_stub()).await;
+    state
+        .service_image_config
+        .put("redis", "candid", "USER=alpha")
+        .await
+        .expect("store env");
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let csrf = service_shell_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/image-config/reveal",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/reauth?next=/services/redis/candid");
+
+    // The card's reveal button is an htmx request: send a full-page redirect
+    // instead of swapping the reauth page into the env field.
+    let resp = test::call_service(
+        &app,
+        hx_form_request(
+            "/services/redis/candid/image-config/reveal",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("hx-redirect")
+            .and_then(|value| value.to_str().ok()),
+        Some("/reauth?next=/services/redis/candid"),
+        "htmx reveal bounces to the reauth page"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/reauth?next=/services/redis/candid")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    let reauth_csrf = extract_csrf(&get_body(resp).await);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/reauth",
+            format!(
+                "csrf_token={reauth_csrf}&password=correct-horse-battery&next=%2Fservices%2Fredis%2Fcandid"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/services/redis/candid/image-config/reveal",
+            format!("csrf_token={csrf}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("cache-control"),
+        Some(&actix_web::http::header::HeaderValue::from_static(
+            "no-store"
+        )),
+        "revealed env is never cached"
+    );
+    let body = get_body(resp).await;
+    assert!(body.contains(r#"value="USER=alpha""#), "{body}");
+    assert!(
+        body.contains(r#"name="env_mode" value="replace""#),
+        "the revealed form submits the edited value: {body}"
+    );
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/activity")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    let body = get_body(resp).await;
+    assert!(body.contains("service.image-env.reveal"), "{body}");
 }

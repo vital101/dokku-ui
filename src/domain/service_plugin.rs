@@ -53,6 +53,14 @@ impl ServicePlugin {
         }
     }
 
+    /// Whether the installed plugin generation ships `<plugin>:upgrade`
+    /// (needed by the image-upgrade card). Source-verified only for the plugins
+    /// installed on the target host; unverified plugins hide the card rather
+    /// than risk a failed command.
+    pub fn supports_upgrade(&self) -> bool {
+        matches!(self.0, "postgres" | "mysql" | "redis" | "mongo")
+    }
+
     /// Where the service's data directory is mounted inside its container.
     /// Used by the stats script's `du`/`df` calls; verified against the
     /// installed plugin generations' `/proc/mounts` output (the added plugins
@@ -202,5 +210,25 @@ mod tests {
     fn from_str_and_display_roundtrip() {
         let plugin: ServicePlugin = "redis".parse().expect("parse");
         assert_eq!(plugin.to_string(), "redis");
+    }
+
+    #[test]
+    fn upgrade_support_is_source_verified_only() {
+        for raw in ["postgres", "mysql", "redis", "mongo"] {
+            assert!(
+                ServicePlugin::try_from(raw)
+                    .expect("plugin")
+                    .supports_upgrade(),
+                "{raw}"
+            );
+        }
+        for raw in ["couchdb", "elasticsearch", "nats", "solr"] {
+            assert!(
+                !ServicePlugin::try_from(raw)
+                    .expect("plugin")
+                    .supports_upgrade(),
+                "{raw}"
+            );
+        }
     }
 }

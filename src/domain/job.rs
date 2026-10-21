@@ -18,6 +18,7 @@ use crate::domain::resource::{is_valid_process_type, is_valid_resource_value};
 use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
+use crate::domain::service_upgrade::ServiceUpgradeOptions;
 use crate::domain::tls::{LetsencryptAction, is_valid_letsencrypt_email};
 use crate::domain::types::{EnvVar, ScaleEntry};
 
@@ -179,6 +180,12 @@ pub enum JobSpec {
         #[serde(default)]
         options: ServiceCreateOptions,
     },
+    ServiceUpgrade {
+        plugin: String,
+        service: String,
+        #[serde(default)]
+        options: ServiceUpgradeOptions,
+    },
     ServiceDestroy {
         plugin: String,
         service: String,
@@ -206,14 +213,6 @@ pub enum JobSpec {
         plugin: String,
         service: String,
         app: String,
-    },
-    ServiceUpgrade {
-        plugin: String,
-        service: String,
-        #[serde(default)]
-        options: ServiceCreateOptions,
-        #[serde(default)]
-        restart_apps: bool,
     },
     ServiceClone {
         plugin: String,
@@ -608,6 +607,26 @@ impl JobSpec {
                     options: options.clone(),
                 }])
             }
+            JobSpec::ServiceUpgrade {
+                plugin,
+                service,
+                options,
+            } => {
+                let (plugin, service) = parse_service(plugin, service)?;
+                if !plugin.supports_upgrade() {
+                    return Err(JobSpecError::Invalid(format!(
+                        "{plugin}:upgrade is not supported by this plugin generation"
+                    )));
+                }
+                options
+                    .validate()
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                Ok(vec![DokkuCommand::ServiceUpgrade {
+                    plugin,
+                    service,
+                    options: options.clone(),
+                }])
+            }
             JobSpec::ServiceDestroy { plugin, service } => {
                 let (plugin, service) = parse_service(plugin, service)?;
                 Ok(vec![DokkuCommand::ServiceDestroy {
@@ -669,23 +688,6 @@ impl JobSpec {
                     plugin,
                     service,
                     app,
-                }])
-            }
-            JobSpec::ServiceUpgrade {
-                plugin,
-                service,
-                options,
-                restart_apps,
-            } => {
-                let (plugin, service) = parse_service(plugin, service)?;
-                options
-                    .validate()
-                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
-                Ok(vec![DokkuCommand::ServiceUpgrade {
-                    plugin,
-                    service,
-                    options: options.clone(),
-                    restart_apps: *restart_apps,
                 }])
             }
             JobSpec::ServiceClone {
@@ -1132,6 +1134,58 @@ mod tests {
     }
 
     #[test]
+    fn service_upgrade_rehydrates_and_revalidates() {
+        let options = ServiceUpgradeOptions::parse(
+            Some("redis"),
+            Some("7.4.11"),
+            Some("USER=alpha"),
+            None,
+            true,
+            Some("1g"),
+            None,
+            None,
+            None,
+        )
+        .expect("options");
+        let job = JobSpec::ServiceUpgrade {
+            plugin: "redis".into(),
+            service: "candid".into(),
+            options: options.clone(),
+        };
+        assert_eq!(
+            job.to_commands().expect("commands"),
+            vec![DokkuCommand::ServiceUpgrade {
+                plugin: crate::domain::ServicePlugin::try_from("redis").expect("redis"),
+                service: crate::domain::ServiceName::try_from("candid").expect("candid"),
+                options,
+            }]
+        );
+
+        let tampered = JobSpec::ServiceUpgrade {
+            plugin: "redis".into(),
+            service: "candid".into(),
+            options: ServiceUpgradeOptions {
+                shm_size: Some("1 g".into()),
+                ..Default::default()
+            },
+        };
+        assert!(
+            tampered.to_commands().is_err(),
+            "tampered shm sizes must not reach the host"
+        );
+
+        let unsupported = JobSpec::ServiceUpgrade {
+            plugin: "solr".into(),
+            service: "candid".into(),
+            options: ServiceUpgradeOptions::default(),
+        };
+        assert!(
+            unsupported.to_commands().is_err(),
+            "plugins without :upgrade must not reach the host"
+        );
+    }
+
+    #[test]
     fn service_create_options_revalidate_on_rehydration() {
         let job = JobSpec::ServiceCreate {
             plugin: "redis".into(),
@@ -1164,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn service_promote_upgrade_clone_rehydrate_and_revalidate() {
+    fn service_promote_and_clone_rehydrate_and_revalidate() {
         assert_eq!(
             JobSpec::ServicePromote {
                 plugin: "redis".into(),
@@ -1188,42 +1242,6 @@ mod tests {
             .to_commands()
             .is_err(),
             "invalid app names are rejected"
-        );
-
-        let commands = JobSpec::ServiceUpgrade {
-            plugin: "redis".into(),
-            service: "candid".into(),
-            options: ServiceCreateOptions {
-                image_version: Some("7.4".into()),
-                ..Default::default()
-            },
-            restart_apps: true,
-        }
-        .to_commands()
-        .expect("commands");
-        let DokkuCommand::ServiceUpgrade {
-            options,
-            restart_apps,
-            ..
-        } = &commands[0]
-        else {
-            panic!("expected service upgrade");
-        };
-        assert_eq!(options.image_version.as_deref(), Some("7.4"));
-        assert!(*restart_apps);
-        assert!(
-            JobSpec::ServiceUpgrade {
-                plugin: "redis".into(),
-                service: "candid".into(),
-                options: ServiceCreateOptions {
-                    config_options: Some("bad'quote".into()),
-                    ..Default::default()
-                },
-                restart_apps: false,
-            }
-            .to_commands()
-            .is_err(),
-            "tampered upgrade options must not reach the host"
         );
 
         assert_eq!(

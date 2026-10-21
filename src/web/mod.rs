@@ -409,6 +409,18 @@ pub fn build_app(
             web::post().to(services::dsn_reveal),
         )
         .route(
+            "/services/{plugin}/{service}/upgrade",
+            web::post().to(services::upgrade),
+        )
+        .route(
+            "/services/{plugin}/{service}/image-config/reveal",
+            web::post().to(services::reveal_image_env),
+        )
+        .route(
+            "/services/{plugin}/{service}/partials/upgrade-tags",
+            web::get().to(services::upgrade_tags_partial),
+        )
+        .route(
             "/services/{plugin}/{service}/partials/links",
             web::get().to(services::links_partial),
         )
@@ -459,10 +471,6 @@ pub fn build_app(
         .route(
             "/services/{plugin}/{service}/promote",
             web::post().to(services::promote),
-        )
-        .route(
-            "/services/{plugin}/{service}/upgrade",
-            web::post().to(services::upgrade),
         )
         .route(
             "/services/{plugin}/{service}/clone",

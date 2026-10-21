@@ -106,56 +106,107 @@
   </div>
 
   {% if can_manage %}
+  {% if supports_upgrade %}
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
-    <h3 class="text-sm font-medium text-white">Upgrade image</h3>
-    <p class="mt-2 text-xs text-slate-500">
-      Current version:
-      <span class="font-mono text-slate-300">{% if info.version.is_empty() %}—{% else %}{{ info.version }}{% endif %}</span>.
-      Leave the version blank to move to the latest release of the current major version.
-      The service container is recreated; linked apps can be restarted.
+    <h3 class="text-sm font-medium text-white">Change image</h3>
+    <p class="mt-1 text-xs text-slate-500">
+      Upgrading recreates the service container from the chosen image. It
+      re-applies the environment variables and config options below — on this
+      plugin generation those are cleared unless resubmitted.
     </p>
     <form method="post" action="/services/{{ plugin }}/{{ service }}/upgrade"
           hx-post="/services/{{ plugin }}/{{ service }}/upgrade" hx-target="#modal-content" hx-swap="innerHTML"
-          data-action-form class="mt-3 space-y-3">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div class="flex flex-wrap items-end gap-4">
+          data-action-form class="mt-4 space-y-4">
+      <input id="upgrade-csrf" type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="grid gap-4 sm:grid-cols-2">
         <div>
-          <label for="upgrade-image-version" class="block text-xs font-medium text-slate-300">Image version</label>
-          <input id="upgrade-image-version" name="image_version" type="text" placeholder="7.4"
-                 class="mt-1 block w-40 rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
+          <label for="upgrade-image" class="mb-1 block text-sm text-slate-400">Image</label>
+          <input id="upgrade-image" type="text" name="image" value="{{ upgrade_image }}" readonly
+                 class="w-full rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-300">
+          <p class="mt-1 text-xs text-slate-500">Changing repositories is not supported here; use the create form.</p>
         </div>
-        <label class="flex items-center gap-2 pb-1.5 text-xs text-slate-300">
-          <input type="checkbox" name="restart_apps" value="true"
-                 class="rounded border-slate-700 bg-slate-900">
-          Restart linked apps
-        </label>
+        <div>
+          <label for="upgrade-version" class="mb-1 block text-sm text-slate-400">Version</label>
+          <div id="upgrade-version-field"
+               hx-get="/services/{{ plugin }}/{{ service }}/partials/upgrade-tags?image={{ upgrade_image|urlencode }}&current={{ upgrade_tag|urlencode }}"
+               hx-trigger="load" hx-swap="innerHTML">
+            <input id="upgrade-version" type="text" name="image_version" value="{{ upgrade_tag }}"
+                   class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+          </div>
+        </div>
       </div>
-      <details class="rounded-md border border-slate-800 bg-slate-900/40 p-3">
-        <summary class="cursor-pointer text-xs font-medium text-slate-300">Advanced options</summary>
-        <div class="mt-3 space-y-3">
-          <div>
-            <label for="upgrade-image" class="block text-xs font-medium text-slate-300">Image</label>
-            <input id="upgrade-image" name="image" type="text" placeholder="redis"
-                   class="mt-1 block w-full rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
-          </div>
-          <div>
-            <label for="upgrade-custom-env" class="block text-xs font-medium text-slate-300">Environment variables</label>
-            <input id="upgrade-custom-env" name="custom_env" type="text" placeholder="USER=alpha;HOST=beta"
-                   class="mt-1 block w-full rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
-          </div>
-          <div>
-            <label for="upgrade-config-options" class="block text-xs font-medium text-slate-300">Config options</label>
-            <input id="upgrade-config-options" name="config_options" type="text" placeholder="--shm-size=1g"
-                   class="mt-1 block w-full rounded-md border border-slate-800 bg-slate-900 px-2 py-1.5 text-sm text-white">
-          </div>
+      <div>
+        <label for="upgrade-env" class="mb-1 block text-sm text-slate-400">Environment variables</label>
+        <div id="upgrade-env-field">
+          {% if has_stored_env %}
+          <input id="upgrade-env" type="text" name="custom_env" value="" readonly
+                 placeholder="Stored value hidden"
+                 class="w-full rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-sm text-slate-300">
+          <input type="hidden" name="env_mode" value="stored">
+          {% else %}
+          <input id="upgrade-env" type="text" name="custom_env" value=""
+                 placeholder="USER=alpha;HOST=beta"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+          <input type="hidden" name="env_mode" value="replace">
+          {% endif %}
         </div>
-      </details>
+        {% if has_stored_env %}
+        <button type="button" hx-post="/services/{{ plugin }}/{{ service }}/image-config/reveal"
+                hx-include="#upgrade-csrf" hx-target="#upgrade-env-field" hx-swap="innerHTML"
+                class="mt-2 rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-amber-300 hover:bg-slate-700">
+          Reveal to edit
+        </button>
+        <p class="mt-1 text-xs text-slate-500">
+          The stored custom env is not sent to the browser until you reveal it.
+          Revealing requires re-authentication and is audited.
+        </p>
+        {% else if !stored_env_present %}
+        <p class="mt-1 text-xs text-amber-400">
+          If this service was configured outside this UI, re-enter its custom
+          env or the upgrade will clear it.
+        </p>
+        {% endif %}
+      </div>
+      <div>
+        <label for="upgrade-config" class="mb-1 block text-sm text-slate-400">Config options</label>
+        <input id="upgrade-config" type="text" name="config_options" value="{{ info.config_options }}"
+               placeholder="--shm-size=1g"
+               class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
+      </div>
+      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <label for="upgrade-shm" class="mb-1 block text-sm text-slate-400">Shared memory (blank keeps)</label>
+          <input id="upgrade-shm" type="text" name="shm_size" placeholder="1g"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <div>
+          <label for="upgrade-initial-network" class="mb-1 block text-sm text-slate-400">Initial network</label>
+          <input id="upgrade-initial-network" type="text" name="initial_network" value="{{ info.initial_network }}"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <div>
+          <label for="upgrade-post-create" class="mb-1 block text-sm text-slate-400">Post-create networks</label>
+          <input id="upgrade-post-create" type="text" name="post_create_network" value="{{ info.post_create_network }}"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+        <div>
+          <label for="upgrade-post-start" class="mb-1 block text-sm text-slate-400">Post-start networks</label>
+          <input id="upgrade-post-start" type="text" name="post_start_network" value="{{ info.post_start_network }}"
+                 class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white">
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-slate-300">
+        <input type="checkbox" name="restart_apps" value="true"
+               class="size-4 rounded border-slate-700 bg-slate-900">
+        Restart linked apps (brief downtime)
+      </label>
       <button type="submit"
               class="app-action rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
-        <span class="app-action-label">Upgrade</span>
+        <span class="app-action-label">Upgrade image</span>
       </button>
     </form>
   </div>
+  {% endif %}
 
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
     <h3 class="text-sm font-medium text-white">Clone this service</h3>

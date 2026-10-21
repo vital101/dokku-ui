@@ -7,10 +7,12 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 pub mod capabilities;
+pub mod image_tags;
 pub mod instance_settings;
 pub mod jobs;
 pub mod password_resets;
 pub mod runs;
+pub mod service_image_config;
 pub mod sessions;
 pub mod snapshots;
 pub mod users;

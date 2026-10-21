@@ -14,13 +14,60 @@ use dokku_ui::auth::password::hash_password;
 use dokku_ui::auth::rbac::Role;
 use dokku_ui::dokku::{CapabilitiesStore, DokkuClient, FakeResolver, MockClient, SnapshotStore};
 use dokku_ui::domain::Password;
+use dokku_ui::images::{ImageTagError, ImageTagSource, ImageTagStore};
 use dokku_ui::settings::Settings;
 use dokku_ui::storage;
+use dokku_ui::storage::image_tags::SqliteImageTagCache;
 use dokku_ui::storage::jobs::SqliteJobsRepo;
 use dokku_ui::storage::runs::SqliteRunsRepo;
+use dokku_ui::storage::service_image_config::SqliteServiceImageConfig;
 use dokku_ui::storage::users::{SqliteUsersRepo, UsersRepo};
 use dokku_ui::storage::webhooks::SqliteWebhooksRepo;
 use dokku_ui::web::AppState;
+
+/// A fixed tag list for tests that exercise the upgrade selector.
+pub struct StaticImageTags(pub Vec<String>);
+
+#[async_trait::async_trait]
+impl ImageTagSource for StaticImageTags {
+    async fn fetch(&self, _repo: &str) -> Result<Vec<String>, ImageTagError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// A source that always fails, for the lazy selector's fallback path.
+pub struct FailingImageTags(pub ImageTagError);
+
+#[async_trait::async_trait]
+impl ImageTagSource for FailingImageTags {
+    async fn fetch(&self, _repo: &str) -> Result<Vec<String>, ImageTagError> {
+        Err(self.0.clone())
+    }
+}
+
+fn disabled_image_tags(pool: &sqlx::SqlitePool) -> Arc<ImageTagStore> {
+    Arc::new(ImageTagStore::disabled(SqliteImageTagCache::new(
+        pool.clone(),
+    )))
+}
+
+/// Replaces a test state's image-tag store with one returning `tags`.
+pub fn set_image_tags(state: &mut AppState, tags: Vec<String>) {
+    state.image_tags = Arc::new(ImageTagStore::new(
+        Arc::new(StaticImageTags(tags)),
+        SqliteImageTagCache::new(state.db.clone()),
+        3600,
+    ));
+}
+
+/// Replaces a test state's image-tag store with one that always fails.
+pub fn set_image_tags_failing(state: &mut AppState) {
+    state.image_tags = Arc::new(ImageTagStore::new(
+        Arc::new(FailingImageTags(ImageTagError::Status(503))),
+        SqliteImageTagCache::new(state.db.clone()),
+        3600,
+    ));
+}
 
 pub const SESSION_COOKIE: &str = "dokku-ui-session";
 
@@ -57,6 +104,8 @@ pub async fn test_state_with_shared_client(
             jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
             webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
             capabilities: Arc::new(CapabilitiesStore::new(dokku.clone(), pool.clone())),
+            image_tags: disabled_image_tags(&pool),
+            service_image_config: Arc::new(SqliteServiceImageConfig::new(pool.clone())),
             db: pool,
             settings,
             dokku,
@@ -114,6 +163,8 @@ pub async fn states_over_shared_db(
             jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
             webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
             capabilities: Arc::new(CapabilitiesStore::new(client.clone(), pool.clone())),
+            image_tags: disabled_image_tags(&pool),
+            service_image_config: Arc::new(SqliteServiceImageConfig::new(pool.clone())),
             db: pool.clone(),
             settings: settings.clone(),
             dokku: client,

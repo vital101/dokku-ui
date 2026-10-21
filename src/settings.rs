@@ -28,6 +28,9 @@ pub struct Settings {
     pub proxy_auth_header: String,
     /// Role granted to auto-registered proxy-auth users.
     pub proxy_auth_default_role: Role,
+    /// How long a cached Docker Hub tag list stays fresh; `0` disables remote
+    /// image-tag fetching.
+    pub image_tags_ttl_secs: u64,
 }
 
 impl Settings {
@@ -137,6 +140,12 @@ impl Settings {
                 .ok_or_else(|| SettingsError::InvalidProxyAuthRole(raw.clone()))?,
             None => Role::Viewer,
         };
+        let image_tags_ttl_secs = match vars.get("IMAGE_TAGS_TTL_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidImageTagsTtl(raw.clone()))?,
+            None => 21_600,
+        };
         Ok(Self {
             port,
             database_url,
@@ -156,6 +165,7 @@ impl Settings {
             trusted_proxy_cidrs,
             proxy_auth_header,
             proxy_auth_default_role,
+            image_tags_ttl_secs,
         })
     }
 }
@@ -184,6 +194,8 @@ pub enum SettingsError {
     InvalidTrustedProxyCidrs(String),
     #[error("PROXY_AUTH_DEFAULT_ROLE must be admin, operator, or viewer, got `{0}`")]
     InvalidProxyAuthRole(String),
+    #[error("IMAGE_TAGS_TTL_SECS must be a valid u64, got `{0}`")]
+    InvalidImageTagsTtl(String),
 }
 
 #[cfg(test)]
@@ -230,6 +242,7 @@ mod tests {
         assert_eq!(settings.proxy_auth_header, "x-forwarded-user");
         assert_eq!(settings.proxy_auth_default_role, Role::Viewer);
         assert!(!settings.proxy_auth_enabled());
+        assert_eq!(settings.image_tags_ttl_secs, 21_600);
     }
 
     #[test]
@@ -262,6 +275,7 @@ mod tests {
             ("TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.168.1.5"),
             ("PROXY_AUTH_HEADER", "X-Auth-Request-Email"),
             ("PROXY_AUTH_DEFAULT_ROLE", "operator"),
+            ("IMAGE_TAGS_TTL_SECS", "900"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -290,6 +304,7 @@ mod tests {
         assert_eq!(settings.proxy_auth_header, "x-auth-request-email");
         assert_eq!(settings.proxy_auth_default_role, Role::Operator);
         assert!(settings.proxy_auth_enabled());
+        assert_eq!(settings.image_tags_ttl_secs, 900);
     }
 
     #[test]
@@ -301,6 +316,10 @@ mod tests {
         let err = Settings::from_map(&map(&[("PROXY_AUTH_DEFAULT_ROLE", "root")]))
             .expect_err("invalid role");
         assert!(matches!(err, SettingsError::InvalidProxyAuthRole(_)));
+
+        let err =
+            Settings::from_map(&map(&[("IMAGE_TAGS_TTL_SECS", "soon")])).expect_err("invalid ttl");
+        assert!(matches!(err, SettingsError::InvalidImageTagsTtl(_)));
     }
 
     #[test]

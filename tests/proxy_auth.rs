@@ -45,6 +45,12 @@ async fn proxy_state(vars: &[(&str, &str)]) -> (AppState, tempfile::TempDir) {
         jobs: Arc::new(SqliteJobsRepo::new(pool.clone())),
         webhooks: Arc::new(SqliteWebhooksRepo::new(pool.clone())),
         capabilities: Arc::new(CapabilitiesStore::new(dokku.clone(), pool.clone())),
+        image_tags: Arc::new(dokku_ui::images::ImageTagStore::disabled(
+            dokku_ui::storage::image_tags::SqliteImageTagCache::new(pool.clone()),
+        )),
+        service_image_config: Arc::new(
+            dokku_ui::storage::service_image_config::SqliteServiceImageConfig::new(pool.clone()),
+        ),
         db: pool,
         settings,
         dokku,

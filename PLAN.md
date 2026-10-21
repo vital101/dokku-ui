@@ -272,6 +272,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS th
 | `ACTIVITY_TTL_SECS` | 7776000 (90d) | — | audit run retention |
 | `RUN_LOG_TTL_SECS` | 604800 (7d) | — | run-line retention (metadata outlives it) |
 | `REAUTH_TTL_SECS` | 300 | — | reveal/edit re-auth window |
+| `IMAGE_TAGS_TTL_SECS` | 21600 (6h) | — | Docker Hub tag-cache TTL; `0` disables fetching |
 | `RUST_LOG` | `dokku_ui=debug,tower? n/a` | `info` | tracing filter |
 
 `Settings::from_env()` is a pure function of a `VarMap` (testable without process env); `main` feeds it `std::env`.
@@ -693,3 +694,36 @@ Closes the remaining SSH-only gaps and the two open policy decisions
 - **Not in this increment**: companion-helper work (plugin management,
   teams/scoped grants, git HTTP), REST JSON:API/JWT/Swagger, multi-server,
   manual certificate upload.
+
+## 24. Service image upgrade (implemented)
+
+A "Change image" card on the service Overview tab upgrades a datastore
+service's image via `<plugin>:upgrade` (source-verified for the installed
+generations: redis 1.42.1, postgres 1.36.4, mysql 1.44.3, mongo 1.40.4;
+`ServicePlugin::supports_upgrade` hides the card elsewhere).
+
+- **Version selector**: the Overview renders the current tag as a text input
+  and loads the dropdown from its own HTMX partial (`/partials/upgrade-tags`),
+  so Docker Hub latency never blocks the card. `ImageTagStore` fetches
+  `library/<image>` tags over HTTPS (reqwest + rustls/ring), caches them in the
+  shared `image_tag_cache` table per repository, and serves fresh cache within
+  `IMAGE_TAGS_TTL_SECS` (default 6h; `0` disables). A failed fetch serves the
+  stale cache and records a 60s negative-cache window; with no cache the
+  partial keeps the text input. `select_tags` supports postgres'
+  two-component scheme (`16.2`) and the three-component redis/mysql/mongo tags
+  (newest first), excludes moving aliases, and always includes the current tag.
+- **Env/config preservation**: `service_commit_config` inside
+  `<plugin>:upgrade` rewrites and clears `ENV` and `CONFIG_OPTIONS` when the
+  matching flags are omitted. Config options are prefilled from
+  `ServiceInfo.config_options` (the info report exposes them); custom env is
+  recorded in `service_image_config` only after a successful create/upgrade and
+  cleared after a successful destroy (the plugin generation cannot report it
+  back), and CLI-created services show a caution. The Overview masks the stored
+  env and submits `env_mode=stored`; the value never reaches the browser until
+  the re-auth-gated reveal (`no-store` + `service.image-env.reveal` audit).
+  Networks and `--shm-size` are not cleared by omission.
+- **Options**: optional `--restart-apps true`, `--shm-size`, and the three
+  network flags, all validated by `ServiceUpgradeOptions` and re-checked at job
+  rehydration; custom-env values join the run-line redactions.
+- **Not included**: changing to a wholly different image repository (use the
+  create form) and per-scheduler-style properties.
