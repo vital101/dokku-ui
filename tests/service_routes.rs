@@ -2242,6 +2242,10 @@ async fn upgrade_card_masks_stored_env_and_lazy_loads_tags() {
         body.contains(r#"hx-post="/services/redis/candid/upgrade""#),
         "{body}"
     );
+    assert!(
+        body.contains(r##"hx-target="#upgrade-version-field""##),
+        "the tag loader must target itself and never inherit the form's #modal-content: {body}"
+    );
 
     let resp = test::call_service(
         &app,

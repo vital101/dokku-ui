@@ -129,7 +129,7 @@
           <label for="upgrade-version" class="mb-1 block text-sm text-slate-400">Version</label>
           <div id="upgrade-version-field"
                hx-get="/services/{{ plugin }}/{{ service }}/partials/upgrade-tags?image={{ upgrade_image|urlencode }}&current={{ upgrade_tag|urlencode }}"
-               hx-trigger="load" hx-swap="innerHTML">
+               hx-target="#upgrade-version-field" hx-trigger="load" hx-swap="innerHTML">
             <input id="upgrade-version" type="text" name="image_version" value="{{ upgrade_tag }}"
                    class="w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-sm text-white">
           </div>
