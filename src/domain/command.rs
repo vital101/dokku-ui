@@ -8,6 +8,9 @@ use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::service_upgrade::ServiceUpgradeOptions;
 use crate::domain::types::{EnvVar, ScaleEntry};
+use std::time::Duration;
+
+const DATA_SAMPLE_TIMEOUT_SECS: u64 = 300;
 
 /// Fixed, read-only stats script executed inside a service container via
 /// `<plugin>:enter <service> sh -c <script>`. Emits `key=value` lines only;
@@ -18,7 +21,14 @@ use crate::domain::types::{EnvVar, ScaleEntry};
 /// `$SSH_ORIGINAL_COMMAND` with `xargs -n 1` + `readarray`, which mangles
 /// shell-style `'\''` escapes (xargs doesn't understand them) and splits
 /// multi-line arguments on the per-token `echo` output.
-const SERVICE_STATS_SCRIPT: &str = r#"DD=__DATA_DIR__; echo "host_mem_total_kb=$(awk "/^MemTotal:/{print \$2}" /proc/meminfo)"; echo "host_mem_avail_kb=$(awk "/^MemAvailable:/{print \$2}" /proc/meminfo)"; echo "mem_current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"; echo "mem_limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"; echo "inactive_file=$(awk "/^inactive_file /{print \$2}" /sys/fs/cgroup/memory.stat 2>/dev/null)"; read up1 _ < /proc/uptime; c1=$(awk "/^usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat 2>/dev/null); sleep 1; read up2 _ < /proc/uptime; c2=$(awk "/^usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat 2>/dev/null); echo "elapsed_s=$(awk "BEGIN{print $up2-$up1}")"; echo "cpu_delta_usec=$( [ -n "$c2" ] && [ -n "$c1" ] && echo $((c2-c1)) )"; echo "cpu_total_usec=$c2"; echo "cpus=$(nproc 2>/dev/null)"; echo "data_kb=$(du -sk $DD 2>/dev/null | cut -f1)"; echo "fs_total_kb=$(df -Pk $DD | awk "NR==2{print \$2}")"; echo "fs_used_kb=$(df -Pk $DD | awk "NR==2{print \$3}")"; echo "fs_avail_kb=$(df -Pk $DD | awk "NR==2{print \$4}")""#;
+const SERVICE_STATS_SCRIPT: &str = r#"DD=__DATA_DIR__; echo "host_mem_total_kb=$(awk "/^MemTotal:/{print \$2}" /proc/meminfo)"; echo "host_mem_avail_kb=$(awk "/^MemAvailable:/{print \$2}" /proc/meminfo)"; echo "mem_current=$(cat /sys/fs/cgroup/memory.current 2>/dev/null)"; echo "mem_limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)"; echo "inactive_file=$(awk "/^inactive_file /{print \$2}" /sys/fs/cgroup/memory.stat 2>/dev/null)"; read up1 _ < /proc/uptime; c1=$(awk "/^usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat 2>/dev/null); sleep 1; read up2 _ < /proc/uptime; c2=$(awk "/^usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat 2>/dev/null); echo "elapsed_s=$(awk "BEGIN{print $up2-$up1}")"; echo "cpu_delta_usec=$( [ -n "$c2" ] && [ -n "$c1" ] && echo $((c2-c1)) )"; echo "cpu_total_usec=$c2"; echo "cpus=$(nproc 2>/dev/null)"; echo "fs_total_kb=$(df -Pk $DD | awk "NR==2{print \$2}")"; echo "fs_used_kb=$(df -Pk $DD | awk "NR==2{print \$3}")"; echo "fs_avail_kb=$(df -Pk $DD | awk "NR==2{print \$4}")""#;
+
+/// Fixed data-dir size script, run through the same `<plugin>:enter` shell.
+/// Kept separate from [`SERVICE_STATS_SCRIPT`] because `du` is O(files) and
+/// costs real I/O on a large postgres data directory: the poller samples the
+/// cheap cgroup/`df` script on the metrics interval and this one on the much
+/// slower data-size interval.
+const SERVICE_DATA_SCRIPT: &str = r#"echo "data_kb=$(du -sk __DATA_DIR__ 2>/dev/null | cut -f1)""#;
 
 /// Fixed disk-usage script run via `storage:exec <entry> -- sh -c <script>`
 /// in a throwaway container with the entry mounted at `/data`.
@@ -29,6 +39,10 @@ const VOLUME_USAGE_SCRIPT: &str = r#"echo "used_kb=$(du -sk /data 2>/dev/null | 
 
 fn service_stats_script(data_dir: &str) -> String {
     SERVICE_STATS_SCRIPT.replace("__DATA_DIR__", data_dir)
+}
+
+fn service_data_script(data_dir: &str) -> String {
+    SERVICE_DATA_SCRIPT.replace("__DATA_DIR__", data_dir)
 }
 
 /// Appends the option flags shared by `create`/`upgrade`/`clone` on the
@@ -62,6 +76,8 @@ pub enum CommandTimeout {
     Default,
     /// No timeout: the run ends when the command (or the connection) does.
     Indefinite,
+    /// Bounded by a command-specific timeout for known-slow read commands.
+    Slow(Duration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -241,6 +257,12 @@ pub enum DokkuCommand {
         service: ServiceName,
     },
     ServiceStats {
+        plugin: ServicePlugin,
+        service: ServiceName,
+    },
+    /// Data-dir size only (`du`), polled far less often than [`Self::ServiceStats`]
+    /// because it walks the whole tree.
+    ServiceDataUsage {
         plugin: ServicePlugin,
         service: ServiceName,
     },
@@ -731,6 +753,13 @@ impl DokkuCommand {
                 "-c".into(),
                 service_stats_script(plugin.data_dir()),
             ],
+            DokkuCommand::ServiceDataUsage { plugin, service } => vec![
+                format!("{plugin}:enter"),
+                service.as_str().into(),
+                "sh".into(),
+                "-c".into(),
+                service_data_script(plugin.data_dir()),
+            ],
             DokkuCommand::ServicePromote {
                 plugin,
                 service,
@@ -1056,8 +1085,9 @@ impl DokkuCommand {
     ///
     /// Mutating actions the user watches stream in the run modal have **no
     /// timeout**: builds can take many minutes, and the SSH keepalive
-    /// surfaces dead connections instead of a timer. Everything else (reports,
-    /// config, logs, lists) is bounded by the client default
+    /// surfaces dead connections instead of a timer. Slow read-only probes
+    /// such as `du` data-size samples get their own longer bound. Everything
+    /// else (reports, config, logs, lists) is bounded by the client default
     /// (`COMMAND_TIMEOUT_SECS`) so panel fetches can never hang.
     pub fn timeout(&self) -> CommandTimeout {
         match self {
@@ -1124,6 +1154,9 @@ impl DokkuCommand {
             | DokkuCommand::NginxAccessLogs { follow: true, .. }
             | DokkuCommand::NginxErrorLogs { follow: true, .. }
             | DokkuCommand::ServiceLogs { follow: true, .. } => CommandTimeout::Indefinite,
+            DokkuCommand::ServiceDataUsage { .. } => {
+                CommandTimeout::Slow(Duration::from_secs(DATA_SAMPLE_TIMEOUT_SECS))
+            }
             _ => CommandTimeout::Default,
         }
     }
@@ -1152,6 +1185,7 @@ impl DokkuCommand {
             | DokkuCommand::ServiceExpose { plugin, .. }
             | DokkuCommand::ServiceUnexpose { plugin, .. }
             | DokkuCommand::ServiceStats { plugin, .. }
+            | DokkuCommand::ServiceDataUsage { plugin, .. }
             | DokkuCommand::ServicePromote { plugin, .. }
             | DokkuCommand::ServiceClone { plugin, .. } => Requirement::Plugin {
                 name: plugin.as_str().to_owned(),
@@ -1900,6 +1934,18 @@ mod tests {
     }
 
     #[test]
+    fn service_data_usage_uses_the_slow_read_timeout() {
+        assert_eq!(
+            DokkuCommand::ServiceDataUsage {
+                plugin: plugin("redis"),
+                service: service("cache"),
+            }
+            .timeout(),
+            CommandTimeout::Slow(Duration::from_secs(DATA_SAMPLE_TIMEOUT_SECS))
+        );
+    }
+
+    #[test]
     fn config_show_argv() {
         assert_eq!(
             DokkuCommand::ConfigShow { app: app("myapp") }.argv(),
@@ -2356,8 +2402,63 @@ mod tests {
         );
         assert!(argv[4].contains("memory.current"));
         assert!(argv[4].contains("cpu.stat"));
-        assert!(argv[4].contains("du -sk $DD"));
         assert!(argv[4].contains("df -Pk $DD"));
+        assert!(
+            !argv[4].contains("du -sk"),
+            "du is polled on its own slower interval: {}",
+            argv[4]
+        );
+    }
+
+    #[test]
+    fn service_data_usage_argv_runs_the_du_script() {
+        let argv = DokkuCommand::ServiceDataUsage {
+            plugin: plugin("redis"),
+            service: service("cache"),
+        }
+        .argv();
+        assert_eq!(argv[0], "redis:enter");
+        assert_eq!(argv[1], "cache");
+        assert_eq!(argv[2], "sh");
+        assert_eq!(argv[3], "-c");
+        assert!(argv[4].contains("du -sk /data"), "{}", argv[4]);
+        assert!(!argv[4].contains("cpu.stat"));
+    }
+
+    #[test]
+    fn service_data_usage_script_is_xargs_safe() {
+        for plugin_name in ["postgres", "mysql", "redis", "mongo"] {
+            let argv = DokkuCommand::ServiceDataUsage {
+                plugin: plugin(plugin_name),
+                service: service("svc"),
+            }
+            .argv();
+            assert!(
+                !argv[4].contains('\''),
+                "{plugin_name}: shell quoting breaks dokku's SSH xargs re-split: {}",
+                argv[4]
+            );
+            assert!(
+                !argv[4].contains('\n'),
+                "{plugin_name}: xargs -n 1 plus readarray split multi-line scripts: {}",
+                argv[4]
+            );
+        }
+    }
+
+    #[test]
+    fn service_data_usage_is_plugin_gated() {
+        let requirement = DokkuCommand::ServiceDataUsage {
+            plugin: plugin("redis"),
+            service: service("svc"),
+        }
+        .requirement();
+        assert_eq!(
+            requirement,
+            Requirement::Plugin {
+                name: "redis".to_owned()
+            }
+        );
     }
 
     #[test]

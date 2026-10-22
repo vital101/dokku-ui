@@ -1,0 +1,28 @@
+{% extends "services/base_service.html" %}
+
+{% block service_content %}
+<div class="space-y-6">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <h3 class="text-sm font-medium text-white">Metrics</h3>
+    <div id="metrics-controls" class="flex items-center gap-1">
+      <form hx-get="/services/{{ plugin }}/{{ service }}/partials/metrics"
+            hx-target="#metrics-panel"
+            hx-swap="innerHTML">
+        {% for option in ranges %}
+        <button type="submit" name="range" value="{{ option.query() }}"
+                class="rounded-md px-3 py-1.5 text-sm font-medium {% if option.query() == range.query() %}bg-emerald-600 text-white{% else %}bg-slate-800 text-slate-200 hover:bg-slate-700{% endif %}">
+          {{ option.query() }}
+        </button>
+        {% endfor %}
+      </form>
+    </div>
+  </div>
+
+  <div id="metrics-panel"
+       hx-get="/services/{{ plugin }}/{{ service }}/partials/metrics?range={{ range.query() }}"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    {% include "partials/loading.html" %}
+  </div>
+</div>
+{% endblock %}

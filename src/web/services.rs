@@ -12,6 +12,7 @@ use crate::domain::command::DokkuCommand;
 use crate::domain::git::is_valid_image_ref;
 use crate::domain::image_tag::{docker_hub_repo, select_tags, split_image_ref};
 use crate::domain::job::{JobSpec, ServiceAction as JobServiceAction};
+use crate::domain::metrics::{MetricRange, MetricsView, build_metrics_view};
 use crate::domain::parse::{LOG_LINES_MAX, LOG_LINES_MIN, clamp_log_lines, parse_service_list};
 use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
@@ -19,7 +20,9 @@ use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::service_upgrade::ServiceUpgradeOptions;
 use crate::domain::types::ServiceInfo;
 use crate::error::AppError;
+use crate::storage::metrics::SqliteMetrics;
 use crate::storage::runs::{NewRun, RunOutcome, TargetKind};
+use crate::storage::snapshots::now_ms;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
@@ -187,6 +190,35 @@ impl StatsPartial {
             fs_percent: None,
         }
     }
+}
+
+#[derive(Template)]
+#[template(path = "services/metrics.html")]
+struct MetricsPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    plugin: ServicePlugin,
+    service: &'a str,
+    active_tab: &'static str,
+    range: MetricRange,
+    ranges: &'static [MetricRange],
+}
+
+#[derive(Template)]
+#[template(path = "services/partials/metrics.html")]
+struct MetricsPartial<'a> {
+    plugin: ServicePlugin,
+    service: &'a str,
+    range: MetricRange,
+    ranges: &'static [MetricRange],
+    charts: Vec<crate::domain::metrics::ChartView>,
+    empty: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct MetricsQuery {
+    range: Option<String>,
 }
 
 #[derive(Template)]
@@ -1066,19 +1098,29 @@ pub async fn stats_partial(
 
     let retry_url = format!("/services/{plugin}/{service}/partials/stats");
     match service_stats(&*state.dokku, plugin, &service).await {
-        Ok(Some(stats)) => render(&StatsPartial {
-            not_running: false,
-            memory_used_label: stats.memory_used_label(),
-            memory_detail_label: stats.memory_detail_label(),
-            memory_percent: stats.memory_percent_rounded(),
-            cpu_percent_label: stats.cpu_percent_label(),
-            cpu_total_label: stats.cpu_total_label(),
-            data_label: stats.data_label(),
-            fs_used_label: stats.fs_used_label(),
-            fs_total_label: stats.fs_total_label(),
-            fs_avail_label: stats.fs_avail_label(),
-            fs_percent: stats.fs_percent_rounded(),
-        }),
+        Ok(Some(mut stats)) => {
+            stats.data_kb = if plugin.supports_data_size() {
+                SqliteMetrics::new(state.db.clone())
+                    .latest_data_kb(plugin, &service)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                None
+            };
+            render(&StatsPartial {
+                not_running: false,
+                memory_used_label: stats.memory_used_label(),
+                memory_detail_label: stats.memory_detail_label(),
+                memory_percent: stats.memory_percent_rounded(),
+                cpu_percent_label: stats.cpu_percent_label(),
+                cpu_total_label: stats.cpu_total_label(),
+                data_label: stats.data_label(),
+                fs_used_label: stats.fs_used_label(),
+                fs_total_label: stats.fs_total_label(),
+                fs_avail_label: stats.fs_avail_label(),
+                fs_percent: stats.fs_percent_rounded(),
+            })
+        }
         Ok(None) => error_fragment(
             &retry_url,
             "No stats were reported by the service container.",
@@ -1096,6 +1138,58 @@ fn service_not_running(err: &DokkuError) -> bool {
         DokkuError::Exit { stderr, .. }
             if stderr.contains("not running") || stderr.contains("does not exist")
     )
+}
+
+pub async fn metrics_page(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let ctx = detail_context(&state, &session, &raw_plugin, &raw_service).await?;
+
+    render(&MetricsPage {
+        email: &ctx.email,
+        csrf_token: &ctx.csrf_token,
+        flash: ctx.flash.as_ref(),
+        plugin: ctx.plugin,
+        service: ctx.service.as_str(),
+        active_tab: "metrics",
+        range: MetricRange::TwentyFourHours,
+        ranges: &MetricRange::ALL,
+    })
+}
+
+pub async fn metrics_partial(
+    state: web::Data<AppState>,
+    session: Session,
+    path: web::Path<(String, String)>,
+    query: web::Query<MetricsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (raw_plugin, raw_service) = path.into_inner();
+    let plugin = plugin_from_slug(&raw_plugin)?;
+    let service = service_from_slug(&raw_service)?;
+    current_user(&state, &session).await?;
+
+    let range = MetricRange::parse(query.range.as_deref());
+    let metrics = SqliteMetrics::new(state.db.clone());
+    let now_ms = now_ms();
+    let aggregates = metrics
+        .aggregates(plugin, &service, range.start_ms(now_ms), range.width_ms())
+        .await?;
+    let data = metrics
+        .data_aggregates(plugin, &service, range.start_ms(now_ms), range.width_ms())
+        .await?;
+    let MetricsView { charts, empty } = build_metrics_view(&aggregates, &data, range, now_ms);
+
+    render(&MetricsPartial {
+        plugin,
+        service: service.as_str(),
+        range,
+        ranges: &MetricRange::ALL,
+        charts,
+        empty,
+    })
 }
 
 /// No-JS confirmation page, mirroring the app delete flow. The modal fragment

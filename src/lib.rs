@@ -26,6 +26,20 @@ pub async fn run(settings: settings::Settings) -> io::Result<()> {
         capabilities.clone(),
         std::time::Duration::from_secs(settings.snapshot_refresh_secs),
     );
+    if settings.metrics_refresh_secs > 0 {
+        let metrics = Arc::new(dokku::MetricsStore::new(
+            client.clone(),
+            capabilities.clone(),
+            pool.clone(),
+            settings.metrics_refresh_secs,
+            settings.metrics_du_every_secs,
+            settings.metrics_ttl_secs,
+        ));
+        let _metrics_refresher = dokku::spawn_metrics_refresher(
+            metrics,
+            std::time::Duration::from_secs(settings.metrics_refresh_secs),
+        );
+    }
     let image_source: Arc<dyn images::ImageTagSource> =
         Arc::new(images::DockerHubSource::new().map_err(io::Error::other)?);
     let image_tags = Arc::new(images::ImageTagStore::new(

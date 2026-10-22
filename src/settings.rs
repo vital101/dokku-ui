@@ -21,6 +21,14 @@ pub struct Settings {
     pub activity_ttl_secs: u64,
     pub run_log_ttl_secs: u64,
     pub reauth_ttl_secs: u64,
+    /// How often the metrics poller samples cheap service stats; `0` disables
+    /// metrics collection entirely.
+    pub metrics_refresh_secs: u64,
+    /// How often the metrics poller samples expensive data-dir sizes; `0`
+    /// disables data-size samples while still collecting cgroup/df stats.
+    pub metrics_du_every_secs: u64,
+    /// How long metric rows are retained; `0` disables pruning.
+    pub metrics_ttl_secs: u64,
     /// Reverse-proxy header auth is enabled only when this list is non-empty;
     /// the header is honored only when the direct peer falls inside it.
     pub trusted_proxy_cidrs: Vec<Cidr>,
@@ -146,6 +154,24 @@ impl Settings {
                 .map_err(|_| SettingsError::InvalidImageTagsTtl(raw.clone()))?,
             None => 21_600,
         };
+        let metrics_refresh_secs = match vars.get("METRICS_REFRESH_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidMetricsRefresh(raw.clone()))?,
+            None => 60,
+        };
+        let metrics_du_every_secs = match vars.get("METRICS_DU_EVERY_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidMetricsDuTtl(raw.clone()))?,
+            None => 900,
+        };
+        let metrics_ttl_secs = match vars.get("METRICS_TTL_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidMetricsTtl(raw.clone()))?,
+            None => 7_776_000,
+        };
         Ok(Self {
             port,
             database_url,
@@ -162,6 +188,9 @@ impl Settings {
             activity_ttl_secs,
             run_log_ttl_secs,
             reauth_ttl_secs,
+            metrics_refresh_secs,
+            metrics_du_every_secs,
+            metrics_ttl_secs,
             trusted_proxy_cidrs,
             proxy_auth_header,
             proxy_auth_default_role,
@@ -196,6 +225,12 @@ pub enum SettingsError {
     InvalidProxyAuthRole(String),
     #[error("IMAGE_TAGS_TTL_SECS must be a valid u64, got `{0}`")]
     InvalidImageTagsTtl(String),
+    #[error("METRICS_REFRESH_SECS must be a valid u64, got `{0}`")]
+    InvalidMetricsRefresh(String),
+    #[error("METRICS_DU_EVERY_SECS must be a valid u64, got `{0}`")]
+    InvalidMetricsDuTtl(String),
+    #[error("METRICS_TTL_SECS must be a valid u64, got `{0}`")]
+    InvalidMetricsTtl(String),
 }
 
 #[cfg(test)]
@@ -238,6 +273,9 @@ mod tests {
         assert_eq!(settings.activity_ttl_secs, 7_776_000);
         assert_eq!(settings.run_log_ttl_secs, 604_800);
         assert_eq!(settings.reauth_ttl_secs, 300);
+        assert_eq!(settings.metrics_refresh_secs, 60);
+        assert_eq!(settings.metrics_du_every_secs, 900);
+        assert_eq!(settings.metrics_ttl_secs, 7_776_000);
         assert!(settings.trusted_proxy_cidrs.is_empty());
         assert_eq!(settings.proxy_auth_header, "x-forwarded-user");
         assert_eq!(settings.proxy_auth_default_role, Role::Viewer);
@@ -276,6 +314,9 @@ mod tests {
             ("PROXY_AUTH_HEADER", "X-Auth-Request-Email"),
             ("PROXY_AUTH_DEFAULT_ROLE", "operator"),
             ("IMAGE_TAGS_TTL_SECS", "900"),
+            ("METRICS_REFRESH_SECS", "30"),
+            ("METRICS_DU_EVERY_SECS", "1800"),
+            ("METRICS_TTL_SECS", "86400"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -305,6 +346,9 @@ mod tests {
         assert_eq!(settings.proxy_auth_default_role, Role::Operator);
         assert!(settings.proxy_auth_enabled());
         assert_eq!(settings.image_tags_ttl_secs, 900);
+        assert_eq!(settings.metrics_refresh_secs, 30);
+        assert_eq!(settings.metrics_du_every_secs, 1_800);
+        assert_eq!(settings.metrics_ttl_secs, 86_400);
     }
 
     #[test]
@@ -373,6 +417,31 @@ mod tests {
         let err =
             Settings::from_map(&map(&[("SNAPSHOT_REFRESH_SECS", "0")])).expect_err("zero refresh");
         assert!(matches!(err, SettingsError::InvalidSnapshotRefresh(_)));
+    }
+
+    #[test]
+    fn accepts_zero_metrics_toggles() {
+        let settings = Settings::from_map(&map(&[
+            ("METRICS_REFRESH_SECS", "0"),
+            ("METRICS_DU_EVERY_SECS", "0"),
+            ("METRICS_TTL_SECS", "0"),
+        ]))
+        .expect("metrics disabled");
+        assert_eq!(settings.metrics_refresh_secs, 0);
+        assert_eq!(settings.metrics_du_every_secs, 0);
+        assert_eq!(settings.metrics_ttl_secs, 0);
+    }
+
+    #[test]
+    fn rejects_invalid_metrics_settings() {
+        let err =
+            Settings::from_map(&map(&[("METRICS_REFRESH_SECS", "soon")])).expect_err("invalid");
+        assert!(matches!(err, SettingsError::InvalidMetricsRefresh(_)));
+        let err =
+            Settings::from_map(&map(&[("METRICS_DU_EVERY_SECS", "soon")])).expect_err("invalid");
+        assert!(matches!(err, SettingsError::InvalidMetricsDuTtl(_)));
+        let err = Settings::from_map(&map(&[("METRICS_TTL_SECS", "soon")])).expect_err("invalid");
+        assert!(matches!(err, SettingsError::InvalidMetricsTtl(_)));
     }
 
     #[test]

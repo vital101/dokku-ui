@@ -1,5 +1,7 @@
 use crate::domain::command::DokkuCommand;
-use crate::domain::parse::{parse_service_stats, parse_storage_entries, parse_volume_usage};
+use crate::domain::parse::{
+    parse_service_data_kb, parse_service_stats, parse_storage_entries, parse_volume_usage,
+};
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::types::{ServiceStats, StorageEntry, VolumeUsage};
@@ -20,6 +22,22 @@ pub async fn service_stats(
         })
         .await?;
     Ok(parse_service_stats(&output.stdout))
+}
+
+/// Data-dir size in KiB via the separate `du` script. Polished far less often
+/// than [`service_stats`] because it walks the whole tree.
+pub async fn service_data_usage(
+    client: &dyn DokkuClient,
+    plugin: ServicePlugin,
+    service: &ServiceName,
+) -> Result<Option<u64>, DokkuError> {
+    let output = client
+        .exec(&DokkuCommand::ServiceDataUsage {
+            plugin,
+            service: service.clone(),
+        })
+        .await?;
+    Ok(parse_service_data_kb(&output.stdout))
 }
 
 /// Registered storage entries, for mapping a mount's host path onto the entry
@@ -53,6 +71,7 @@ mod tests {
     use crate::dokku::{DokkuOutput, MockClient};
 
     const REDIS_STATS: &str = include_str!("../../tests/fixtures/redis_stats.txt");
+    const REDIS_DU: &str = include_str!("../../tests/fixtures/redis_du.txt");
     const VOLUME_USAGE: &str = include_str!("../../tests/fixtures/volume_usage.txt");
     const LIST_ENTRIES: &str = include_str!("../../tests/fixtures/list_entries.json");
 
@@ -80,8 +99,45 @@ mod tests {
             .expect("parsed");
 
         assert_eq!(stats.cpus, Some(4));
-        assert_eq!(stats.data_kb, Some(12));
         assert_eq!(stats.memory_used_label(), "6.7 MiB");
+    }
+
+    #[tokio::test]
+    async fn service_data_usage_parses_fixture() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ServiceDataUsage {
+                plugin: redis(),
+                service: candid(),
+            },
+            Ok(DokkuOutput::ok(REDIS_DU)),
+        );
+
+        assert_eq!(
+            service_data_usage(&client, redis(), &candid())
+                .await
+                .expect("du"),
+            Some(12)
+        );
+    }
+
+    #[tokio::test]
+    async fn service_data_usage_error_propagates() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ServiceDataUsage {
+                plugin: redis(),
+                service: candid(),
+            },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "Service container is not running".into(),
+            }),
+        );
+
+        assert!(
+            service_data_usage(&client, redis(), &candid())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

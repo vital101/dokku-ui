@@ -11,6 +11,7 @@ pub mod http_auth;
 pub mod image_tag;
 pub mod instance_settings;
 pub mod job;
+pub mod metrics;
 pub mod mount_spec;
 pub mod parse;
 pub mod password;
@@ -48,6 +49,11 @@ pub use instance_settings::{
 };
 pub use job::{
     AppAction, CompletionRefresh, CompletionSpec, JobPayload, JobSpec, JobSpecError, ServiceAction,
+};
+pub use metrics::{
+    ChartView, DataSizeAggregate, DataSizeSample, MetricAggregate, MetricPoint, MetricRange,
+    MetricSample, MetricsView, align_bucket, build_metrics_view, data_size_sample,
+    sample_from_stats,
 };
 pub use mount_spec::{MountSpec, MountSpecError};
 pub use parse::{LOG_LINES_DEFAULT, LOG_LINES_MAX, LOG_LINES_MIN, ParseError, clamp_log_lines};

@@ -10,6 +10,7 @@ pub mod capabilities;
 pub mod image_tags;
 pub mod instance_settings;
 pub mod jobs;
+pub mod metrics;
 pub mod password_resets;
 pub mod runs;
 pub mod service_image_config;
@@ -126,13 +127,15 @@ mod tests {
         let url = format!("sqlite://{}/db.sqlite", dir.path().display());
         let pool = connect(&url).await.expect("connect");
         let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type = 'table' \
-             AND name IN ('snapshots', 'action_runs', 'action_run_lines', 'capabilities', 'action_jobs')",
+             "SELECT name FROM sqlite_master WHERE type = 'table' \
+              AND name IN ('snapshots', 'action_runs', 'action_run_lines', 'capabilities', 'action_jobs', \
+                           'service_metric_samples', 'service_data_sizes', 'metrics_poll', \
+                           'metrics_data_attempts')",
         )
         .fetch_all(&pool)
         .await
         .expect("query tables");
-        assert_eq!(tables.len(), 5);
+        assert_eq!(tables.len(), 9);
     }
 
     #[tokio::test]

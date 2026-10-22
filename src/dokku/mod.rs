@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod client;
 pub mod dashboard;
 pub mod dns;
+pub mod metrics;
 pub mod mock;
 pub mod overview;
 pub mod processes;
@@ -25,6 +26,7 @@ pub use dashboard::{
     AppRow, DashboardData, dashboard_from_snapshot, dashboard_from_snapshot_filtered,
 };
 pub use dns::{DnsResolver, FakeResolver, TokioResolver, dns_record_status};
+pub use metrics::{MetricsError, MetricsStore, spawn_metrics_refresher};
 pub use mock::MockClient;
 pub use overview::{OverviewError, overview_from_snapshot};
 pub use processes::{
@@ -36,7 +38,7 @@ pub use service_pages::{plugin_services, service_linked_apps, service_logs};
 pub use snapshot::{
     Snapshot, SnapshotError, SnapshotStore, build_snapshot, format_age, spawn_refresher,
 };
-pub use stats_pages::{service_stats, storage_entries, volume_usage};
+pub use stats_pages::{service_data_usage, service_stats, storage_entries, volume_usage};
 pub use storage_pages::app_mounts;
 pub use workers::{
     DEFAULT_MAX_ATTEMPTS, JOB_HEARTBEAT, JOB_LEASE_SECS, RETRY_BACKOFF_BASE_SECS,

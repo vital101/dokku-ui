@@ -246,11 +246,13 @@ impl RusshClient {
         match command.timeout() {
             CommandTimeout::Default => Some(self.timeout),
             CommandTimeout::Indefinite => None,
+            CommandTimeout::Slow(timeout) => Some(timeout),
         }
     }
 
     /// Runs `command`, optionally streaming output chunks to `sink`. Action
-    /// commands have no timeout; the rest are bounded by `COMMAND_TIMEOUT_SECS`.
+    /// commands have no timeout, slow read probes use their own bound, and the
+    /// rest are bounded by `COMMAND_TIMEOUT_SECS`.
     async fn execute(
         &self,
         command: &DokkuCommand,

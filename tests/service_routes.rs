@@ -12,7 +12,9 @@ use common::{
 
 use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::command::DokkuCommand;
+use dokku_ui::domain::metrics::{DataSizeSample, MetricSample};
 use dokku_ui::domain::{ServiceCreateOptions, ServiceName, ServicePlugin};
+use dokku_ui::storage::metrics::SqliteMetrics;
 use dokku_ui::web::{AppState, build_app};
 
 const REDIS_LIST: &str = include_str!("fixtures/redis_list.txt");
@@ -1739,6 +1741,7 @@ async fn service_stats_partial_renders_resource_labels() {
         Ok(DokkuOutput::ok(include_str!("fixtures/redis_stats.txt"))),
     );
     let (state, _client, _dir) = test_state_with_shared_client(client).await;
+    seed_metric_samples(&state).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
 
@@ -1855,6 +1858,127 @@ async fn service_stats_partial_unrecognised_output_returns_retry_card() {
     let body = get_body(resp).await;
 
     assert!(body.contains("No stats were reported"), "{body}");
+}
+
+#[tokio::test]
+async fn service_metrics_page_renders_range_controls_and_htmx_target() {
+    let (state, _client, _dir) = test_state_with_shared_client(service_list_stub()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/metrics")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        body.contains(r#"href="/services/redis/candid/metrics""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"hx-get="/services/redis/candid/partials/metrics?range=24h""#),
+        "{body}"
+    );
+    assert!(body.contains(r#"value="1h""#), "{body}");
+    assert!(body.contains(r#"value="30d""#), "{body}");
+}
+
+#[tokio::test]
+async fn service_metrics_partial_renders_svg_charts() {
+    let (state, _client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    seed_metric_samples(&state).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/metrics?range=1h")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(
+        !body.contains("<!doctype html>"),
+        "fragment, not a full page"
+    );
+    assert!(body.contains("CPU"), "{body}");
+    assert!(body.contains("Memory"), "{body}");
+    assert!(body.contains("Disk"), "{body}");
+    assert!(body.contains("Data"), "{body}");
+    assert!(body.contains("<svg"), "{body}");
+    assert!(body.contains("stroke-emerald-500"), "{body}");
+    assert!(body.contains("stroke-sky-500"), "{body}");
+    assert!(body.contains("stroke-amber-500"), "{body}");
+    assert!(body.contains("stroke-violet-500"), "{body}");
+    assert!(body.contains("10.0%"), "{body}");
+    assert!(body.contains("50.0%"), "{body}");
+    assert!(body.contains("25.0%"), "{body}");
+    assert!(body.contains("12 KiB"), "{body}");
+    assert!(body.contains(r#"hx-swap-oob="true""#), "{body}");
+    assert_eq!(body.matches("bg-emerald-600").count(), 1);
+}
+
+#[tokio::test]
+async fn service_metrics_partial_empty_range_is_a_state() {
+    let (state, _client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/metrics?range=1h")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+
+    assert!(body.contains("No metrics samples yet"), "{body}");
+}
+
+async fn seed_metric_samples(state: &AppState) {
+    let ts = dokku_ui::storage::snapshots::now_ms();
+    let metrics = SqliteMetrics::new(state.db.clone());
+    metrics
+        .record_sample(&MetricSample {
+            plugin: "redis".to_owned(),
+            service: "candid".to_owned(),
+            ts_ms: ts,
+            bucket_ms: ts - ts.rem_euclid(60_000),
+            cpu_percent: Some(10.0),
+            cpu_total_usec: Some(1_000_000),
+            cpus: Some(2),
+            mem_used_bytes: Some(2_048),
+            mem_limit_bytes: Some(4_096),
+            host_mem_total_kb: Some(1_048_576),
+            fs_total_kb: Some(100),
+            fs_used_kb: Some(25),
+            fs_avail_kb: Some(75),
+        })
+        .await
+        .expect("record sample");
+    metrics
+        .record_data_size(&DataSizeSample {
+            plugin: "redis".to_owned(),
+            service: "candid".to_owned(),
+            ts_ms: ts,
+            bucket_ms: ts - ts.rem_euclid(900_000),
+            data_kb: 12,
+        })
+        .await
+        .expect("record data size");
 }
 
 #[tokio::test]

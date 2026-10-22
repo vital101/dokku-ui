@@ -433,6 +433,14 @@ pub fn build_app(
             web::get().to(services::stats_partial),
         )
         .route(
+            "/services/{plugin}/{service}/metrics",
+            web::get().to(services::metrics_page),
+        )
+        .route(
+            "/services/{plugin}/{service}/partials/metrics",
+            web::get().to(services::metrics_partial),
+        )
+        .route(
             "/services/{plugin}/{service}/partials/delete-confirm",
             web::get().to(services::delete_confirm_modal),
         )

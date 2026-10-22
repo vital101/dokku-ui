@@ -15,6 +15,9 @@ use dokku_ui::dokku::{DokkuClient, DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::AppName;
 use dokku_ui::domain::capabilities::CapabilityFamily;
 use dokku_ui::domain::command::DokkuCommand;
+use dokku_ui::domain::metrics::MetricSample;
+use dokku_ui::storage::metrics::SqliteMetrics;
+use dokku_ui::storage::snapshots::now_ms;
 use dokku_ui::web::build_app;
 
 fn app_name(name: &str) -> AppName {
@@ -390,4 +393,47 @@ async fn capabilities_cold_start_serves_the_shared_row_without_ssh() {
         caps_a.log_sources, caps_b.log_sources,
         "both processes answer identically"
     );
+}
+
+#[tokio::test]
+async fn metrics_written_by_one_container_render_in_another() {
+    let (a, b, _dir) =
+        states_over_shared_db(Arc::new(no_ssh_client()), Arc::new(no_ssh_client())).await;
+    let ts = now_ms();
+    let metrics = SqliteMetrics::new(a.db.clone());
+    metrics
+        .record_sample(&MetricSample {
+            plugin: "redis".to_owned(),
+            service: "candid".to_owned(),
+            ts_ms: ts,
+            bucket_ms: ts - ts.rem_euclid(60_000),
+            cpu_percent: Some(10.0),
+            cpu_total_usec: Some(1_000_000),
+            cpus: Some(2),
+            mem_used_bytes: Some(2_048),
+            mem_limit_bytes: Some(4_096),
+            host_mem_total_kb: Some(1_048_576),
+            fs_total_kb: Some(100),
+            fs_used_kb: Some(25),
+            fs_avail_kb: Some(75),
+        })
+        .await
+        .expect("A writes metrics");
+
+    let app_b = test::init_service(build_app(b)).await;
+    let cookie = complete_setup(&app_b).await;
+
+    let resp = test::call_service(
+        &app_b,
+        test::TestRequest::get()
+            .uri("/services/redis/candid/partials/metrics?range=1h")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("CPU"), "{body}");
+    assert!(body.contains("10.0%"), "{body}");
+    assert!(body.contains("<svg"), "{body}");
 }

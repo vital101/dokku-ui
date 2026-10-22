@@ -1,0 +1,34 @@
+<div id="metrics-controls" class="flex items-center gap-1" hx-swap-oob="true">
+  <form hx-get="/services/{{ plugin }}/{{ service }}/partials/metrics"
+        hx-target="#metrics-panel"
+        hx-swap="innerHTML">
+    {% for option in ranges %}
+    <button type="submit" name="range" value="{{ option.query() }}"
+            class="rounded-md px-3 py-1.5 text-sm font-medium {% if option.query() == range.query() %}bg-emerald-600 text-white{% else %}bg-slate-800 text-slate-200 hover:bg-slate-700{% endif %}">
+      {{ option.query() }}
+    </button>
+    {% endfor %}
+  </form>
+</div>
+
+{% if empty %}
+<div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+  <p class="text-sm text-slate-400">No metrics samples yet for the last {{ range.label() }}. Metrics are collected by the background poller.</p>
+</div>
+{% else %}
+<div class="grid gap-4 md:grid-cols-2">
+  {% for chart in charts %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <div class="flex items-center justify-between gap-3">
+      <h3 class="text-sm font-medium text-white">{{ chart.title }}</h3>
+      <span class="text-sm text-white">{{ chart.latest_label }}</span>
+    </div>
+    {% if chart.empty %}
+    <p class="mt-4 text-sm text-slate-400">No samples in range.</p>
+    {% else %}
+    <div class="mt-4">{{ chart.svg|safe }}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

@@ -48,6 +48,17 @@ impl DokkuError {
     pub fn is_transient(&self) -> bool {
         matches!(self, DokkuError::Connect(_)) || matches!(self, DokkuError::Timeout { .. })
     }
+
+    /// The service container is stopped or the service is gone. `<plugin>:enter`
+    /// and `<plugin>:logs` fail this way; the UI renders it as a state rather
+    /// than an error, and the metrics poller skips such services silently.
+    pub fn is_not_running(&self) -> bool {
+        matches!(
+            self,
+            DokkuError::Exit { stderr, .. }
+                if stderr.contains("not running") || stderr.contains("does not exist")
+        )
+    }
 }
 
 #[async_trait]

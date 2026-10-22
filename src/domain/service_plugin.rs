@@ -82,6 +82,14 @@ impl ServicePlugin {
             _ => "/data",
         }
     }
+
+    /// Whether `<plugin>:data-dir` size sampling is meaningful. Memcached and
+    /// NATS have no persistent data volume, so their `data_dir()` is the
+    /// container root; scanning it measures the image/writable layer, not the
+    /// service dataset.
+    pub fn supports_data_size(&self) -> bool {
+        self.data_dir() != "/"
+    }
 }
 
 impl TryFrom<&str> for ServicePlugin {
@@ -201,6 +209,26 @@ mod tests {
             assert_eq!(
                 ServicePlugin::try_from(raw).expect("supported").data_dir(),
                 dir,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_size_is_skipped_when_the_data_dir_is_the_container_root() {
+        for raw in ["postgres", "mysql", "redis", "mongo", "solr"] {
+            assert!(
+                ServicePlugin::try_from(raw)
+                    .expect("plugin")
+                    .supports_data_size(),
+                "{raw}"
+            );
+        }
+        for raw in ["memcached", "nats"] {
+            assert!(
+                !ServicePlugin::try_from(raw)
+                    .expect("plugin")
+                    .supports_data_size(),
                 "{raw}"
             );
         }

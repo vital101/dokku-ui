@@ -887,6 +887,15 @@ pub fn parse_volume_usage(output: &str) -> Option<VolumeUsage> {
     (!usage.is_empty()).then_some(usage)
 }
 
+/// `<plugin>:enter <service> sh -c '<du script>'` -> the data directory's size
+/// in KiB. `None` when the script printed nothing usable (a stopped container,
+/// or a data dir that does not exist for this plugin definition).
+pub fn parse_service_data_kb(output: &str) -> Option<u64> {
+    parse_key_values(output)
+        .get("data_kb")
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
 /// `storage:list-entries --format json` -> registered entries, used to map a
 /// mount's host path onto the entry name `storage:exec` needs. Unknown fields
 /// are ignored; malformed JSON yields an empty list.
@@ -1014,6 +1023,7 @@ mod tests {
     const STORAGE_REPORT_EMPTY: &str =
         include_str!("../../tests/fixtures/storage_report_empty.txt");
     const REDIS_STATS: &str = include_str!("../../tests/fixtures/redis_stats.txt");
+    const REDIS_DU: &str = include_str!("../../tests/fixtures/redis_du.txt");
     const VOLUME_USAGE: &str = include_str!("../../tests/fixtures/volume_usage.txt");
     const LIST_ENTRIES: &str = include_str!("../../tests/fixtures/list_entries.json");
     const BUILDER_REPORT: &str = include_str!("../../tests/fixtures/builder_report.txt");
@@ -1995,9 +2005,25 @@ mod tests {
         assert_eq!(stats.cpu_total_usec, Some(23_949_388_167));
         assert_eq!(stats.elapsed_secs, Some(1.01));
         assert_eq!(stats.cpus, Some(4));
-        assert_eq!(stats.data_kb, Some(12));
+        assert_eq!(stats.data_kb, None, "du is its own command now");
         assert_eq!(stats.fs_total_kb, Some(162_406_320));
         assert_eq!(stats.memory_used_label(), "6.7 MiB");
+    }
+
+    #[test]
+    fn parses_service_data_kb_fixture() {
+        assert_eq!(parse_service_data_kb(REDIS_DU), Some(12));
+    }
+
+    #[test]
+    fn service_data_kb_garbage_is_none() {
+        assert_eq!(parse_service_data_kb(""), None);
+        assert_eq!(
+            parse_service_data_kb("-----> Service container is not running\n"),
+            None
+        );
+        assert_eq!(parse_service_data_kb("data_kb=\n"), None);
+        assert_eq!(parse_service_data_kb("data_kb=12\n"), Some(12));
     }
 
     #[test]
