@@ -1,4 +1,5 @@
 pub mod app_name;
+pub mod app_wizard;
 pub mod build;
 pub mod capabilities;
 pub mod command;
@@ -31,6 +32,10 @@ pub mod types;
 pub mod webhook;
 
 pub use app_name::{AppName, AppNameError};
+pub use app_wizard::{
+    AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, MAX_VOLUMES, PlanPreviewLine, VolumeMode,
+    WizardError, WizardService, WizardVolume, plan_preview,
+};
 pub use build::{
     BUILDERS, is_valid_builder_property, is_valid_builder_value, is_valid_buildpack,
     is_valid_buildpack_index,
