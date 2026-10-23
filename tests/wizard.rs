@@ -18,6 +18,7 @@ use dokku_ui::web::build_app;
 
 const PLUGIN_LIST: &str = include_str!("fixtures/plugin_list.txt");
 const REDIS_LIST: &str = include_str!("fixtures/redis_list.txt");
+const LIST_ENTRIES_JSON: &str = include_str!("fixtures/list_entries.json");
 
 async fn get_ok<S, B, E>(app: &S, path: &str, cookie: &Cookie<'static>) -> String
 where
@@ -902,6 +903,517 @@ async fn service_step_posts_require_csrf() {
             "plugin=redis&service=fresh-one",
         ),
         ("/apps/new/services/remove", "index=0"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token=not-a-token&{form}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+}
+
+/// MockClient covering the volumes step's only read: the registered entries
+/// from `tests/fixtures/list_entries.json`.
+fn volumes_client() -> MockClient {
+    MockClient::new()
+        .stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps")),
+        )
+        .stub(
+            DokkuCommand::StorageListEntries,
+            Ok(DokkuOutput::ok(LIST_ENTRIES_JSON)),
+        )
+}
+
+fn no_volume_mutation_calls(client: &MockClient) -> bool {
+    !client.calls().iter().any(|cmd| {
+        matches!(
+            cmd,
+            DokkuCommand::StorageCreate { .. }
+                | DokkuCommand::StorageMount { .. }
+                | DokkuCommand::StorageMountEntry { .. }
+        )
+    })
+}
+
+async fn volumes_page<S, B, E>(app: &S, cookie: &Cookie<'static>) -> String
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    get_ok(app, "/apps/new/volumes", cookie).await
+}
+
+#[tokio::test]
+async fn volumes_step_redirects_to_name_step_without_a_name() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/new/volumes")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new");
+}
+
+#[tokio::test]
+async fn volumes_step_lists_registered_entries_from_the_fixture() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(r#"value="legacy-151e4f1a23""#), "{body}");
+    assert!(
+        body.contains("/var/lib/dokku/data/storage/candid/uploads"),
+        "entry label carries the host path: {body}"
+    );
+    assert!(body.contains("Review plan"), "{body}");
+    assert!(body.contains("No volumes selected yet"), "{body}");
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn create_volume_appends_a_create_named_entry_row() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/create",
+            format!("csrf_token={csrf}&entry=fresh-logs&container=%2Fapp%2Flogs"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/volumes");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(">create named entry</td>"), "mode: {body}");
+    assert!(body.contains(">fresh-logs</td>"), "source: {body}");
+    assert!(body.contains(">/app/logs</td>"), "container: {body}");
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn create_volume_for_a_registered_entry_is_rejected_with_an_attach_hint() {
+    let client = volumes_client().stub(
+        DokkuCommand::StorageListEntries,
+        Ok(DokkuOutput::ok(
+            r#"[{"name":"uploads","host_path":"/var/lib/dokku/data/storage/uploads"}]"#,
+        )),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/create",
+            format!("csrf_token={csrf}&entry=uploads&container=%2Fapp%2Fuploads"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("already exists; attach it instead"), "{body}");
+    assert!(
+        body.contains("No volumes selected yet"),
+        "draft untouched: {body}"
+    );
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn attach_volume_entry_appends_it_including_a_fixture_legacy_entry() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-entry",
+            format!("csrf_token={csrf}&entry=legacy-151e4f1a23&container=%2Fdata"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/volumes");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(">attach entry</td>"), "mode: {body}");
+    assert!(body.contains(">legacy-151e4f1a23</td>"), "source: {body}");
+    assert!(body.contains(">/data</td>"), "container: {body}");
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn attach_volume_path_appends_an_attach_host_path_row() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-path",
+            format!(
+                "csrf_token={csrf}&host=%2Fvar%2Flib%2Fdokku%2Fdata%2Fstorage%2Fshared&container=%2Fmnt%2Fshared"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/volumes");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(">attach host path</td>"), "mode: {body}");
+    assert!(
+        body.contains(">/var/lib/dokku/data/storage/shared</td>"),
+        "source kept in colon-form halves: {body}"
+    );
+    assert!(body.contains(">/mnt/shared</td>"), "container: {body}");
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn duplicate_volume_is_rejected_and_the_draft_keeps_one_row() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-path",
+            format!("csrf_token={csrf}&host=%2Fhost&container=%2Fmnt%2Fshared"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-path",
+            format!("csrf_token={csrf}&host=%2Fhost&container=%2Fmnt%2Fshared"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("is already selected"), "{body}");
+    assert!(
+        body.matches(">/mnt/shared</td>").count() == 1,
+        "one row only: {body}"
+    );
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn invalid_volume_values_never_touch_the_draft() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    for (path, form, needle) in [
+        (
+            "/apps/new/volumes/create",
+            "entry=Bad%20Entry&container=%2Fdata".to_owned(),
+            "Invalid storage entry name",
+        ),
+        (
+            "/apps/new/volumes/create",
+            "entry=legacy-151e4f1a23&container=%2Fdata".to_owned(),
+            "reserved by dokku",
+        ),
+        (
+            "/apps/new/volumes/create",
+            "entry=uploads&container=relative%2Fpath".to_owned(),
+            "Invalid container path",
+        ),
+        (
+            "/apps/new/volumes/attach-entry",
+            "entry=nope-one&container=%2Fdata".to_owned(),
+            "No storage entry named",
+        ),
+        (
+            "/apps/new/volumes/attach-path",
+            "host=%2Fbad+path&container=%2Fdata".to_owned(),
+            "must not contain whitespace",
+        ),
+        (
+            "/apps/new/volumes/attach-path",
+            "host=%2Fhost&container=relative".to_owned(),
+            "container path must be absolute",
+        ),
+    ] {
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token={csrf}&{form}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path} {form}");
+        let body = get_body(resp).await;
+        assert!(body.contains(needle), "{needle} missing from {body}");
+        assert!(
+            body.contains("No volumes selected yet"),
+            "draft untouched after {path}: {body}"
+        );
+    }
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn remove_drops_the_volume_row_and_out_of_range_indexes_are_no_ops() {
+    let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/create",
+            format!("csrf_token={csrf}&entry=fresh-logs&container=%2Fapp%2Flogs"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-path",
+            format!("csrf_token={csrf}&host=%2Fhost&container=%2Fmnt%2Fshared"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(">fresh-logs</td>"), "two rows first: {body}");
+    assert!(body.contains(">/mnt/shared</td>"), "two rows first: {body}");
+
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/remove",
+            format!("csrf_token={csrf}&index=9"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(">fresh-logs</td>"), "rows kept: {body}");
+
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/remove",
+            format!("csrf_token={csrf}&index=0"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let body = volumes_page(&app, &cookie).await;
+    assert!(
+        !body.contains(">fresh-logs</td>"),
+        "first row removed: {body}"
+    );
+    assert!(
+        body.contains(">/mnt/shared</td>"),
+        "second row kept: {body}"
+    );
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn failed_volume_entry_list_shows_a_notice_but_allows_create_path_and_review() {
+    let client = volumes_client().stub(
+        DokkuCommand::StorageListEntries,
+        Err(DokkuError::Connect("ssh refused".to_owned())),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(
+        body.contains("Could not read storage entries:"),
+        "notice: {body}"
+    );
+    assert!(
+        body.contains("failed to connect to dokku host: ssh refused"),
+        "reason shown: {body}"
+    );
+    assert!(body.contains("Review plan"), "review kept: {body}");
+    assert!(
+        !body.contains("/apps/new/volumes/attach-entry"),
+        "attach-entry hidden: {body}"
+    );
+
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/create",
+            format!("csrf_token={csrf}&entry=fresh-logs&container=%2Fapp%2Flogs"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "create still works");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-path",
+            format!("csrf_token={csrf}&host=%2Fhost&container=%2Fmnt%2Fshared"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "attach-path works");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = volumes_page(&app, &cookie).await;
+    assert!(body.contains(">fresh-logs</td>"), "create row: {body}");
+    assert!(body.contains(">attach host path</td>"), "path row: {body}");
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn failed_volume_entry_list_on_attach_entry_prompts_a_retry() {
+    let client = volumes_client().stub(
+        DokkuCommand::StorageListEntries,
+        Err(DokkuError::Exit {
+            code: 2,
+            stderr: "xargs: unmatched single quote".to_owned(),
+        }),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = volumes_page(&app, &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-entry",
+            format!("csrf_token={csrf}&entry=legacy-151e4f1a23&container=%2Fdata"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Could not read storage entries; retry."),
+        "{body}"
+    );
+    assert!(no_volume_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn volume_step_posts_require_csrf() {
+    let (state, _client, _dir) = test_state_with_shared_client(volumes_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    for (path, form) in [
+        (
+            "/apps/new/volumes/create",
+            "entry=fresh-logs&container=%2Fapp%2Flogs",
+        ),
+        (
+            "/apps/new/volumes/attach-entry",
+            "entry=legacy-151e4f1a23&container=%2Fdata",
+        ),
+        (
+            "/apps/new/volumes/attach-path",
+            "host=%2Fhost&container=%2Fmnt%2Fshared",
+        ),
+        ("/apps/new/volumes/remove", "index=0"),
     ] {
         let resp = test::call_service(
             &app,

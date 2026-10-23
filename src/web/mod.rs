@@ -184,6 +184,23 @@ pub fn build_app(
             "/apps/new/services/remove",
             web::post().to(wizard::remove_service),
         )
+        .route("/apps/new/volumes", web::get().to(wizard::volumes_step))
+        .route(
+            "/apps/new/volumes/create",
+            web::post().to(wizard::create_volume),
+        )
+        .route(
+            "/apps/new/volumes/attach-entry",
+            web::post().to(wizard::attach_volume_entry),
+        )
+        .route(
+            "/apps/new/volumes/attach-path",
+            web::post().to(wizard::attach_volume_path),
+        )
+        .route(
+            "/apps/new/volumes/remove",
+            web::post().to(wizard::remove_volume),
+        )
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))

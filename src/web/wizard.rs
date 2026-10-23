@@ -6,11 +6,19 @@ use serde::Deserialize;
 
 use crate::dokku::service_names;
 use crate::domain::AppName;
-use crate::domain::app_wizard::{AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, WizardService};
+use crate::domain::app_wizard::{
+    AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, MAX_VOLUMES, VolumeMode, WizardService,
+    WizardVolume,
+};
 use crate::domain::build::{BUILDERS, is_valid_buildpack};
 use crate::domain::capabilities::Support;
+use crate::domain::command::DokkuCommand;
+use crate::domain::mount_spec::MountSpec;
+use crate::domain::parse::parse_storage_entries;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
+use crate::domain::storage_entry::{StorageEntryName, is_valid_volume_container_path};
+use crate::domain::types::StorageEntry;
 use crate::error::AppError;
 use crate::storage::users::User;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
@@ -645,6 +653,351 @@ pub async fn remove_service(
         save_draft(&session, &draft)?;
     }
     Ok(see_other("/apps/new/services"))
+}
+
+/// One row of the volumes step's current-selections table. The fixed mode
+/// labels keep askama from having to match the draft's `VolumeMode` enum.
+struct SelectedVolumeRow {
+    mode_label: &'static str,
+    source: String,
+    container: String,
+}
+
+#[derive(Template)]
+#[template(path = "apps/wizard/volumes.html")]
+struct VolumesPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    active_step: &'static str,
+    error: Option<String>,
+    entries_error: Option<String>,
+    entries: Vec<StorageEntry>,
+    selected_rows: Vec<SelectedVolumeRow>,
+}
+
+/// The host's registered storage entries (`storage:list-entries --format
+/// json`). The error string only gates the attach-entry select: create and
+/// attach-path never need the list to be readable.
+async fn load_entry_list(state: &AppState) -> Result<Vec<StorageEntry>, String> {
+    match state.dokku.exec(&DokkuCommand::StorageListEntries).await {
+        Ok(output) => Ok(parse_storage_entries(&output.stdout)),
+        Err(err) => {
+            tracing::warn!(error = %err, "wizard volumes step: storage entry list failed");
+            Err(err.to_string())
+        }
+    }
+}
+
+fn volume_rows(draft: &AppWizardDraft) -> Vec<SelectedVolumeRow> {
+    draft
+        .volumes
+        .iter()
+        .map(|volume| SelectedVolumeRow {
+            mode_label: match volume.mode {
+                VolumeMode::Create => "create named entry",
+                VolumeMode::AttachEntry => "attach entry",
+                VolumeMode::AttachPath => "attach host path",
+            },
+            source: volume.source.clone(),
+            container: volume.container.clone(),
+        })
+        .collect()
+}
+
+async fn render_volumes(
+    state: &AppState,
+    session: &Session,
+    user: &User,
+    csrf_token: &str,
+    draft: &AppWizardDraft,
+    error: Option<String>,
+) -> Result<HttpResponse, AppError> {
+    let (entries, entries_error) = match load_entry_list(state).await {
+        Ok(entries) => (entries, None),
+        Err(err) => (Vec::new(), Some(err)),
+    };
+    let flash = take_flash(session);
+    let page = VolumesPage {
+        email: &user.email,
+        csrf_token,
+        flash: flash.as_ref(),
+        active_step: "volumes",
+        error,
+        entries_error,
+        entries,
+        selected_rows: volume_rows(draft),
+    };
+    render(&page)
+}
+
+/// Duplicate and size checks shared by the three add POSTs: the same
+/// `(mode, source, container)` triple can only be selected once and the step
+/// is capped at `MAX_VOLUMES`.
+fn check_volume_selection(
+    draft: &AppWizardDraft,
+    mode: VolumeMode,
+    source: &str,
+    container: &str,
+) -> Result<(), String> {
+    if draft.volumes.iter().any(|volume| {
+        volume.mode == mode && volume.source == source && volume.container == container
+    }) {
+        return Err(format!(
+            "The volume '{source}' at '{container}' is already selected."
+        ));
+    }
+    if draft.volumes.len() >= MAX_VOLUMES {
+        return Err(format!(
+            "Too many volumes; at most {MAX_VOLUMES} are allowed."
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a create selection: a fresh non-reserved entry name plus a valid
+/// `--container-dir` path. If the entry list is readable and already holds
+/// the name, the user means attach-entry instead. A failing list only skips
+/// the exists check — `storage:create` would collide in the final run. The
+/// entry is never created here; that happens in the combined plan run.
+async fn plan_create_volume(
+    state: &AppState,
+    draft: &AppWizardDraft,
+    entry: &str,
+    container: &str,
+) -> Result<WizardVolume, String> {
+    let entry = StorageEntryName::try_from_create(entry)
+        .map_err(|err| format!("Invalid storage entry name: {err}"))?;
+    if !is_valid_volume_container_path(container) {
+        return Err(format!("Invalid container path '{container}'."));
+    }
+    match load_entry_list(state).await {
+        Ok(entries)
+            if entries
+                .iter()
+                .any(|existing| existing.name == entry.as_str()) =>
+        {
+            return Err(format!(
+                "Entry '{entry}' already exists; attach it instead."
+            ));
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "wizard volume create: entry list failed; skipping the exists check"
+            );
+        }
+    }
+    check_volume_selection(draft, VolumeMode::Create, entry.as_str(), container)?;
+    Ok(WizardVolume {
+        mode: VolumeMode::Create,
+        source: entry.to_string(),
+        container: container.to_owned(),
+    })
+}
+
+/// Validates an attach-entry selection against the host: the entry list must
+/// be readable and must contain the name. The `StorageEntryName` parse
+/// allows `legacy-*` names, which exist on hosts but cannot be created.
+async fn plan_attach_entry(
+    state: &AppState,
+    draft: &AppWizardDraft,
+    entry: &str,
+    container: &str,
+) -> Result<WizardVolume, String> {
+    let entries = load_entry_list(state).await.map_err(|err| {
+        tracing::warn!(error = %err, "wizard attach entry: entry list failed");
+        "Could not read storage entries; retry.".to_owned()
+    })?;
+    if !entries.iter().any(|existing| existing.name == entry) {
+        return Err(format!("No storage entry named '{entry}' exists."));
+    }
+    let entry = StorageEntryName::try_from(entry)
+        .map_err(|err| format!("Invalid storage entry name: {err}"))?;
+    if !is_valid_volume_container_path(container) {
+        return Err(format!("Invalid container path '{container}'."));
+    }
+    check_volume_selection(draft, VolumeMode::AttachEntry, entry.as_str(), container)?;
+    Ok(WizardVolume {
+        mode: VolumeMode::AttachEntry,
+        source: entry.to_string(),
+        container: container.to_owned(),
+    })
+}
+
+/// Validates an attach-path selection with the colon-form `MountSpec`, then
+/// stores the two halves. No entry list is involved: any host path or docker
+/// volume name is acceptable to `storage:mount`.
+fn plan_attach_path(
+    draft: &AppWizardDraft,
+    host: &str,
+    container: &str,
+) -> Result<WizardVolume, String> {
+    let mount = MountSpec::try_from(format!("{host}:{container}"))
+        .map_err(|err| format!("Invalid host mount: {err}"))?;
+    check_volume_selection(
+        draft,
+        VolumeMode::AttachPath,
+        mount.host(),
+        mount.container(),
+    )?;
+    Ok(WizardVolume {
+        mode: VolumeMode::AttachPath,
+        source: mount.host().to_owned(),
+        container: mount.container().to_owned(),
+    })
+}
+
+pub async fn volumes_step(
+    state: web::Data<AppState>,
+    session: Session,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+    render_volumes(&state, &session, &user, &csrf_token, &draft, None).await
+}
+
+#[derive(Deserialize)]
+pub struct CreateVolumeForm {
+    entry: String,
+    container: String,
+}
+
+pub async fn create_volume(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<CreateVolumeForm>,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    let CsrfForm(CreateVolumeForm { entry, container }) = form;
+    let entry = entry.trim().to_owned();
+    let container = container.trim().to_owned();
+    match plan_create_volume(&state, &draft, &entry, &container).await {
+        Err(error) => {
+            render_volumes(&state, &session, &user, &csrf_token, &draft, Some(error)).await
+        }
+        Ok(volume) => {
+            let mut draft = draft;
+            draft.volumes.push(volume);
+            save_draft(&session, &draft)?;
+            Ok(see_other("/apps/new/volumes"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AttachVolumeEntryForm {
+    entry: String,
+    container: String,
+}
+
+pub async fn attach_volume_entry(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<AttachVolumeEntryForm>,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    let CsrfForm(AttachVolumeEntryForm { entry, container }) = form;
+    let entry = entry.trim().to_owned();
+    let container = container.trim().to_owned();
+    match plan_attach_entry(&state, &draft, &entry, &container).await {
+        Err(error) => {
+            render_volumes(&state, &session, &user, &csrf_token, &draft, Some(error)).await
+        }
+        Ok(volume) => {
+            let mut draft = draft;
+            draft.volumes.push(volume);
+            save_draft(&session, &draft)?;
+            Ok(see_other("/apps/new/volumes"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AttachVolumePathForm {
+    host: String,
+    container: String,
+}
+
+pub async fn attach_volume_path(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<AttachVolumePathForm>,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    let CsrfForm(AttachVolumePathForm { host, container }) = form;
+    let host = host.trim().to_owned();
+    let container = container.trim().to_owned();
+    match plan_attach_path(&draft, &host, &container) {
+        Err(error) => {
+            render_volumes(&state, &session, &user, &csrf_token, &draft, Some(error)).await
+        }
+        Ok(volume) => {
+            let mut draft = draft;
+            draft.volumes.push(volume);
+            save_draft(&session, &draft)?;
+            Ok(see_other("/apps/new/volumes"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RemoveVolumeForm {
+    index: usize,
+}
+
+pub async fn remove_volume(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<RemoveVolumeForm>,
+) -> Result<HttpResponse, AppError> {
+    let (_user, mut draft, _csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    // Same no-op semantics as the services remove: a stale row index just
+    // redirects to the current state.
+    if form.0.index < draft.volumes.len() {
+        draft.volumes.remove(form.0.index);
+        save_draft(&session, &draft)?;
+    }
+    Ok(see_other("/apps/new/volumes"))
 }
 
 /// Body for the reset POST: nothing but the CSRF token. A unit `()` target

@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}New app — Volumes — Dokku UI{% endblock %}
+{% block heading %}New app — Volumes{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl space-y-6">
+  {% include "apps/wizard/partials/progress.html" %}
+
+  {% if let Some(error) = error %}
+  <div class="rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  {% if let Some(entries_error) = entries_error %}
+  <div class="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
+    Could not read storage entries: {{ entries_error }}.
+    Creating new entries and attaching host paths still work; attaching a registered entry is
+    unavailable until the list can be read again.
+  </div>
+  {% endif %}
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Selected volumes</h3>
+    {% if selected_rows.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">
+      No volumes selected yet. This step is optional — continue to the plan review to create the
+      app without any storage mounts.
+    </p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Mode</th>
+          <th class="py-2 pr-4 font-medium">Source</th>
+          <th class="py-2 pr-4 font-medium">Container path</th>
+          <th class="py-2 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in selected_rows %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 text-slate-300">{{ row.mode_label }}</td>
+          <td class="py-2 pr-4 font-mono text-white">{{ row.source }}</td>
+          <td class="py-2 pr-4 font-mono text-white">{{ row.container }}</td>
+          <td class="py-2 text-right">
+            <form method="post" action="/apps/new/volumes/remove" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="index" value="{{ loop.index0 }}">
+              <button type="submit"
+                      class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+                Remove
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Create named entry</h3>
+    <form method="post" action="/apps/new/volumes/create" class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="create-entry" class="mb-1 block text-sm text-slate-400">Entry name</label>
+        <input id="create-entry" name="entry" type="text" required maxlength="45"
+               pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+               class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500"
+               placeholder="uploads">
+      </div>
+      <div class="flex-1">
+        <label for="create-container" class="mb-1 block text-sm text-slate-400">Container path</label>
+        <input id="create-container" name="container" type="text" required pattern="/.*"
+               class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500"
+               placeholder="/app/uploads">
+      </div>
+      <button type="submit"
+              class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+        Create + mount
+      </button>
+    </form>
+    <p class="mt-2 text-xs text-slate-500">
+      The host directory is created under dokku's storage directory with the default
+      <code class="text-slate-400">storage:create</code> host path; no host path is picked here.
+    </p>
+  </div>
+
+  {% if entries_error.is_none() %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Attach registered entry</h3>
+    {% if entries.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No storage entries are registered on this host.</p>
+    {% else %}
+    <form method="post" action="/apps/new/volumes/attach-entry" class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="attach-entry" class="mb-1 block text-sm text-slate-400">Entry</label>
+        <select id="attach-entry" name="entry" required
+                class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white">
+          {% for entry in entries %}
+          <option value="{{ entry.name }}">{{ entry.name }} ({{ entry.host_path }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="flex-1">
+        <label for="attach-entry-container" class="mb-1 block text-sm text-slate-400">Container path</label>
+        <input id="attach-entry-container" name="container" type="text" required pattern="/.*"
+               class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500"
+               placeholder="/data">
+      </div>
+      <button type="submit"
+              class="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Attach
+      </button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Attach host path</h3>
+    <form method="post" action="/apps/new/volumes/attach-path" class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="attach-host" class="mb-1 block text-sm text-slate-400">Host path or volume</label>
+        <input id="attach-host" name="host" type="text" required pattern="\S+"
+               class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500"
+               placeholder="/var/lib/dokku/data/storage/shared">
+      </div>
+      <div class="flex-1">
+        <label for="attach-path-container" class="mb-1 block text-sm text-slate-400">Container path</label>
+        <input id="attach-path-container" name="container" type="text" required pattern="/.*"
+               class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500"
+               placeholder="/mnt/shared">
+      </div>
+      <button type="submit"
+              class="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Mount
+      </button>
+    </form>
+    <p class="mt-2 text-xs text-slate-500">
+      Mounts an existing host directory or docker volume with the colon-form
+      <code class="text-slate-400">storage:mount</code> argument.
+    </p>
+  </div>
+
+  <div class="flex items-center gap-3">
+    <a href="/apps/new/services" class="text-sm text-slate-400 hover:text-slate-200">Back</a>
+    <a href="/apps/new/review"
+       class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+      Review plan
+    </a>
+  </div>
+</div>
+{% endblock %}
