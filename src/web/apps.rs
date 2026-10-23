@@ -29,14 +29,6 @@ use crate::web::fragments::{
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
 
-#[derive(Template)]
-#[template(path = "apps/new.html")]
-struct NewFormPage<'a> {
-    email: &'a str,
-    csrf_token: &'a str,
-    flash: Option<&'a FlashMessage>,
-}
-
 #[derive(Deserialize)]
 pub struct CreateForm {
     name: String,
@@ -230,30 +222,6 @@ fn fragment_for_resolve_error(
     } else {
         error_fragment(retry_url, &err.to_string())
     }
-}
-
-pub async fn new_form(
-    state: web::Data<AppState>,
-    session: Session,
-) -> Result<HttpResponse, AppError> {
-    let user = current_user(&state, &session).await?;
-    if !user.role.can_manage_apps() {
-        set_flash(
-            &session,
-            FlashLevel::Error,
-            "Your role does not allow creating apps.",
-        );
-        return Ok(see_other("/"));
-    }
-    let csrf_token = ensure_csrf(&session).await?;
-    let flash = take_flash(&session);
-
-    let page = NewFormPage {
-        email: &user.email,
-        csrf_token: &csrf_token,
-        flash: flash.as_ref(),
-    };
-    render(&page)
 }
 
 pub async fn create(

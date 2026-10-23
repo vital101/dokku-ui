@@ -28,6 +28,7 @@ mod toasts;
 mod users;
 mod volumes;
 mod webhooks;
+mod wizard;
 
 use actix_session::SessionMiddleware;
 use actix_session::config::{PersistentSession, TtlExtensionPolicy};
@@ -159,7 +160,12 @@ pub fn build_app(
                 .route(web::get().to(users::password_form))
                 .route(web::post().to(users::password_submit)),
         )
-        .route("/apps/new", web::get().to(apps::new_form))
+        .service(
+            web::resource("/apps/new")
+                .route(web::get().to(wizard::name_step))
+                .route(web::post().to(wizard::save_name)),
+        )
+        .route("/apps/new/reset", web::post().to(wizard::reset))
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))
