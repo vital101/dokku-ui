@@ -303,6 +303,13 @@ impl JobSpec {
         matches!(self, JobSpec::AppDestroy { .. }) || matches!(self, JobSpec::ServiceDestroy { .. })
     }
 
+    /// True when a retry after a partial execution cannot succeed: destructive
+    /// operations, and plan heads like app creation whose re-run hits
+    /// "name already in use" after a mid-plan failure.
+    pub fn is_non_idempotent(&self) -> bool {
+        self.is_destructive() || matches!(self, JobSpec::AppCreate { .. })
+    }
+
     /// Rebuilds the `DokkuCommand`s for this job, validating every name.
     pub fn to_commands(&self) -> Result<Vec<DokkuCommand>, JobSpecError> {
         match self {
@@ -1381,6 +1388,16 @@ mod tests {
     }
 
     #[test]
+    fn app_create_is_non_idempotent() {
+        assert!(
+            JobSpec::AppCreate {
+                app: "alpha".into(),
+            }
+            .is_non_idempotent()
+        );
+    }
+
+    #[test]
     fn storage_create_rehydrates() {
         assert_eq!(
             JobSpec::StorageCreate {
@@ -2013,6 +2030,29 @@ mod tests {
                 action: AppAction::Restart,
             }
             .is_destructive()
+        );
+    }
+
+    #[test]
+    fn non_idempotent_specs_are_flagged() {
+        assert!(
+            JobSpec::AppCreate {
+                app: "alpha".into()
+            }
+            .is_non_idempotent()
+        );
+        assert!(
+            JobSpec::AppDestroy {
+                app: "alpha".into()
+            }
+            .is_non_idempotent()
+        );
+        assert!(
+            !JobSpec::AppAction {
+                app: "alpha".into(),
+                action: AppAction::Restart,
+            }
+            .is_non_idempotent()
         );
     }
 

@@ -47,7 +47,9 @@
           <td class="py-2 text-right">
             <form method="post" action="/apps/new/volumes/remove" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="index" value="{{ loop.index0 }}">
+              <input type="hidden" name="mode" value="{{ row.mode_value }}">
+              <input type="hidden" name="source" value="{{ row.source }}">
+              <input type="hidden" name="container" value="{{ row.container }}">
               <button type="submit"
                       class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
                 Remove

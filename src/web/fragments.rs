@@ -137,7 +137,7 @@ fn job_payload(plan: &[JobSpec], completion: &RunCompletion, redactions: &[Strin
 }
 
 fn max_attempts(plan: &[JobSpec]) -> usize {
-    if plan.iter().any(JobSpec::is_destructive) {
+    if plan.iter().any(JobSpec::is_non_idempotent) {
         1
     } else {
         DEFAULT_MAX_ATTEMPTS
@@ -321,5 +321,43 @@ pub(super) fn reauth_valid_here(session: &Session) -> bool {
     match session.get::<i64>(crate::auth::reauth::REAUTH_UNTIL) {
         Ok(Some(until)) => crate::auth::reauth::reauth_valid(now, until),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_idempotent_plans_get_one_attempt() {
+        let wizard_plan = vec![
+            JobSpec::AppCreate {
+                app: "alpha".into(),
+            },
+            JobSpec::ServiceLink {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                app: "alpha".into(),
+            },
+        ];
+        assert_eq!(max_attempts(&wizard_plan), 1);
+        assert_eq!(
+            max_attempts(&[JobSpec::AppDestroy {
+                app: "alpha".into()
+            }]),
+            1
+        );
+    }
+
+    #[test]
+    fn idempotent_plans_keep_default_attempts() {
+        assert_eq!(
+            max_attempts(&[JobSpec::ServiceLink {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                app: "alpha".into(),
+            }]),
+            DEFAULT_MAX_ATTEMPTS
+        );
     }
 }

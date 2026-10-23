@@ -52,7 +52,8 @@
           <td class="py-2 text-right">
             <form method="post" action="/apps/new/services/remove" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="index" value="{{ loop.index0 }}">
+              <input type="hidden" name="plugin" value="{{ row.plugin }}">
+              <input type="hidden" name="service" value="{{ row.service }}">
               <button type="submit"
                       class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
                 Remove

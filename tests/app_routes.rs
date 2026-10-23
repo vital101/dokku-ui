@@ -240,7 +240,7 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
         ("/apps/new/build", "builder=&buildpacks="),
         ("/apps/new/services/attach", "service_key=redis%3Acandid"),
         ("/apps/new/services/create", "plugin=redis&service=fresh"),
-        ("/apps/new/services/remove", "index=0"),
+        ("/apps/new/services/remove", "plugin=redis&service=candid"),
         ("/apps/new/volumes/create", "entry=logs&container=%2Flogs"),
         (
             "/apps/new/volumes/attach-entry",
@@ -250,7 +250,10 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
             "/apps/new/volumes/attach-path",
             "host=%2Fhost&container=%2Fdata",
         ),
-        ("/apps/new/volumes/remove", "index=0"),
+        (
+            "/apps/new/volumes/remove",
+            "mode=create&source=logs&container=%2Flogs",
+        ),
         ("/apps/new/execute", ""),
         ("/apps/alpha/delete", "name=alpha"),
         ("/apps/alpha/start", ""),

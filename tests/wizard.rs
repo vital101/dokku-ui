@@ -761,7 +761,7 @@ async fn attach_or_create_with_invalid_names_never_touches_the_draft() {
 }
 
 #[tokio::test]
-async fn remove_drops_the_row_and_out_of_range_indexes_are_no_ops() {
+async fn remove_drops_the_row_and_unknown_rows_are_no_ops() {
     let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -785,7 +785,7 @@ async fn remove_drops_the_row_and_out_of_range_indexes_are_no_ops() {
         &app,
         form_request(
             "/apps/new/services/remove",
-            format!("csrf_token={csrf}&index=9"),
+            format!("csrf_token={csrf}&plugin=redis&service=missing"),
         )
         .cookie(cookie.clone())
         .to_request(),
@@ -801,7 +801,7 @@ async fn remove_drops_the_row_and_out_of_range_indexes_are_no_ops() {
         &app,
         form_request(
             "/apps/new/services/remove",
-            format!("csrf_token={csrf}&index=0"),
+            format!("csrf_token={csrf}&plugin=redis&service=candid"),
         )
         .cookie(cookie.clone())
         .to_request(),
@@ -914,7 +914,7 @@ async fn service_step_posts_require_csrf() {
             "/apps/new/services/create",
             "plugin=redis&service=fresh-one",
         ),
-        ("/apps/new/services/remove", "index=0"),
+        ("/apps/new/services/remove", "plugin=redis&service=candid"),
     ] {
         let resp = test::call_service(
             &app,
@@ -1230,7 +1230,7 @@ async fn invalid_volume_values_never_touch_the_draft() {
 }
 
 #[tokio::test]
-async fn remove_drops_the_volume_row_and_out_of_range_indexes_are_no_ops() {
+async fn remove_drops_the_volume_row_and_unknown_rows_are_no_ops() {
     let (state, client, _dir) = test_state_with_shared_client(volumes_client()).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -1273,7 +1273,7 @@ async fn remove_drops_the_volume_row_and_out_of_range_indexes_are_no_ops() {
         &app,
         form_request(
             "/apps/new/volumes/remove",
-            format!("csrf_token={csrf}&index=9"),
+            format!("csrf_token={csrf}&mode=create&source=missing&container=%2Fapp%2Flogs"),
         )
         .cookie(cookie.clone())
         .to_request(),
@@ -1289,7 +1289,7 @@ async fn remove_drops_the_volume_row_and_out_of_range_indexes_are_no_ops() {
         &app,
         form_request(
             "/apps/new/volumes/remove",
-            format!("csrf_token={csrf}&index=0"),
+            format!("csrf_token={csrf}&mode=create&source=fresh-logs&container=%2Fapp%2Flogs"),
         )
         .cookie(cookie.clone())
         .to_request(),
@@ -1425,7 +1425,10 @@ async fn volume_step_posts_require_csrf() {
             "/apps/new/volumes/attach-path",
             "host=%2Fhost&container=%2Fmnt%2Fshared",
         ),
-        ("/apps/new/volumes/remove", "index=0"),
+        (
+            "/apps/new/volumes/remove",
+            "mode=create&source=logs&container=%2Flogs",
+        ),
     ] {
         let resp = test::call_service(
             &app,
@@ -2047,7 +2050,7 @@ const WIZARD_MUTATION_ROUTES: [(&str, &str); 11] = [
     ("/apps/new/build", "builder=&buildpacks="),
     ("/apps/new/services/attach", "service_key=redis%3Acandid"),
     ("/apps/new/services/create", "plugin=redis&service=fresh"),
-    ("/apps/new/services/remove", "index=0"),
+    ("/apps/new/services/remove", "plugin=redis&service=candid"),
     ("/apps/new/volumes/create", "entry=logs&container=%2Flogs"),
     (
         "/apps/new/volumes/attach-entry",
@@ -2057,7 +2060,10 @@ const WIZARD_MUTATION_ROUTES: [(&str, &str); 11] = [
         "/apps/new/volumes/attach-path",
         "host=%2Fhost&container=%2Fdata",
     ),
-    ("/apps/new/volumes/remove", "index=0"),
+    (
+        "/apps/new/volumes/remove",
+        "mode=create&source=logs&container=%2Flogs",
+    ),
     ("/apps/new/execute", ""),
 ];
 

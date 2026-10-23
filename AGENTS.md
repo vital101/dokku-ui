@@ -73,7 +73,9 @@ Why not bare `cargo test`: `static/css/app.css` is a generated, gitignored artif
   ownership before running an already-claimed job; the worker pool
   (`dokku::spawn_worker` in `lib.rs`) reclaims expired leases cross-container.
   Retries: transient `Connect`/`Timeout` only, exponential backoff; `Exit`
-  never; destructive specs `max_attempts=1`. Payloads rehydrate through the
+  never; `max_attempts=1` for `JobSpec::is_non_idempotent()` plans (destructive
+  specs, and any plan containing `AppCreate` — a retry from the top would hit
+  "name already in use" after a mid-plan failure). Payloads rehydrate through the
   newtype constructors, so tampered rows fail without touching the host.
   `JobPayload.redactions` carries literal secrets (config values, basic-auth
   passwords) that are masked from every persisted run line.

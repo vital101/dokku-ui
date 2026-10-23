@@ -300,6 +300,7 @@ struct AvailableService {
 
 /// One row of the current-selections table.
 struct SelectedServiceRow {
+    plugin: String,
     plugin_label: String,
     service: String,
     mode_label: &'static str,
@@ -392,6 +393,7 @@ fn selected_rows(draft: &AppWizardDraft) -> Vec<SelectedServiceRow> {
         .services
         .iter()
         .map(|entry| SelectedServiceRow {
+            plugin: entry.plugin.clone(),
             plugin_label: ServicePlugin::try_from(entry.plugin.as_str())
                 .map(|plugin| plugin.display_name().to_owned())
                 .unwrap_or_else(|_| entry.plugin.clone()),
@@ -633,7 +635,8 @@ pub async fn create_service(
 
 #[derive(Deserialize)]
 pub struct RemoveServiceForm {
-    index: usize,
+    plugin: String,
+    service: String,
 }
 
 pub async fn remove_service(
@@ -650,19 +653,27 @@ pub async fn remove_service(
         return Ok(see_other("/apps/new"));
     }
 
-    // An out-of-range index is a no-op: the row was already gone (another tab,
-    // or a stale page), and a redirect shows the current state.
-    if form.0.index < draft.services.len() {
-        draft.services.remove(form.0.index);
+    // Rows are keyed by plugin+service (the dedup key in `to_plan`), so a
+    // stale submit from another tab can only remove the row it was rendered
+    // for. A key that is not in the draft was already gone: no-op redirect.
+    let CsrfForm(RemoveServiceForm { plugin, service }) = form;
+    if let Some(index) = draft
+        .services
+        .iter()
+        .position(|entry| entry.plugin == plugin && entry.service == service)
+    {
+        draft.services.remove(index);
         save_draft(&session, &draft)?;
     }
     Ok(see_other("/apps/new/services"))
 }
 
 /// One row of the volumes step's current-selections table. The fixed mode
-/// labels keep askama from having to match the draft's `VolumeMode` enum.
+/// labels keep askama from having to match the draft's `VolumeMode` enum, and
+/// `mode_value` carries the serde name the remove form posts back.
 struct SelectedVolumeRow {
     mode_label: &'static str,
+    mode_value: &'static str,
     source: String,
     container: String,
 }
@@ -702,6 +713,11 @@ fn volume_rows(draft: &AppWizardDraft) -> Vec<SelectedVolumeRow> {
                 VolumeMode::Create => "create named entry",
                 VolumeMode::AttachEntry => "attach entry",
                 VolumeMode::AttachPath => "attach host path",
+            },
+            mode_value: match volume.mode {
+                VolumeMode::Create => "create",
+                VolumeMode::AttachEntry => "attach_entry",
+                VolumeMode::AttachPath => "attach_path",
             },
             source: volume.source.clone(),
             container: volume.container.clone(),
@@ -978,7 +994,9 @@ pub async fn attach_volume_path(
 
 #[derive(Deserialize)]
 pub struct RemoveVolumeForm {
-    index: usize,
+    mode: VolumeMode,
+    source: String,
+    container: String,
 }
 
 pub async fn remove_volume(
@@ -995,10 +1013,18 @@ pub async fn remove_volume(
         return Ok(see_other("/apps/new"));
     }
 
-    // Same no-op semantics as the services remove: a stale row index just
-    // redirects to the current state.
-    if form.0.index < draft.volumes.len() {
-        draft.volumes.remove(form.0.index);
+    // Same key-value semantics as the services remove: the (mode, source,
+    // container) triple is the draft's dedup key, so a stale submit can only
+    // remove its own row, and an unknown key is a no-op redirect.
+    let CsrfForm(RemoveVolumeForm {
+        mode,
+        source,
+        container,
+    }) = form;
+    if let Some(index) = draft.volumes.iter().position(|volume| {
+        volume.mode == mode && volume.source == source && volume.container == container
+    }) {
+        draft.volumes.remove(index);
         save_draft(&session, &draft)?;
     }
     Ok(see_other("/apps/new/volumes"))
@@ -1153,7 +1179,8 @@ pub async fn execute(
         }
     };
 
-    let n_services = draft.services.len();
+    let n_created = draft.services.iter().filter(|entry| entry.create).count();
+    let n_linked = draft.services.len() - n_created;
     let n_volumes = draft.volumes.len();
     let request = RunRequest {
         subject: app.clone(),
@@ -1163,7 +1190,8 @@ pub async fn execute(
         plan,
         completion: RunCompletion {
             success_message: format!(
-                "App '{app}' created with {n_services} service(s) and {n_volumes} volume(s)."
+                "App '{app}' created with {n_created} created and {n_linked} linked service(s), \
+                 and {n_volumes} volume(s)."
             ),
             redirect: Some(format!("/apps/{app}")),
             refresh: RunRefresh::Reports,
@@ -1215,18 +1243,13 @@ pub async fn execute(
     }
 }
 
-/// Body for the reset POST: nothing but the CSRF token. A unit `()` target
-/// would reject the extra `csrf_token` field, so this empty struct lets the
-/// CSRF extractor do its job and drops the rest.
-#[derive(Deserialize)]
-pub struct ResetForm {}
-
+/// Body for the reset POST: nothing but the CSRF token. The empty
+/// `apps::ActionForm` lets the CSRF extractor do its job and drops the rest.
 pub async fn reset(
     state: web::Data<AppState>,
     session: Session,
-    form: CsrfForm<ResetForm>,
+    _form: CsrfForm<super::apps::ActionForm>,
 ) -> Result<HttpResponse, AppError> {
-    let CsrfForm(ResetForm {}) = form;
     match step_preamble(&state, &session).await {
         Ok((_user, _draft, _csrf_token)) => {}
         Err(Either::Left(response)) => return Ok(response),
