@@ -7,6 +7,7 @@ use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::service_upgrade::ServiceUpgradeOptions;
+use crate::domain::storage_entry::StorageEntryName;
 use crate::domain::types::{EnvVar, ScaleEntry};
 use std::time::Duration;
 
@@ -325,6 +326,14 @@ pub enum DokkuCommand {
     StorageUnmount {
         app: AppName,
         mount: MountSpec,
+    },
+    StorageCreate {
+        entry: StorageEntryName,
+    },
+    StorageMountEntry {
+        app: AppName,
+        entry: StorageEntryName,
+        container: String,
     },
     PluginList,
     SshKeysList,
@@ -867,6 +876,20 @@ impl DokkuCommand {
                 app.as_str().into(),
                 mount.locator(),
             ],
+            DokkuCommand::StorageCreate { entry } => {
+                vec!["storage:create".into(), entry.as_str().into()]
+            }
+            DokkuCommand::StorageMountEntry {
+                app,
+                entry,
+                container,
+            } => vec![
+                "storage:mount".into(),
+                app.as_str().into(),
+                entry.as_str().into(),
+                "--container-dir".into(),
+                container.clone(),
+            ],
             DokkuCommand::PluginList => vec!["plugin:list".into()],
             DokkuCommand::SshKeysList => vec!["ssh-keys:list".into()],
             DokkuCommand::SshKeysAdd { name } => {
@@ -1112,6 +1135,8 @@ impl DokkuCommand {
             | DokkuCommand::ServiceClone { .. }
             | DokkuCommand::StorageMount { .. }
             | DokkuCommand::StorageUnmount { .. }
+            | DokkuCommand::StorageCreate { .. }
+            | DokkuCommand::StorageMountEntry { .. }
             | DokkuCommand::DomainsAdd { .. }
             | DokkuCommand::DomainsRemove { .. }
             | DokkuCommand::DomainsSet { .. }
@@ -1234,6 +1259,10 @@ mod tests {
 
     fn service(name: &str) -> ServiceName {
         ServiceName::try_from(name).expect("valid service name")
+    }
+
+    fn entry(name: &str) -> StorageEntryName {
+        StorageEntryName::try_from(name).expect("valid storage entry name")
     }
 
     #[test]
@@ -1865,6 +1894,14 @@ mod tests {
                 app: app("myapp"),
                 mount: MountSpec::try_from("/host:/data").expect("mount"),
             },
+            DokkuCommand::StorageCreate {
+                entry: entry("uploads"),
+            },
+            DokkuCommand::StorageMountEntry {
+                app: app("alpha"),
+                entry: entry("uploads"),
+                container: "/app/uploads".into(),
+            },
         ] {
             assert_eq!(
                 command.timeout(),
@@ -2385,6 +2422,61 @@ mod tests {
     }
 
     #[test]
+    fn storage_create_argv() {
+        assert_eq!(
+            DokkuCommand::StorageCreate {
+                entry: entry("uploads")
+            }
+            .argv(),
+            vec!["storage:create", "uploads"]
+        );
+    }
+
+    #[test]
+    fn storage_mount_entry_argv() {
+        assert_eq!(
+            DokkuCommand::StorageMountEntry {
+                app: app("alpha"),
+                entry: entry("uploads"),
+                container: "/app/uploads".into(),
+            }
+            .argv(),
+            vec![
+                "storage:mount",
+                "alpha",
+                "uploads",
+                "--container-dir",
+                "/app/uploads"
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_entry_commands_are_supported_under_capabilities() {
+        let caps = crate::domain::capabilities::Capabilities {
+            dokku_version: None,
+            enabled_plugins: Vec::new(),
+            log_sources: Vec::new(),
+        };
+        for command in [
+            DokkuCommand::StorageCreate {
+                entry: entry("uploads"),
+            },
+            DokkuCommand::StorageMountEntry {
+                app: app("alpha"),
+                entry: entry("uploads"),
+                container: "/app/uploads".into(),
+            },
+        ] {
+            assert_eq!(
+                caps.supports_command(&command),
+                crate::domain::capabilities::Support::Supported,
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
     fn service_stats_argv_runs_the_fixed_script() {
         let argv = DokkuCommand::ServiceStats {
             plugin: plugin("postgres"),
@@ -2657,6 +2749,14 @@ mod tests {
                 process: None,
             },
             DokkuCommand::StorageReport,
+            DokkuCommand::StorageCreate {
+                entry: entry("uploads"),
+            },
+            DokkuCommand::StorageMountEntry {
+                app: app("alpha"),
+                entry: entry("uploads"),
+                container: "/app/uploads".into(),
+            },
             DokkuCommand::DokkuVersion,
             DokkuCommand::Help {
                 family: crate::domain::capabilities::CapabilityFamily::Logs,

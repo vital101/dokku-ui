@@ -19,6 +19,7 @@ use crate::domain::service_create::ServiceCreateOptions;
 use crate::domain::service_name::ServiceName;
 use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::service_upgrade::ServiceUpgradeOptions;
+use crate::domain::storage_entry::{StorageEntryName, is_valid_volume_container_path};
 use crate::domain::tls::{LetsencryptAction, is_valid_letsencrypt_email};
 use crate::domain::types::{EnvVar, ScaleEntry};
 
@@ -267,6 +268,17 @@ pub enum JobSpec {
     VolumeUnmount {
         app: String,
         locator: String,
+    },
+    AppCreate {
+        app: String,
+    },
+    StorageCreate {
+        entry: String,
+    },
+    StorageMountEntry {
+        app: String,
+        entry: String,
+        container: String,
     },
 }
 
@@ -899,6 +911,36 @@ impl JobSpec {
                     .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
                 Ok(vec![DokkuCommand::StorageUnmount { app, mount }])
             }
+            JobSpec::AppCreate { app } => {
+                let app = parse_app(app)?;
+                Ok(vec![DokkuCommand::AppsCreate { app }])
+            }
+            JobSpec::StorageCreate { entry } => {
+                let entry = StorageEntryName::try_from_create(entry)
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                Ok(vec![DokkuCommand::StorageCreate { entry }])
+            }
+            JobSpec::StorageMountEntry {
+                app,
+                entry,
+                container,
+            } => {
+                let app = parse_app(app)?;
+                // Shape-only entry parse: an existing `legacy-*` entry is a
+                // valid mount target even though it cannot be created.
+                let entry = StorageEntryName::try_from(entry.as_str())
+                    .map_err(|err| JobSpecError::Invalid(err.to_string()))?;
+                if !is_valid_volume_container_path(container) {
+                    return Err(JobSpecError::Invalid(format!(
+                        "invalid container path `{container}`"
+                    )));
+                }
+                Ok(vec![DokkuCommand::StorageMountEntry {
+                    app,
+                    entry,
+                    container: container.clone(),
+                }])
+            }
         }
     }
 }
@@ -1306,6 +1348,143 @@ mod tests {
             bad.to_commands().is_err(),
             "relative host paths are rejected"
         );
+    }
+
+    #[test]
+    fn app_create_rehydrates() {
+        assert_eq!(
+            JobSpec::AppCreate {
+                app: "alpha".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::AppsCreate { app: app("alpha") }]
+        );
+        assert!(
+            JobSpec::AppCreate {
+                app: "Bad_App".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid app names are rejected"
+        );
+    }
+
+    #[test]
+    fn app_create_is_not_destructive() {
+        assert!(
+            !JobSpec::AppCreate {
+                app: "alpha".into(),
+            }
+            .is_destructive()
+        );
+    }
+
+    #[test]
+    fn storage_create_rehydrates() {
+        assert_eq!(
+            JobSpec::StorageCreate {
+                entry: "uploads".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::StorageCreate {
+                entry: StorageEntryName::try_from("uploads").expect("entry"),
+            }]
+        );
+        assert!(
+            JobSpec::StorageCreate {
+                entry: "bad entry".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "invalid entry names are rejected"
+        );
+    }
+
+    #[test]
+    fn storage_create_rejects_reserved_legacy_prefix() {
+        assert!(
+            JobSpec::StorageCreate {
+                entry: "legacy-151e4f1a23".into(),
+            }
+            .to_commands()
+            .is_err(),
+            "the reserved legacy prefix cannot be created"
+        );
+    }
+
+    #[test]
+    fn storage_mount_entry_rehydrates() {
+        assert_eq!(
+            JobSpec::StorageMountEntry {
+                app: "alpha".into(),
+                entry: "uploads".into(),
+                container: "/app/uploads".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::StorageMountEntry {
+                app: app("alpha"),
+                entry: StorageEntryName::try_from("uploads").expect("entry"),
+                container: "/app/uploads".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn storage_mount_entry_accepts_legacy_entry_names() {
+        assert_eq!(
+            JobSpec::StorageMountEntry {
+                app: "alpha".into(),
+                entry: "legacy-151e4f1a23".into(),
+                container: "/data".into(),
+            }
+            .to_commands()
+            .expect("commands"),
+            vec![DokkuCommand::StorageMountEntry {
+                app: app("alpha"),
+                entry: StorageEntryName::try_from("legacy-151e4f1a23").expect("entry"),
+                container: "/data".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn storage_mount_entry_rejects_tampered_values() {
+        for (app, entry, container) in [
+            (
+                "Bad_App".to_owned(),
+                "uploads".to_owned(),
+                "/app/uploads".to_owned(),
+            ),
+            (
+                "alpha".to_owned(),
+                "bad entry".to_owned(),
+                "/app/uploads".to_owned(),
+            ),
+            (
+                "alpha".to_owned(),
+                "uploads".to_owned(),
+                "relative".to_owned(),
+            ),
+            (
+                "alpha".to_owned(),
+                "uploads".to_owned(),
+                "/bad:path".to_owned(),
+            ),
+        ] {
+            assert!(
+                JobSpec::StorageMountEntry {
+                    app,
+                    entry,
+                    container,
+                }
+                .to_commands()
+                .is_err(),
+                "tampered mount-entry payloads must not reach the host"
+            );
+        }
     }
 
     #[test]
