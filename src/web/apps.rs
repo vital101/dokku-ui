@@ -24,15 +24,10 @@ use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
 use crate::web::fragments::{
     RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, error_fragment,
-    is_htmx, modal_error, reauth_valid_here, run_synchronously, start_action_run,
+    is_htmx, modal_error, reauth_valid_here, start_action_run,
 };
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
-
-#[derive(Deserialize)]
-pub struct CreateForm {
-    name: String,
-}
 
 #[derive(Template)]
 #[template(path = "apps/show.html")]
@@ -221,59 +216,6 @@ fn fragment_for_resolve_error(
         not_found_fragment(name, retry_url)
     } else {
         error_fragment(retry_url, &err.to_string())
-    }
-}
-
-pub async fn create(
-    state: web::Data<AppState>,
-    session: Session,
-    form: CsrfForm<CreateForm>,
-) -> Result<HttpResponse, AppError> {
-    let name = form.0.name.trim().to_owned();
-
-    let app = match AppName::try_from(name.clone()) {
-        Ok(app) => app,
-        Err(err) => {
-            set_flash(
-                &session,
-                FlashLevel::Error,
-                format!("Invalid app name: {err}"),
-            );
-            return Ok(see_other("/apps/new"));
-        }
-    };
-
-    match run_synchronously(
-        &state,
-        &session,
-        &name,
-        "app.create",
-        TargetKind::App,
-        DokkuCommand::AppsCreate { app },
-        &format!("App '{name}' created."),
-        &[],
-    )
-    .await
-    {
-        Ok(_) => {
-            if let Err(err) = state.snapshot.refresh_app_reports(&name).await {
-                tracing::warn!(error = %err, "snapshot refresh after create failed");
-            }
-            set_flash(
-                &session,
-                FlashLevel::Success,
-                format!("App '{}' created.", name),
-            );
-            Ok(see_other(&format!("/apps/{}", name)))
-        }
-        Err(err) => {
-            set_flash(
-                &session,
-                FlashLevel::Error,
-                format!("Failed to create app: {err}"),
-            );
-            Ok(see_other("/apps/new"))
-        }
     }
 }
 

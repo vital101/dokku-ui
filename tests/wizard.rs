@@ -1,5 +1,7 @@
 mod common;
 
+use std::collections::HashMap;
+
 use actix_web::body::MessageBody;
 use actix_web::cookie::Cookie;
 use actix_web::dev::{Service, ServiceResponse};
@@ -8,13 +10,14 @@ use actix_web::test;
 
 use common::{
     complete_setup, extract_csrf, form_request, get_body, location, login, response_cookie,
-    seed_user_with_role, test_state, test_state_with_shared_client,
+    run_url, seed_user_with_role, test_state, test_state_with_shared_client,
 };
 use dokku_ui::auth::rbac::Role;
 use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
 use dokku_ui::domain::ServicePlugin;
+use dokku_ui::domain::app_wizard::{AppWizardDraft, VolumeMode, WizardService, WizardVolume};
 use dokku_ui::domain::command::DokkuCommand;
-use dokku_ui::web::build_app;
+use dokku_ui::web::{AppState, build_app};
 
 const PLUGIN_LIST: &str = include_str!("fixtures/plugin_list.txt");
 const REDIS_LIST: &str = include_str!("fixtures/redis_list.txt");
@@ -238,11 +241,20 @@ where
     B: MessageBody,
     E: std::fmt::Debug,
 {
+    save_app_name_as(app, cookie, "my-app").await
+}
+
+async fn save_app_name_as<S, B, E>(app: &S, cookie: Cookie<'static>, name: &str) -> Cookie<'static>
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
     let body = get_ok(app, "/apps/new", &cookie).await;
     let csrf = extract_csrf(&body);
     let resp = test::call_service(
         app,
-        form_request("/apps/new", format!("csrf_token={csrf}&name=my-app"))
+        form_request("/apps/new", format!("csrf_token={csrf}&name={name}"))
             .cookie(cookie.clone())
             .to_request(),
     )
@@ -1423,5 +1435,695 @@ async fn volume_step_posts_require_csrf() {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+}
+
+/// MockClient covering every wizard read: apps, the capability probe, the
+/// installed datastore service lists, and the registered storage entries.
+fn wizard_client() -> MockClient {
+    services_client()
+        .stub(
+            DokkuCommand::ServiceList {
+                plugin: postgres_plugin(),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/postgres_list.txt"))),
+        )
+        .stub(
+            DokkuCommand::ServiceList {
+                plugin: ServicePlugin::try_from("mysql").expect("mysql plugin"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/mysql_list.txt"))),
+        )
+        .stub(
+            DokkuCommand::ServiceList {
+                plugin: ServicePlugin::try_from("mongo").expect("mongo plugin"),
+            },
+            Ok(DokkuOutput::ok(include_str!("fixtures/mongo_list.txt"))),
+        )
+        .stub(
+            DokkuCommand::StorageListEntries,
+            Ok(DokkuOutput::ok(LIST_ENTRIES_JSON)),
+        )
+}
+
+fn hx_form_request(path: &str, body: String) -> actix_web::test::TestRequest {
+    form_request(path, body).insert_header(("HX-Request", "true"))
+}
+
+fn mutation_calls(client: &MockClient) -> Vec<DokkuCommand> {
+    client
+        .calls()
+        .into_iter()
+        .filter(|cmd| {
+            matches!(
+                cmd,
+                DokkuCommand::AppsCreate { .. }
+                    | DokkuCommand::BuilderSet { .. }
+                    | DokkuCommand::BuildpacksAdd { .. }
+                    | DokkuCommand::ServiceCreate { .. }
+                    | DokkuCommand::ServiceLink { .. }
+                    | DokkuCommand::StorageCreate { .. }
+                    | DokkuCommand::StorageMount { .. }
+                    | DokkuCommand::StorageMountEntry { .. }
+            )
+        })
+        .collect()
+}
+
+async fn wait_for_mutations(client: &MockClient, count: usize) -> Vec<DokkuCommand> {
+    for _ in 0..200 {
+        let calls = mutation_calls(client);
+        if calls.len() >= count {
+            return calls;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    mutation_calls(client)
+}
+
+async fn save_build_step<S, B, E>(
+    app: &S,
+    cookie: Cookie<'static>,
+    builder: &str,
+    buildpacks: &str,
+) -> Cookie<'static>
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    let body = get_ok(app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        app,
+        form_request(
+            "/apps/new/build",
+            format!("csrf_token={csrf}&builder={builder}&buildpacks={buildpacks}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    response_cookie(&resp).unwrap_or(cookie)
+}
+
+async fn add_created_service<S, B, E>(
+    app: &S,
+    cookie: Cookie<'static>,
+    plugin: &str,
+    service: &str,
+) -> Cookie<'static>
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    let body = get_ok(app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        app,
+        form_request(
+            "/apps/new/services/create",
+            format!("csrf_token={csrf}&plugin={plugin}&service={service}"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    response_cookie(&resp).unwrap_or(cookie)
+}
+
+async fn add_created_volume<S, B, E>(
+    app: &S,
+    cookie: Cookie<'static>,
+    entry: &str,
+    container: &str,
+) -> Cookie<'static>
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    let body = get_ok(app, "/apps/new/volumes", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        app,
+        form_request(
+            "/apps/new/volumes/create",
+            format!(
+                "csrf_token={csrf}&entry={entry}&container={}",
+                urlencode(container)
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/volumes");
+    response_cookie(&resp).unwrap_or(cookie)
+}
+
+fn urlencode(input: &str) -> String {
+    input
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                vec![byte as char]
+            }
+            other => format!("%{other:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+/// Writes a draft straight into the shared SQLite session row. The route
+/// steps validate their own input, so this is how a stale/hand-edited draft
+/// (the executor's last line of defence) is simulated.
+async fn inject_draft(state: &AppState, _cookie: &Cookie<'static>, draft: &AppWizardDraft) {
+    // The middleware signs the cookie value, so the raw session key is not
+    // recoverable from it here. The harness has a single live session; patch
+    // every row (normally exactly one) with the draft value.
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, data FROM sessions")
+        .fetch_all(&state.db)
+        .await
+        .expect("session rows");
+    assert!(!rows.is_empty(), "setup created a session");
+    for (id, raw) in rows {
+        let mut data: HashMap<String, String> = serde_json::from_str(&raw).expect("session json");
+        data.insert(
+            "app_wizard_draft".to_owned(),
+            serde_json::to_string(draft).expect("draft json"),
+        );
+        sqlx::query("UPDATE sessions SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&data).expect("session json"))
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .expect("update session");
+    }
+}
+
+fn full_draft() -> AppWizardDraft {
+    AppWizardDraft {
+        name: Some("alpha".into()),
+        builder: None,
+        buildpacks: vec!["https://example.com/bp".into()],
+        services: vec![WizardService {
+            plugin: "postgres".into(),
+            service: "cache".into(),
+            create: true,
+        }],
+        volumes: vec![WizardVolume {
+            mode: VolumeMode::Create,
+            source: "uploads".into(),
+            container: "/app/uploads".into(),
+        }],
+    }
+}
+
+async fn review_csrf<S, B, E>(app: &S, cookie: &Cookie<'static>) -> String
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    extract_csrf(&get_ok(app, "/apps/new/review", cookie).await)
+}
+
+#[tokio::test]
+async fn review_step_requires_a_name() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/new/review")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new");
+}
+
+#[tokio::test]
+async fn review_shows_the_exact_plan_collected_through_the_steps() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name_as(&app, cookie, "alpha").await;
+    let cookie = save_build_step(&app, cookie, "", "https://example.com/bp").await;
+    let cookie = add_created_service(&app, cookie, "postgres", "cache").await;
+    let cookie = add_created_volume(&app, cookie, "uploads", "/app/uploads").await;
+
+    let body = get_ok(&app, "/apps/new/review", &cookie).await;
+    assert!(body.contains("alpha"), "name shown: {body}");
+    assert!(body.contains("Auto -&#62; herokuish"), "builder: {body}");
+    assert!(body.contains("https://example.com/bp"), "buildpack: {body}");
+    assert!(body.contains(">cache</td>"), "service row: {body}");
+    assert!(body.contains("create + link</td>"), "service mode: {body}");
+    assert!(body.contains(">uploads</td>"), "volume row: {body}");
+    assert!(body.contains(">/app/uploads</td>"), "volume path: {body}");
+    assert!(body.contains(r#"action="/apps/new/execute""#), "{body}");
+
+    let commands = [
+        "apps:create alpha",
+        "builder:set alpha selected herokuish",
+        "buildpacks:add alpha https://example.com/bp",
+        "postgres:create cache",
+        "postgres:link cache alpha",
+        "storage:create uploads",
+        "storage:mount alpha uploads --container-dir /app/uploads",
+    ];
+    let mut search_from = 0;
+    for command in commands {
+        let offset = body[search_from..]
+            .find(command)
+            .unwrap_or_else(|| panic!("missing {command} in order: {body}"));
+        search_from += offset + command.len();
+    }
+
+    assert!(
+        mutation_calls(&client).is_empty(),
+        "review must not execute commands: {:?}",
+        client.calls()
+    );
+}
+
+#[tokio::test]
+async fn review_renders_attach_path_with_the_colon_form_mount() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name_as(&app, cookie, "alpha").await;
+    let body = get_ok(&app, "/apps/new/volumes", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/volumes/attach-path",
+            format!("csrf_token={csrf}&host=%2Fsrv%2Ffiles&container=%2Fapp%2Ffiles"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/apps/new/review", &cookie).await;
+    assert!(
+        body.contains("storage:mount alpha /srv/files:/app/files"),
+        "{body}"
+    );
+    assert!(mutation_calls(&client).is_empty(), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn review_renders_an_invalid_draft_with_an_error_and_no_execute_form() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    let mut draft = full_draft();
+    draft.builder = Some("dockerfile".into());
+    inject_draft(&state, &cookie, &draft).await;
+
+    let body = get_ok(&app, "/apps/new/review", &cookie).await;
+    assert!(
+        body.contains("buildpacks require the herokuish builder"),
+        "{body}"
+    );
+    assert!(
+        !body.contains(r#"action="/apps/new/execute""#),
+        "no execute form: {body}"
+    );
+    assert!(!body.contains("apps:create alpha"), "{body}");
+    assert!(mutation_calls(&client).is_empty(), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn execute_htmx_enqueues_one_job_that_runs_the_plan_in_order() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    inject_draft(&state, &cookie, &full_draft()).await;
+    let csrf = review_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains(r#"data-run-url="/actions/runs/"#), "{body}");
+    assert!(body.contains("Creating alpha and resources..."), "{body}");
+    let run_url = run_url(&body);
+    assert!(run_url.ends_with("/events"), "{run_url}");
+
+    let calls = wait_for_mutations(&client, 7).await;
+    assert_eq!(
+        calls,
+        vec![
+            DokkuCommand::AppsCreate {
+                app: "alpha".try_into().expect("app"),
+            },
+            DokkuCommand::BuilderSet {
+                app: "alpha".try_into().expect("app"),
+                property: "selected".into(),
+                value: Some("herokuish".into()),
+            },
+            DokkuCommand::BuildpacksAdd {
+                app: "alpha".try_into().expect("app"),
+                buildpack: "https://example.com/bp".into(),
+                index: None,
+            },
+            DokkuCommand::ServiceCreate {
+                plugin: postgres_plugin(),
+                service: "cache".try_into().expect("service"),
+                options: Default::default(),
+            },
+            DokkuCommand::ServiceLink {
+                plugin: postgres_plugin(),
+                service: "cache".try_into().expect("service"),
+                app: "alpha".try_into().expect("app"),
+            },
+            DokkuCommand::StorageCreate {
+                entry: "uploads".try_into().expect("entry"),
+            },
+            DokkuCommand::StorageMountEntry {
+                app: "alpha".try_into().expect("app"),
+                entry: "uploads".try_into().expect("entry"),
+                container: "/app/uploads".into(),
+            },
+        ]
+    );
+
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM action_jobs")
+        .fetch_one(&state.db)
+        .await
+        .expect("count jobs");
+    assert_eq!(jobs, 1, "one combined persisted job");
+}
+
+#[tokio::test]
+async fn execute_service_attach_only_omits_service_create() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    inject_draft(
+        &state,
+        &cookie,
+        &AppWizardDraft {
+            name: Some("alpha".into()),
+            services: vec![WizardService {
+                plugin: "redis".into(),
+                service: "candid".into(),
+                create: false,
+            }],
+            ..Default::default()
+        },
+    )
+    .await;
+    let csrf = review_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let calls = wait_for_mutations(&client, 2).await;
+    assert_eq!(
+        calls,
+        vec![
+            DokkuCommand::AppsCreate {
+                app: "alpha".try_into().expect("app"),
+            },
+            DokkuCommand::ServiceLink {
+                plugin: redis_plugin(),
+                service: "candid".try_into().expect("service"),
+                app: "alpha".try_into().expect("app"),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn execute_attach_path_uses_the_colon_form_storage_mount() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    inject_draft(
+        &state,
+        &cookie,
+        &AppWizardDraft {
+            name: Some("alpha".into()),
+            volumes: vec![WizardVolume {
+                mode: VolumeMode::AttachPath,
+                source: "/srv/files".into(),
+                container: "/app/files".into(),
+            }],
+            ..Default::default()
+        },
+    )
+    .await;
+    let csrf = review_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let calls = wait_for_mutations(&client, 2).await;
+    assert!(
+        matches!(
+            calls.get(1),
+            Some(DokkuCommand::StorageMount { app, mount })
+                if app.as_str() == "alpha" && mount.arg() == "/srv/files:/app/files"
+        ),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_without_htmx_flashes_queued_and_redirects_to_activity() {
+    let (state, _client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    inject_draft(&state, &cookie, &full_draft()).await;
+    let csrf = review_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/activity");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/activity", &cookie).await;
+    assert!(body.contains("Queued: creating app"), "{body}");
+    assert!(body.contains("alpha"), "{body}");
+
+    let body = get_ok(&app, "/apps/new", &cookie).await;
+    assert!(
+        body.contains(r#"name="name" type="text" required maxlength="64" value="""#),
+        "draft cleared: {body}"
+    );
+}
+
+#[tokio::test]
+async fn execute_invalid_draft_renders_a_modal_error_and_enqueues_nothing() {
+    let (state, client, _dir) = test_state_with_shared_client(wizard_client()).await;
+    let app = test::init_service(build_app(state.clone())).await;
+    let cookie = complete_setup(&app).await;
+    let mut draft = full_draft();
+    draft.builder = Some("dockerfile".into());
+    inject_draft(&state, &cookie, &draft).await;
+    let csrf = review_csrf(&app, &cookie).await;
+
+    let resp = test::call_service(
+        &app,
+        hx_form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("buildpacks require the herokuish builder"),
+        "{body}"
+    );
+    assert!(!body.contains("data-run-url"), "{body}");
+
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM action_jobs")
+        .fetch_one(&state.db)
+        .await
+        .expect("count jobs");
+    assert_eq!(jobs, 0);
+    assert!(mutation_calls(&client).is_empty(), "{:?}", client.calls());
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/review");
+}
+
+#[tokio::test]
+async fn execute_without_a_name_flashes_and_redirects_to_name_step() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let body = get_ok(&app, "/apps/new", &cookie).await;
+    let csrf = extract_csrf(&body);
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/new/execute", format!("csrf_token={csrf}"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let body = get_ok(&app, "/apps/new", &cookie).await;
+    assert!(body.contains("Start by naming the app."), "{body}");
+}
+
+#[tokio::test]
+async fn execute_requires_csrf() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        form_request("/apps/new/execute", "csrf_token=not-a-token".to_owned())
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+const WIZARD_GET_ROUTES: [&str; 5] = [
+    "/apps/new",
+    "/apps/new/build",
+    "/apps/new/services",
+    "/apps/new/volumes",
+    "/apps/new/review",
+];
+
+/// Paths and minimal form bodies for every wizard mutation route.
+const WIZARD_MUTATION_ROUTES: [(&str, &str); 11] = [
+    ("/apps/new", "name=alpha"),
+    ("/apps/new/reset", ""),
+    ("/apps/new/build", "builder=&buildpacks="),
+    ("/apps/new/services/attach", "service_key=redis%3Acandid"),
+    ("/apps/new/services/create", "plugin=redis&service=fresh"),
+    ("/apps/new/services/remove", "index=0"),
+    ("/apps/new/volumes/create", "entry=logs&container=%2Flogs"),
+    (
+        "/apps/new/volumes/attach-entry",
+        "entry=legacy-151e4f1a23&container=%2Fdata",
+    ),
+    (
+        "/apps/new/volumes/attach-path",
+        "host=%2Fhost&container=%2Fdata",
+    ),
+    ("/apps/new/volumes/remove", "index=0"),
+    ("/apps/new/execute", ""),
+];
+
+#[tokio::test]
+async fn every_wizard_get_route_redirects_to_login_when_unauthenticated() {
+    let (state, _dir) = test_state().await;
+    seed_user_with_role(
+        &state,
+        "admin@example.com",
+        "correct-horse-battery",
+        Role::Admin,
+    )
+    .await;
+    let app = test::init_service(build_app(state)).await;
+
+    for path in WIZARD_GET_ROUTES {
+        let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT, "{path}");
+        assert_eq!(location(&resp), "/login", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn every_wizard_mutation_post_is_forbidden_for_viewers() {
+    let (state, _dir) = test_state().await;
+    seed_user_with_role(
+        &state,
+        "viewer@example.com",
+        "correct-horse-battery",
+        Role::Viewer,
+    )
+    .await;
+    let app = test::init_service(build_app(state)).await;
+    let viewer = login(&app, "viewer@example.com", "correct-horse-battery").await;
+    let csrf = extract_csrf(&get_ok(&app, "/", &viewer).await);
+
+    for (path, body) in WIZARD_MUTATION_ROUTES {
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token={csrf}&{body}"))
+                .cookie(viewer.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn every_wizard_mutation_post_requires_csrf() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    for (path, body) in WIZARD_MUTATION_ROUTES {
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token=not-a-token&{body}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} missing token"
+        );
     }
 }

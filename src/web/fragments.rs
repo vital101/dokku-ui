@@ -50,6 +50,18 @@ pub(super) fn modal_error(message: impl Into<String>) -> Result<HttpResponse, Ap
     render(&page)
 }
 
+pub(super) fn run_fragment(
+    run_id: &str,
+    title: String,
+    refresh_url: Option<String>,
+) -> Result<HttpResponse, AppError> {
+    render(&RunPartial {
+        run_url: format!("/actions/runs/{run_id}/events"),
+        title,
+        refresh_url,
+    })
+}
+
 pub(super) fn is_htmx(req: &HttpRequest) -> bool {
     req.headers().contains_key("HX-Request")
 }
@@ -157,11 +169,7 @@ pub(super) async fn start_action_run(
         Ok(run_id) => run_id,
         Err(err) => return modal_error(err.to_string()),
     };
-    render(&RunPartial {
-        run_url: format!("/actions/runs/{run_id}/events"),
-        title: request.title.clone(),
-        refresh_url: request.refresh_url.clone(),
-    })
+    run_fragment(&run_id, request.title.clone(), request.refresh_url.clone())
 }
 
 /// Persists a run + its job and spawns an executor. Returns the run id. The

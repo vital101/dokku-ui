@@ -201,7 +201,8 @@ pub fn build_app(
             "/apps/new/volumes/remove",
             web::post().to(wizard::remove_volume),
         )
-        .route("/apps", web::post().to(apps::create))
+        .route("/apps/new/review", web::get().to(wizard::review))
+        .route("/apps/new/execute", web::post().to(wizard::execute))
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))
         .route("/apps/{name}/scale", web::post().to(apps::scale))

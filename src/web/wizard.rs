@@ -1,5 +1,5 @@
 use actix_session::Session;
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
 use askama::Template;
 use futures_util::future::Either;
 use serde::Deserialize;
@@ -7,8 +7,8 @@ use serde::Deserialize;
 use crate::dokku::service_names;
 use crate::domain::AppName;
 use crate::domain::app_wizard::{
-    AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, MAX_VOLUMES, VolumeMode, WizardService,
-    WizardVolume,
+    AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, MAX_VOLUMES, PlanPreviewLine, VolumeMode,
+    WizardService, WizardVolume, plan_preview,
 };
 use crate::domain::build::{BUILDERS, is_valid_buildpack};
 use crate::domain::capabilities::Support;
@@ -20,10 +20,14 @@ use crate::domain::service_plugin::ServicePlugin;
 use crate::domain::storage_entry::{StorageEntryName, is_valid_volume_container_path};
 use crate::domain::types::StorageEntry;
 use crate::error::AppError;
+use crate::storage::runs::TargetKind;
 use crate::storage::users::User;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
 use crate::web::flash::{FlashLevel, FlashMessage, set_flash, take_flash};
-use crate::web::fragments::current_user;
+use crate::web::fragments::{
+    RunCompletion, RunRefresh, RunRequest, current_user, enqueue_action_run, is_htmx, modal_error,
+    run_fragment,
+};
 use crate::web::render::{render, see_other};
 use crate::web::state::AppState;
 
@@ -998,6 +1002,217 @@ pub async fn remove_volume(
         save_draft(&session, &draft)?;
     }
     Ok(see_other("/apps/new/volumes"))
+}
+
+struct ServiceReviewRow {
+    plugin_label: String,
+    service: String,
+    mode_label: &'static str,
+}
+
+struct VolumeReviewRow {
+    mode_label: &'static str,
+    source: String,
+    container: String,
+}
+
+#[derive(Template)]
+#[template(path = "apps/wizard/review.html")]
+struct ReviewPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    active_step: &'static str,
+    error: Option<String>,
+    name: String,
+    builder_label: String,
+    buildpacks: Vec<String>,
+    services: Vec<ServiceReviewRow>,
+    volumes: Vec<VolumeReviewRow>,
+    preview: Vec<PlanPreviewLine>,
+}
+
+fn review_service_rows(draft: &AppWizardDraft) -> Vec<ServiceReviewRow> {
+    draft
+        .services
+        .iter()
+        .map(|entry| ServiceReviewRow {
+            plugin_label: ServicePlugin::try_from(entry.plugin.as_str())
+                .map(|plugin| plugin.display_name().to_owned())
+                .unwrap_or_else(|_| entry.plugin.clone()),
+            service: entry.service.clone(),
+            mode_label: if entry.create {
+                "create + link"
+            } else {
+                "attach"
+            },
+        })
+        .collect()
+}
+
+fn review_volume_rows(draft: &AppWizardDraft) -> Vec<VolumeReviewRow> {
+    draft
+        .volumes
+        .iter()
+        .map(|volume| VolumeReviewRow {
+            mode_label: match volume.mode {
+                VolumeMode::Create => "create named entry",
+                VolumeMode::AttachEntry => "attach entry",
+                VolumeMode::AttachPath => "attach host path",
+            },
+            source: volume.source.clone(),
+            container: volume.container.clone(),
+        })
+        .collect()
+}
+
+fn builder_review_label(draft: &AppWizardDraft) -> String {
+    let builder = draft
+        .builder
+        .as_deref()
+        .map(str::trim)
+        .filter(|builder| !builder.is_empty());
+    match builder {
+        Some(builder) => builder.to_owned(),
+        None if draft.buildpacks.iter().any(|bp| !bp.trim().is_empty()) => {
+            "Auto -> herokuish".to_owned()
+        }
+        None => "Auto (detect)".to_owned(),
+    }
+}
+
+pub async fn review(
+    state: web::Data<AppState>,
+    session: Session,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    let Some(name) = draft.name.clone() else {
+        return Ok(see_other("/apps/new"));
+    };
+
+    let (error, preview) = match draft.to_plan() {
+        Ok(plan) => match plan_preview(&plan) {
+            Ok(preview) => (None, preview),
+            Err(err) => (Some(err.to_string()), Vec::new()),
+        },
+        Err(err) => (Some(err.to_string()), Vec::new()),
+    };
+
+    let flash = take_flash(&session);
+    let page = ReviewPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        active_step: "review",
+        error,
+        name,
+        builder_label: builder_review_label(&draft),
+        buildpacks: draft
+            .buildpacks
+            .iter()
+            .map(|bp| bp.trim().to_owned())
+            .filter(|bp| !bp.is_empty())
+            .collect(),
+        services: review_service_rows(&draft),
+        volumes: review_volume_rows(&draft),
+        preview,
+    };
+    render(&page)
+}
+
+pub async fn execute(
+    state: web::Data<AppState>,
+    session: Session,
+    req: HttpRequest,
+    _form: CsrfForm<super::apps::ActionForm>,
+) -> Result<HttpResponse, AppError> {
+    let (_user, draft, _csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+
+    let Some(app) = draft.name.clone() else {
+        set_flash(&session, FlashLevel::Error, "Start by naming the app.");
+        return Ok(see_other("/apps/new"));
+    };
+
+    let plan = match draft.to_plan() {
+        Ok(plan) => plan,
+        Err(err) => {
+            let message = err.to_string();
+            if is_htmx(&req) {
+                return modal_error(message);
+            }
+            set_flash(&session, FlashLevel::Error, message);
+            return Ok(see_other("/apps/new/review"));
+        }
+    };
+
+    let n_services = draft.services.len();
+    let n_volumes = draft.volumes.len();
+    let request = RunRequest {
+        subject: app.clone(),
+        operation: "app.create".to_owned(),
+        target_kind: TargetKind::App,
+        title: format!("Creating {app} and resources..."),
+        plan,
+        completion: RunCompletion {
+            success_message: format!(
+                "App '{app}' created with {n_services} service(s) and {n_volumes} volume(s)."
+            ),
+            redirect: Some(format!("/apps/{app}")),
+            refresh: RunRefresh::Reports,
+        },
+        refresh_url: None,
+        redactions: Vec::new(),
+    };
+
+    let enqueued = enqueue_action_run(
+        &state,
+        &session,
+        &request.subject,
+        &request.operation,
+        request.target_kind,
+        &request.plan,
+        &request.completion,
+        &request.redactions,
+    )
+    .await;
+
+    if is_htmx(&req) {
+        match enqueued {
+            Ok(run_id) => {
+                clear_draft(&session);
+                run_fragment(&run_id, request.title.clone(), None)
+            }
+            Err(err) => modal_error(err.to_string()),
+        }
+    } else {
+        match enqueued {
+            Ok(_) => {
+                clear_draft(&session);
+                set_flash(
+                    &session,
+                    FlashLevel::Success,
+                    format!("Queued: creating app '{app}'."),
+                );
+                Ok(see_other("/activity"))
+            }
+            Err(err) => {
+                set_flash(
+                    &session,
+                    FlashLevel::Error,
+                    format!("Could not queue app creation: {err}"),
+                );
+                Ok(see_other("/apps/new/review"))
+            }
+        }
+    }
 }
 
 /// Body for the reset POST: nothing but the CSRF token. A unit `()` target

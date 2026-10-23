@@ -229,13 +229,13 @@ async fn operator_can_manage_apps_but_not_users() {
     let csrf = csrf_for(&app, "/apps/new", &operator).await;
     let resp = test::call_service(
         &app,
-        form_request("/apps", format!("csrf_token={csrf}&name=myapp"))
+        form_request("/apps/new", format!("csrf_token={csrf}&name=myapp"))
             .cookie(operator.clone())
             .to_request(),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&resp), "/apps/myapp");
+    assert_eq!(location(&resp), "/apps/new/build");
 
     let resp = test::call_service(
         &app,
@@ -274,7 +274,8 @@ async fn viewer_is_read_only() {
 
     let csrf = csrf_for(&app, "/", &viewer).await;
     for (path, body) in [
-        ("/apps", format!("csrf_token={csrf}&name=myapp")),
+        ("/apps/new", format!("csrf_token={csrf}&name=myapp")),
+        ("/apps/new/execute", format!("csrf_token={csrf}")),
         ("/refresh", format!("csrf_token={csrf}")),
         ("/apps/myapp/restart", format!("csrf_token={csrf}")),
         (
