@@ -224,3 +224,257 @@ async fn reset_clears_the_saved_name() {
         "empty input after reset: {body}"
     );
 }
+
+/// Saves a valid name through step 1 and returns the session cookie holding
+/// the draft, positioned at the build step.
+async fn save_app_name<S, B, E>(app: &S, cookie: Cookie<'static>) -> Cookie<'static>
+where
+    S: Service<actix_http::Request, Response = ServiceResponse<B>, Error = E>,
+    B: MessageBody,
+    E: std::fmt::Debug,
+{
+    let body = get_ok(app, "/apps/new", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        app,
+        form_request("/apps/new", format!("csrf_token={csrf}&name=my-app"))
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/build");
+    response_cookie(&resp).unwrap_or(cookie)
+}
+
+fn no_build_mutation_calls(client: &MockClient) -> bool {
+    client.calls().iter().all(|cmd| {
+        !matches!(
+            cmd,
+            DokkuCommand::AppsCreate { .. }
+                | DokkuCommand::BuilderSet { .. }
+                | DokkuCommand::BuildpacksAdd { .. }
+        )
+    })
+}
+
+#[tokio::test]
+async fn build_step_renders_after_name_saved() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    assert!(body.contains(r#"action="/apps/new/build""#), "{body}");
+    assert!(body.contains(r#"name="builder""#), "{body}");
+    assert!(body.contains("<select"), "{body}");
+    assert!(body.contains(r#"name="buildpacks""#), "{body}");
+    assert!(body.contains("Auto (detect)"), "{body}");
+    assert!(body.contains("Next: services"), "{body}");
+}
+
+#[tokio::test]
+async fn build_step_redirects_to_name_step_without_a_name() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/new/build")
+            .cookie(cookie.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new");
+}
+
+#[tokio::test]
+async fn auto_with_no_buildpacks_saves_and_never_calls_dokku() {
+    let (state, client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/build",
+            format!("csrf_token={csrf}&builder=&buildpacks="),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    assert!(
+        body.contains(r#"value="" selected"#),
+        "auto stays selected: {body}"
+    );
+    assert!(
+        no_build_mutation_calls(&client),
+        "no dokku calls during the build step: {:?}",
+        client.calls()
+    );
+}
+
+#[tokio::test]
+async fn herokuish_with_one_buildpack_saves_and_redirects() {
+    let (state, client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/build",
+            format!("csrf_token={csrf}&builder=herokuish&buildpacks=https://example.com/bp-one"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    assert!(
+        no_build_mutation_calls(&client),
+        "no dokku calls during the build step: {:?}",
+        client.calls()
+    );
+}
+
+#[tokio::test]
+async fn going_back_to_build_preserves_saved_builder_and_urls() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/build",
+            format!(
+                "csrf_token={csrf}&builder=herokuish&buildpacks=https://example.com/bp-one%0Ahttps://example.com/bp-two"
+            ),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    assert!(
+        body.contains(r#"value="herokuish" selected"#),
+        "builder kept: {body}"
+    );
+    assert!(body.contains("https://example.com/bp-one"), "{body}");
+    assert!(body.contains("https://example.com/bp-two"), "{body}");
+}
+
+#[tokio::test]
+async fn unknown_builder_re_renders_with_error() {
+    let (state, client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/build",
+            format!("csrf_token={csrf}&builder=podman&buildpacks="),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "re-render, not redirect");
+    let body = get_body(resp).await;
+    assert!(body.contains("Unknown builder"), "{body}");
+    assert!(no_build_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn invalid_buildpack_re_renders_with_error() {
+    let (state, client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/build",
+            format!("csrf_token={csrf}&builder=&buildpacks=https://good.example/bp%0Ait%27s+bad"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("Invalid buildpack"), "{body}");
+    assert!(
+        body.contains("it&#39;s bad"),
+        "offending line shown: {body}"
+    );
+    assert!(no_build_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn dockerfile_builder_with_buildpack_renders_conflict_error() {
+    let (state, client, _dir) = test_state_with_shared_client(MockClient::new()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/build", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/build",
+            format!("csrf_token={csrf}&builder=dockerfile&buildpacks=https://example.com/bp-one"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Buildpacks require the herokuish builder"),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"value="dockerfile" selected"#),
+        "builder untouched: {body}"
+    );
+    assert!(
+        body.contains("https://example.com/bp-one"),
+        "urls kept: {body}"
+    );
+    assert!(no_build_mutation_calls(&client), "{:?}", client.calls());
+}

@@ -5,7 +5,8 @@ use futures_util::future::Either;
 use serde::Deserialize;
 
 use crate::domain::AppName;
-use crate::domain::app_wizard::AppWizardDraft;
+use crate::domain::app_wizard::{AppWizardDraft, MAX_BUILDPACKS};
+use crate::domain::build::{BUILDERS, is_valid_buildpack};
 use crate::error::AppError;
 use crate::storage::users::User;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
@@ -156,6 +157,123 @@ pub async fn save_name(
     draft.name = Some(name);
     save_draft(&session, &draft)?;
     Ok(see_other("/apps/new/build"))
+}
+
+#[derive(Template)]
+#[template(path = "apps/wizard/build.html")]
+struct BuildPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    active_step: &'static str,
+    error: Option<String>,
+    builder: String,
+    buildpacks: String,
+    builders: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct BuildForm {
+    #[serde(default)]
+    builder: String,
+    #[serde(default)]
+    buildpacks: String,
+}
+
+fn builder_names() -> Vec<String> {
+    BUILDERS.iter().map(|name| (*name).to_owned()).collect()
+}
+
+pub async fn build_step(
+    state: web::Data<AppState>,
+    session: Session,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+    let flash = take_flash(&session);
+
+    let page = BuildPage {
+        email: &user.email,
+        csrf_token: &csrf_token,
+        flash: flash.as_ref(),
+        active_step: "build",
+        error: None,
+        builder: draft.builder.unwrap_or_default(),
+        buildpacks: draft.buildpacks.join("\n"),
+        builders: builder_names(),
+    };
+    render(&page)
+}
+
+pub async fn save_build(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<BuildForm>,
+) -> Result<HttpResponse, AppError> {
+    let (user, mut draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    let builder = form.0.builder.trim().to_owned();
+    let buildpacks: Vec<String> = form
+        .0
+        .buildpacks
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    let error = if !builder.is_empty() && !BUILDERS.contains(&builder.as_str()) {
+        Some("Unknown builder.".to_owned())
+    } else if buildpacks.len() > MAX_BUILDPACKS {
+        Some(format!(
+            "Too many buildpacks; at most {MAX_BUILDPACKS} are allowed."
+        ))
+    } else if let Some(bad) = buildpacks.iter().find(|line| !is_valid_buildpack(line)) {
+        Some(format!("Invalid buildpack '{bad}'."))
+    } else if !buildpacks.is_empty() && !builder.is_empty() && builder != "herokuish" {
+        Some("Buildpacks require the herokuish builder.".to_owned())
+    } else {
+        None
+    };
+
+    if let Some(error) = error {
+        // Re-render (no redirect) so the typed values survive.
+        let flash = take_flash(&session);
+        let page = BuildPage {
+            email: &user.email,
+            csrf_token: &csrf_token,
+            flash: flash.as_ref(),
+            active_step: "build",
+            error: Some(error),
+            builder,
+            buildpacks: buildpacks.join("\n"),
+            builders: builder_names(),
+        };
+        return render(&page);
+    }
+
+    // Auto stays `None`: `to_plan` inserts `herokuish` when buildpacks follow.
+    draft.builder = if builder.is_empty() {
+        None
+    } else {
+        Some(builder)
+    };
+    draft.buildpacks = buildpacks;
+    save_draft(&session, &draft)?;
+    Ok(see_other("/apps/new/services"))
 }
 
 /// Body for the reset POST: nothing but the CSRF token. A unit `()` target

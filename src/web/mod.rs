@@ -166,6 +166,11 @@ pub fn build_app(
                 .route(web::post().to(wizard::save_name)),
         )
         .route("/apps/new/reset", web::post().to(wizard::reset))
+        .service(
+            web::resource("/apps/new/build")
+                .route(web::get().to(wizard::build_step))
+                .route(web::post().to(wizard::save_build)),
+        )
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))
