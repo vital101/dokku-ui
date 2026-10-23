@@ -107,3 +107,53 @@
   content: "✗ ";
   font-weight: 600;
 }
+
+/* Service metric charts (see src/domain/metrics.rs). The accent colors live
+   here so the generated SVG never depends on Tailwind's source scanner, and
+   the light-theme overrides keep the lines readable on the light ramp. */
+.metric-cpu {
+  --metric-color: #34d399;
+}
+.metric-memory {
+  --metric-color: #38bdf8;
+}
+.metric-disk {
+  --metric-color: #fbbf24;
+}
+.metric-data {
+  --metric-color: #a78bfa;
+}
+
+[data-theme="light"] .metric-cpu {
+  --metric-color: #047857;
+}
+[data-theme="light"] .metric-memory {
+  --metric-color: #0369a1;
+}
+[data-theme="light"] .metric-disk {
+  --metric-color: #b45309;
+}
+[data-theme="light"] .metric-data {
+  --metric-color: #6d28d9;
+}
+
+.metric-chart {
+  color: var(--metric-color);
+}
+.metric-chart-plot,
+.metric-chart-axis-labels {
+  height: 9rem;
+}
+.metric-chart-plot svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.metric-chart-grid {
+  stroke: var(--color-slate-700);
+  stroke-opacity: 0.55;
+  stroke-width: 1;
+}
+.metric-accent-dot {
+  background-color: var(--metric-color);
+}

@@ -1887,6 +1887,7 @@ async fn service_metrics_page_renders_range_controls_and_htmx_target() {
     );
     assert!(body.contains(r#"value="1h""#), "{body}");
     assert!(body.contains(r#"value="30d""#), "{body}");
+    assert!(body.contains(r#"hx-trigger="every 60s""#), "{body}");
 }
 
 #[tokio::test]
@@ -1916,15 +1917,27 @@ async fn service_metrics_partial_renders_svg_charts() {
     assert!(body.contains("Disk"), "{body}");
     assert!(body.contains("Data"), "{body}");
     assert!(body.contains("<svg"), "{body}");
-    assert!(body.contains("stroke-emerald-500"), "{body}");
-    assert!(body.contains("stroke-sky-500"), "{body}");
-    assert!(body.contains("stroke-amber-500"), "{body}");
-    assert!(body.contains("stroke-violet-500"), "{body}");
+    assert!(body.contains("metric-cpu"), "{body}");
+    assert!(body.contains("metric-memory"), "{body}");
+    assert!(body.contains("metric-disk"), "{body}");
+    assert!(body.contains("metric-data"), "{body}");
+    assert!(body.contains("metrics-fill-cpu"), "{body}");
+    assert!(body.contains("metric-chart-point"), "{body}");
     assert!(body.contains("10.0%"), "{body}");
     assert!(body.contains("50.0%"), "{body}");
     assert!(body.contains("25.0%"), "{body}");
     assert!(body.contains("12 KiB"), "{body}");
-    assert!(body.contains(r#"hx-swap-oob="true""#), "{body}");
+    assert!(body.contains("20.0%"), "{body}");
+    assert!(body.contains("20 KiB"), "{body}");
+    assert!(body.contains("peak 10.0%"), "{body}");
+    assert!(body.contains("avg 10.0%"), "{body}");
+    assert!(body.contains("updated just now"), "{body}");
+    assert!(body.contains("-1h"), "{body}");
+    assert!(body.contains("-30m"), "{body}");
+    assert!(body.contains("Auto-scaled"), "{body}");
+    assert!(body.contains(r#"hx-trigger="every 60s""#), "{body}");
+    assert!(body.contains("range=1h"), "{body}");
+    assert_eq!(body.matches(r#"hx-swap-oob="true""#).count(), 2);
     assert_eq!(body.matches("bg-emerald-600").count(), 1);
 }
 

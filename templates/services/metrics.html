@@ -24,5 +24,12 @@
        hx-swap="innerHTML">
     {% include "partials/loading.html" %}
   </div>
+
+  <div id="metrics-auto"
+       class="hidden"
+       hx-get="/services/{{ plugin }}/{{ service }}/partials/metrics?range={{ range.query() }}"
+       hx-trigger="every 60s"
+       hx-target="#metrics-panel"
+       hx-swap="innerHTML"></div>
 </div>
 {% endblock %}

@@ -1,9 +1,18 @@
+<div id="metrics-auto"
+     class="hidden"
+     hx-get="/services/{{ plugin }}/{{ service }}/partials/metrics?range={{ range.query() }}"
+     hx-trigger="every 60s"
+     hx-target="#metrics-panel"
+     hx-swap="innerHTML"
+     hx-swap-oob="true"></div>
+
 <div id="metrics-controls" class="flex items-center gap-1" hx-swap-oob="true">
   <form hx-get="/services/{{ plugin }}/{{ service }}/partials/metrics"
         hx-target="#metrics-panel"
         hx-swap="innerHTML">
     {% for option in ranges %}
     <button type="submit" name="range" value="{{ option.query() }}"
+            aria-pressed="{% if option.query() == range.query() %}true{% else %}false{% endif %}"
             class="rounded-md px-3 py-1.5 text-sm font-medium {% if option.query() == range.query() %}bg-emerald-600 text-white{% else %}bg-slate-800 text-slate-200 hover:bg-slate-700{% endif %}">
       {{ option.query() }}
     </button>
@@ -16,17 +25,39 @@
   <p class="text-sm text-slate-400">No metrics samples yet for the last {{ range.label() }}. Metrics are collected by the background poller.</p>
 </div>
 {% else %}
-<div class="grid gap-4 md:grid-cols-2">
+<div class="grid gap-4 lg:grid-cols-2">
   {% for chart in charts %}
-  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-5">
-    <div class="flex items-center justify-between gap-3">
-      <h3 class="text-sm font-medium text-white">{{ chart.title }}</h3>
-      <span class="text-sm text-white">{{ chart.latest_label }}</span>
+  <div class="metric-{{ chart.key }} rounded-lg border border-slate-800 bg-slate-900/50 p-5">
+    <div class="flex items-start justify-between gap-3">
+      <div class="flex min-w-0 items-center gap-2">
+        <span class="metric-accent-dot size-2 shrink-0 rounded-full"></span>
+        <h3 class="truncate text-sm font-medium text-slate-300">{{ chart.title }}</h3>
+      </div>
+      <div class="shrink-0 text-right">
+        <div class="text-2xl font-semibold text-white">{{ chart.latest_label }}</div>
+        <div class="mt-0.5 text-xs text-slate-500">peak {{ chart.peak_label }} · avg {{ chart.average_label }}</div>
+        <div class="text-xs text-slate-500">updated {{ chart.updated_label }}</div>
+      </div>
     </div>
     {% if chart.empty %}
     <p class="mt-4 text-sm text-slate-400">No samples in range.</p>
     {% else %}
-    <div class="mt-4">{{ chart.svg|safe }}</div>
+    <div class="metric-chart mt-4 flex gap-2">
+      <div class="metric-chart-axis-labels flex w-20 shrink-0 flex-col justify-between text-right font-mono text-xs text-slate-500">
+        <span>{{ chart.axis_max_label }}</span>
+        <span>{{ chart.axis_mid_label }}</span>
+        <span>0</span>
+      </div>
+      <div class="min-w-0 flex-1">
+        <div class="metric-chart-plot">{{ chart.svg|safe }}</div>
+        <div class="mt-1 flex justify-between text-xs text-slate-500">
+          <span>{{ range.start_caption() }}</span>
+          <span>{{ range.mid_caption() }}</span>
+          <span>now</span>
+        </div>
+      </div>
+    </div>
+    <p class="mt-2 text-xs text-slate-500">Auto-scaled 0–{{ chart.axis_max_label }} · last {{ range.label() }}</p>
     {% endif %}
   </div>
   {% endfor %}

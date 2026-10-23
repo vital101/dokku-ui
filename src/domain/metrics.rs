@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::ServiceName;
@@ -5,7 +7,13 @@ use crate::domain::ServicePlugin;
 use crate::domain::types::{ServiceStats, format_bytes};
 
 const SVG_WIDTH: f64 = 720.0;
-const SVG_HEIGHT: f64 = 160.0;
+const SVG_HEIGHT: f64 = 180.0;
+const PLOT_LEFT: f64 = 4.0;
+const PLOT_RIGHT: f64 = 4.0;
+const PLOT_TOP: f64 = 4.0;
+const PLOT_BOTTOM: f64 = 4.0;
+const HEADROOM: f64 = 1.15;
+const BYTE_FLOOR: f64 = 1024.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetricRange {
@@ -52,6 +60,28 @@ impl MetricRange {
             Self::TwentyFourHours => "24 hours",
             Self::SevenDays => "7 days",
             Self::ThirtyDays => "30 days",
+        }
+    }
+
+    /// Start of the x-axis, relative to now. Kept timezone-free because the
+    /// server and the viewer can sit in different zones.
+    pub fn start_caption(self) -> &'static str {
+        match self {
+            Self::OneHour => "-1h",
+            Self::SixHours => "-6h",
+            Self::TwentyFourHours => "-24h",
+            Self::SevenDays => "-7d",
+            Self::ThirtyDays => "-30d",
+        }
+    }
+
+    pub fn mid_caption(self) -> &'static str {
+        match self {
+            Self::OneHour => "-30m",
+            Self::SixHours => "-3h",
+            Self::TwentyFourHours => "-12h",
+            Self::SevenDays => "-3.5d",
+            Self::ThirtyDays => "-15d",
         }
     }
 
@@ -134,10 +164,45 @@ enum ChartKind {
     Bytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChartAccent {
+    Cpu,
+    Memory,
+    Disk,
+    Data,
+}
+
+impl ChartAccent {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Disk => "disk",
+            Self::Data => "data",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ChartSpec {
+    title: &'static str,
+    kind: ChartKind,
+    accent: ChartAccent,
+    /// Smallest axis ceiling, so a nearly idle service still shows movement
+    /// without scaling every pixel of noise up to the full chart height.
+    floor: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChartView {
+    pub key: &'static str,
     pub title: String,
     pub latest_label: String,
+    pub peak_label: String,
+    pub average_label: String,
+    pub updated_label: String,
+    pub axis_max_label: String,
+    pub axis_mid_label: String,
     pub empty: bool,
     pub svg: String,
 }
@@ -201,32 +266,48 @@ pub fn build_metrics_view(
 ) -> MetricsView {
     let charts = vec![
         build_chart(
-            "CPU",
+            ChartSpec {
+                title: "CPU",
+                kind: ChartKind::Percent,
+                accent: ChartAccent::Cpu,
+                floor: 2.0,
+            },
             &percent_points(aggregates, |row| row.cpu_percent),
             range,
             now_ms,
-            "stroke-emerald-500",
         ),
         build_chart(
-            "Memory",
+            ChartSpec {
+                title: "Memory",
+                kind: ChartKind::Percent,
+                accent: ChartAccent::Memory,
+                floor: 10.0,
+            },
             &percent_points(aggregates, |row| row.memory_percent),
             range,
             now_ms,
-            "stroke-sky-500",
         ),
         build_chart(
-            "Disk",
+            ChartSpec {
+                title: "Disk",
+                kind: ChartKind::Percent,
+                accent: ChartAccent::Disk,
+                floor: 10.0,
+            },
             &percent_points(aggregates, |row| row.disk_percent),
             range,
             now_ms,
-            "stroke-amber-500",
         ),
         build_chart(
-            "Data",
+            ChartSpec {
+                title: "Data",
+                kind: ChartKind::Bytes,
+                accent: ChartAccent::Data,
+                floor: BYTE_FLOOR,
+            },
             &data_points(data),
             range,
             now_ms,
-            "stroke-violet-500",
         ),
     ];
 
@@ -265,69 +346,199 @@ fn data_points(data: &[DataSizeAggregate]) -> Vec<MetricPoint> {
 }
 
 fn build_chart(
-    title: &str,
+    spec: ChartSpec,
     points: &[MetricPoint],
     range: MetricRange,
     now_ms: i64,
-    stroke: &str,
 ) -> ChartView {
-    let kind = if title == "Data" {
-        ChartKind::Bytes
+    let latest_label = latest_label(points, spec.kind);
+    let peak = points
+        .iter()
+        .map(|point| point.value)
+        .fold(0.0_f64, f64::max);
+    let average_label = if points.is_empty() {
+        "—".to_owned()
     } else {
-        ChartKind::Percent
+        let sum: f64 = points.iter().map(|point| point.value).sum();
+        format_chart_value(sum / points.len() as f64, spec.kind)
     };
-    let latest_label = latest_label(points, kind);
+    let peak_label = if points.is_empty() {
+        "—".to_owned()
+    } else {
+        format_chart_value(peak, spec.kind)
+    };
+    let updated_label = updated_label(now_ms, points.last().map(|point| point.ts_ms));
+
     if points.is_empty() {
         return ChartView {
-            title: title.to_owned(),
+            key: spec.accent.key(),
+            title: spec.title.to_owned(),
             latest_label,
+            peak_label,
+            average_label,
+            updated_label,
+            axis_max_label: format_chart_value(spec.floor, spec.kind),
+            axis_mid_label: format_chart_value(spec.floor / 2.0, spec.kind),
             empty: true,
             svg: String::new(),
         };
     }
 
-    let max = match kind {
-        ChartKind::Percent => 100.0,
-        ChartKind::Bytes => points
-            .iter()
-            .map(|point| point.value)
-            .fold(0.0_f64, f64::max)
-            .max(1.0),
-    };
+    let axis_max = axis_max(peak, spec.kind, spec.floor);
+    let axis_max_label = format_chart_value(axis_max, spec.kind);
+    let axis_mid_label = format_chart_value(axis_max / 2.0, spec.kind);
     let start = range.start_ms(now_ms);
     let end = now_ms.max(start.saturating_add(1));
     let duration = (end - start) as f64;
-    let mut path = String::new();
-    for (idx, point) in points.iter().enumerate() {
-        let x = ((point.ts_ms - start).max(0) as f64 / duration).min(1.0) * SVG_WIDTH;
-        let y = SVG_HEIGHT - (point.value / max).clamp(0.0, 1.0) * SVG_HEIGHT;
-        if points.len() == 1 {
-            let x_left = (x - 1.0).max(0.0);
-            let x_right = (x + 1.0).min(SVG_WIDTH);
-            path.push_str(&format!("M {x_left:.2} {y:.2} L {x_right:.2} {y:.2}"));
-            break;
-        }
-        if idx == 0 {
-            path.push_str(&format!("M {x:.2} {y:.2}"));
+    let x_left = PLOT_LEFT;
+    let x_right = SVG_WIDTH - PLOT_RIGHT;
+    let y_top = PLOT_TOP;
+    let y_bottom = SVG_HEIGHT - PLOT_BOTTOM;
+    let plot_height = y_bottom - y_top;
+    let map_point = |point: &MetricPoint| {
+        let x =
+            x_left + ((point.ts_ms - start).max(0) as f64 / duration).min(1.0) * (x_right - x_left);
+        let ratio = if axis_max > 0.0 {
+            (point.value / axis_max).clamp(0.0, 1.0)
         } else {
-            path.push_str(&format!(" L {x:.2} {y:.2}"));
+            0.0
+        };
+        let y = y_top + (1.0 - ratio) * plot_height;
+        (x, y)
+    };
+
+    let gap_ms = (range.width_ms().saturating_mul(2)).max(1);
+    let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current: Vec<(f64, f64)> = Vec::new();
+    let mut previous_ts: Option<i64> = None;
+    for point in points {
+        if let Some(previous) = previous_ts {
+            if point.ts_ms.saturating_sub(previous) > gap_ms && !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
         }
+        current.push(map_point(point));
+        previous_ts = Some(point.ts_ms);
+    }
+    if !current.is_empty() {
+        segments.push(current);
     }
 
-    let max_label = format_chart_value(max, kind);
-    let svg = format!(
-        r#"<svg viewBox="0 0 {svg_width:.0} {svg_height:.0}" class="h-36 w-full" role="img" aria-label="{title} over {range_label}"><path class="fill-none stroke-slate-800" stroke-width="1" d="M 0 {svg_height:.2} H {svg_width:.2}" /><path class="fill-none {stroke} stroke-2" stroke-width="2" d="{path}" /><text class="fill-slate-500" x="8" y="14">{max_label}</text><text class="fill-slate-500" x="8" y="154">0</text></svg>"#,
-        svg_width = SVG_WIDTH,
-        svg_height = SVG_HEIGHT,
-        range_label = range.label(),
+    let mut svg = String::new();
+    let _ = write!(
+        svg,
+        r#"<svg viewBox="0 0 {width:.0} {height:.0}" preserveAspectRatio="none" class="metric-chart-svg" role="img" aria-label="{title}: latest {latest}, peak {peak}, average {average}"><title>{title}: latest {latest}, peak {peak}, average {average}</title><defs><linearGradient id="metrics-fill-{key}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="currentColor" stop-opacity="0.32" /><stop offset="100%" stop-color="currentColor" stop-opacity="0.02" /></linearGradient></defs>"#,
+        width = SVG_WIDTH,
+        height = SVG_HEIGHT,
+        title = spec.title,
+        latest = latest_label,
+        peak = peak_label,
+        average = average_label,
+        key = spec.accent.key(),
     );
 
+    for fraction in [0.0, 0.5, 1.0] {
+        let y = y_bottom - fraction * plot_height;
+        let _ = write!(
+            svg,
+            r#"<path class="metric-chart-grid" d="M {x_left:.2} {y:.2} H {x_right:.2}" />"#,
+        );
+    }
+
+    for segment in &segments {
+        if segment.len() < 2 {
+            continue;
+        }
+        let line = polyline_path(segment);
+        let area = area_path(segment, y_bottom);
+        let _ = write!(
+            svg,
+            r#"<path class="metric-chart-area" fill="url(#metrics-fill-{key})" d="{area}" /><path class="metric-chart-line" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke" d="{line}" />"#,
+            key = spec.accent.key(),
+        );
+    }
+
+    if let Some((x, y)) = points.last().map(map_point) {
+        let _ = write!(
+            svg,
+            r#"<circle class="metric-chart-halo" cx="{x:.2}" cy="{y:.2}" r="6" fill="currentColor" opacity="0.18" /><circle class="metric-chart-point" cx="{x:.2}" cy="{y:.2}" r="3.5" fill="currentColor" />"#,
+        );
+    }
+    svg.push_str("</svg>");
+
     ChartView {
-        title: title.to_owned(),
+        key: spec.accent.key(),
+        title: spec.title.to_owned(),
         latest_label,
+        peak_label,
+        average_label,
+        updated_label,
+        axis_max_label,
+        axis_mid_label,
         empty: false,
         svg,
     }
+}
+
+fn polyline_path(points: &[(f64, f64)]) -> String {
+    let mut path = String::new();
+    for (index, (x, y)) in points.iter().enumerate() {
+        let _ = if index == 0 {
+            write!(path, "M {x:.2} {y:.2}")
+        } else {
+            write!(path, " L {x:.2} {y:.2}")
+        };
+    }
+    path
+}
+
+fn area_path(points: &[(f64, f64)], baseline: f64) -> String {
+    let (first_x, _) = points[0];
+    let (last_x, _) = points[points.len() - 1];
+    let mut path = String::new();
+    let _ = write!(path, "M {first_x:.2} {baseline:.2}");
+    for (x, y) in points {
+        let _ = write!(path, " L {x:.2} {y:.2}");
+    }
+    let _ = write!(path, " L {last_x:.2} {baseline:.2} Z");
+    path
+}
+
+/// Rounds a positive value up to a familiar axis ceiling (1, 2, 2.5, 5, 7.5,
+/// 10 × 10ⁿ) so labels read cleanly.
+fn nice_number(value: f64) -> f64 {
+    if !value.is_finite() || value <= 0.0 {
+        return 1.0;
+    }
+    let exponent = value.log10().floor();
+    let magnitude = 10f64.powf(exponent);
+    let normalized = value / magnitude;
+    let step = [1.0, 2.0, 2.5, 5.0, 7.5, 10.0]
+        .iter()
+        .copied()
+        .find(|step| normalized <= *step + 1e-9)
+        .unwrap_or(10.0);
+    step * magnitude
+}
+
+fn axis_max(peak: f64, kind: ChartKind, floor: f64) -> f64 {
+    let target = (peak * HEADROOM).max(floor);
+    match kind {
+        ChartKind::Percent => nice_number(target).clamp(floor.max(1.0), 100.0),
+        ChartKind::Bytes => nice_bytes(target),
+    }
+}
+
+fn nice_bytes(target: f64) -> f64 {
+    const KIB: f64 = 1024.0;
+    let units = [1.0, KIB, KIB * KIB, KIB * KIB * KIB, KIB * KIB * KIB * KIB];
+    let unit = units
+        .iter()
+        .rev()
+        .copied()
+        .find(|unit| target >= *unit)
+        .unwrap_or(1.0);
+    (nice_number(target / unit) * unit).max(1.0)
 }
 
 fn latest_label(points: &[MetricPoint], kind: ChartKind) -> String {
@@ -335,6 +546,22 @@ fn latest_label(points: &[MetricPoint], kind: ChartKind) -> String {
         .last()
         .map(|point| format_chart_value(point.value, kind))
         .unwrap_or_else(|| "—".to_owned())
+}
+
+fn updated_label(now_ms: i64, ts_ms: Option<i64>) -> String {
+    let Some(ts_ms) = ts_ms else {
+        return "—".to_owned();
+    };
+    let secs = now_ms.saturating_sub(ts_ms).max(0) / 1_000;
+    if secs < 60 {
+        "just now".to_owned()
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 fn format_chart_value(value: f64, kind: ChartKind) -> String {
@@ -379,6 +606,22 @@ mod tests {
         }
     }
 
+    fn aggregate(
+        ts_ms: i64,
+        cpu: Option<f64>,
+        memory: Option<f64>,
+        disk: Option<f64>,
+    ) -> MetricAggregate {
+        MetricAggregate {
+            ts_ms,
+            cpu_percent: cpu,
+            memory_percent: memory,
+            disk_percent: disk,
+            fs_used_bytes: None,
+            fs_total_bytes: None,
+        }
+    }
+
     #[test]
     fn range_parse_defaults_bad_values_to_24h() {
         assert_eq!(MetricRange::parse(Some("1h")), MetricRange::OneHour);
@@ -398,6 +641,14 @@ mod tests {
         assert_eq!(range.width_ms(), 3_600_000);
         assert_eq!(range.start_ms(604_830_000), 30_000);
         assert_eq!(range.start_ms(700_000), -604_100_000);
+    }
+
+    #[test]
+    fn range_captions_match_the_span() {
+        assert_eq!(MetricRange::OneHour.start_caption(), "-1h");
+        assert_eq!(MetricRange::OneHour.mid_caption(), "-30m");
+        assert_eq!(MetricRange::SevenDays.mid_caption(), "-3.5d");
+        assert_eq!(MetricRange::ThirtyDays.mid_caption(), "-15d");
     }
 
     #[test]
@@ -423,47 +674,68 @@ mod tests {
     }
 
     #[test]
-    fn empty_metrics_view_has_no_charts_with_data() {
+    fn empty_metrics_view_has_floor_axis_labels() {
         let view = build_metrics_view(&[], &[], MetricRange::OneHour, 100_000);
 
         assert!(view.empty);
         assert_eq!(view.charts.len(), 4);
         assert!(view.charts.iter().all(|chart| chart.empty));
+        assert_eq!(view.charts[0].axis_max_label, "2.0%");
+        assert_eq!(view.charts[0].axis_mid_label, "1.0%");
+        assert_eq!(view.charts[1].axis_max_label, "10.0%");
+        assert_eq!(view.charts[3].axis_max_label, "1 KiB");
     }
 
     #[test]
-    fn percent_chart_draws_scaled_path() {
+    fn percent_chart_uses_dynamic_axis_and_labels() {
         let aggregates = [
-            MetricAggregate {
-                ts_ms: 1_000_000,
-                cpu_percent: Some(25.0),
-                memory_percent: Some(50.0),
-                disk_percent: None,
-                fs_used_bytes: Some(1024.0),
-                fs_total_bytes: Some(4096.0),
-            },
-            MetricAggregate {
-                ts_ms: 3_400_000,
-                cpu_percent: Some(100.0),
-                memory_percent: Some(0.0),
-                disk_percent: None,
-                fs_used_bytes: None,
-                fs_total_bytes: Some(4096.0),
-            },
+            aggregate(3_300_000, Some(25.0), Some(50.0), None),
+            aggregate(3_360_000, Some(100.0), Some(0.0), None),
         ];
         let view = build_metrics_view(&aggregates, &[], MetricRange::OneHour, 4_600_000);
 
         assert!(!view.charts[0].empty);
         assert_eq!(view.charts[0].latest_label, "100.0%");
-        assert!(view.charts[0].svg.contains("stroke-emerald-500"));
-        assert!(view.charts[0].svg.contains("M 0.00 120.00 L 480.00 0.00"));
+        assert_eq!(view.charts[0].peak_label, "100.0%");
+        assert_eq!(view.charts[0].average_label, "62.5%");
+        assert_eq!(view.charts[0].updated_label, "20m ago");
+        assert_eq!(view.charts[0].axis_max_label, "100.0%");
+        assert_eq!(view.charts[0].axis_mid_label, "50.0%");
+        assert!(view.charts[0].svg.contains("metric-chart-line"));
+        assert!(view.charts[0].svg.contains("M 458.89 133.00 L 470.76 4.00"));
+        assert!(view.charts[0].svg.contains("metric-chart-point"));
+        assert!(view.charts[0].svg.contains("metrics-fill-cpu"));
         assert_eq!(view.charts[1].latest_label, "0.0%");
         assert!(view.charts[2].empty);
         assert!(view.charts[3].empty);
     }
 
     #[test]
-    fn data_chart_uses_byte_labels_and_single_point_segment() {
+    fn small_cpu_values_zoom_the_axis() {
+        let aggregates = [aggregate(4_000_000, Some(0.9), None, None)];
+        let view = build_metrics_view(&aggregates, &[], MetricRange::OneHour, 4_600_000);
+
+        assert_eq!(view.charts[0].latest_label, "0.9%");
+        assert_eq!(view.charts[0].axis_max_label, "2.0%");
+        assert_eq!(view.charts[0].axis_mid_label, "1.0%");
+        assert!(view.charts[0].svg.contains(r#"cy="98.60""#));
+        assert!(!view.charts[0].svg.contains(r#"cy="176.00""#));
+    }
+
+    #[test]
+    fn percent_axis_has_floors_and_a_100_percent_cap() {
+        let aggregates = [aggregate(4_600_000, Some(99.0), Some(6.0), Some(61.3))];
+        let view = build_metrics_view(&aggregates, &[], MetricRange::OneHour, 4_600_000);
+
+        assert_eq!(view.charts[0].axis_max_label, "100.0%");
+        assert_eq!(view.charts[1].axis_max_label, "10.0%");
+        assert_eq!(view.charts[1].axis_mid_label, "5.0%");
+        assert_eq!(view.charts[2].axis_max_label, "75.0%");
+        assert_eq!(view.charts[2].axis_mid_label, "37.5%");
+    }
+
+    #[test]
+    fn data_chart_uses_nice_byte_ceilings_and_single_point_marker() {
         let data = [DataSizeAggregate {
             ts_ms: 4_600_000,
             data_bytes: Some(12.0 * 1024.0),
@@ -471,8 +743,49 @@ mod tests {
         let view = build_metrics_view(&[], &data, MetricRange::OneHour, 4_600_000);
 
         assert_eq!(view.charts[3].latest_label, "12 KiB");
+        assert_eq!(view.charts[3].axis_max_label, "20 KiB");
+        assert_eq!(view.charts[3].axis_mid_label, "10 KiB");
+        assert_eq!(view.charts[3].updated_label, "just now");
         assert!(!view.charts[3].empty);
-        assert!(view.charts[3].svg.contains("stroke-violet-500"));
-        assert!(view.charts[3].svg.contains("M 719.00 0.00 L 720.00 0.00"));
+        assert!(view.charts[3].svg.contains("metrics-fill-data"));
+        assert!(view.charts[3].svg.contains(r#"cx="716.00" cy="72.80""#));
+        assert!(!view.charts[3].svg.contains("metric-chart-line"));
+    }
+
+    #[test]
+    fn data_chart_scales_large_values() {
+        let data = [DataSizeAggregate {
+            ts_ms: 4_600_000,
+            data_bytes: Some(44_560_285_696.0),
+        }];
+        let view = build_metrics_view(&[], &data, MetricRange::OneHour, 4_600_000);
+
+        assert_eq!(view.charts[3].latest_label, "41.5 GiB");
+        assert_eq!(view.charts[3].axis_max_label, "50.0 GiB");
+    }
+
+    #[test]
+    fn gap_breaks_the_line_into_segments() {
+        let aggregates = [
+            aggregate(1_000_000, Some(10.0), None, None),
+            aggregate(1_060_000, Some(20.0), None, None),
+            aggregate(1_500_000, Some(30.0), None, None),
+            aggregate(1_560_000, Some(40.0), None, None),
+        ];
+        let view = build_metrics_view(&aggregates, &[], MetricRange::OneHour, 4_600_000);
+
+        assert_eq!(view.charts[0].svg.matches("metric-chart-line").count(), 2);
+    }
+
+    #[test]
+    fn updated_label_uses_relative_units() {
+        assert_eq!(updated_label(100_000, None), "—");
+        assert_eq!(updated_label(100_000, Some(99_500)), "just now");
+        assert_eq!(updated_label(100_000, Some(100_000 - 120_000)), "2m ago");
+        assert_eq!(updated_label(100_000, Some(100_000 - 7_200_000)), "2h ago");
+        assert_eq!(
+            updated_label(100_000, Some(100_000 - 172_800_000)),
+            "2d ago"
+        );
     }
 }
