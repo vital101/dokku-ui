@@ -186,6 +186,10 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
 
     for path in [
         "/apps/new",
+        "/apps/new/build",
+        "/apps/new/services",
+        "/apps/new/volumes",
+        "/apps/new/review",
         "/apps/alpha",
         "/apps/alpha/processes",
         "/apps/alpha/services",
@@ -231,7 +235,26 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
     }
 
     for (path, body) in [
-        ("/apps", "name=alpha"),
+        ("/apps/new", "name=alpha"),
+        ("/apps/new/reset", ""),
+        ("/apps/new/build", "builder=&buildpacks="),
+        ("/apps/new/services/attach", "service_key=redis%3Acandid"),
+        ("/apps/new/services/create", "plugin=redis&service=fresh"),
+        ("/apps/new/services/remove", "plugin=redis&service=candid"),
+        ("/apps/new/volumes/create", "entry=logs&container=%2Flogs"),
+        (
+            "/apps/new/volumes/attach-entry",
+            "entry=legacy-151e4f1a23&container=%2Fdata",
+        ),
+        (
+            "/apps/new/volumes/attach-path",
+            "host=%2Fhost&container=%2Fdata",
+        ),
+        (
+            "/apps/new/volumes/remove",
+            "mode=create&source=logs&container=%2Flogs",
+        ),
+        ("/apps/new/execute", ""),
         ("/apps/alpha/delete", "name=alpha"),
         ("/apps/alpha/start", ""),
         ("/apps/alpha/stop", ""),
@@ -261,7 +284,7 @@ async fn app_routes_redirect_to_login_when_unauthenticated() {
 }
 
 #[tokio::test]
-async fn create_app_redirects_to_show_with_success_flash() {
+async fn create_app_uses_the_wizard_name_step() {
     let (state, _dir) = test_state_with_client(seeded_app_client()).await;
     let app = test::init_service(build_app(state)).await;
     let cookie = complete_setup(&app).await;
@@ -279,118 +302,13 @@ async fn create_app_redirects_to_show_with_success_flash() {
 
     let resp = test::call_service(
         &app,
-        form_request("/apps", format!("csrf_token={csrf}&name=alpha"))
-            .cookie(cookie.clone())
-            .to_request(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&resp), "/apps/alpha");
-    let cookie = response_cookie(&resp).unwrap_or(cookie);
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/apps/alpha")
+        form_request("/apps/new", format!("csrf_token={csrf}&name=myapp"))
             .cookie(cookie)
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = get_body(resp).await;
-    assert!(body.contains("App &#39;alpha&#39; created."));
-}
-
-#[tokio::test]
-async fn create_app_with_invalid_name_flashes_and_skips_dokku() {
-    let (state, client, _dir) = harness(seeded_app_client()).await;
-    let app = test::init_service(build_app(state)).await;
-    let cookie = complete_setup(&app).await;
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/apps/new")
-            .cookie(cookie.clone())
-            .to_request(),
-    )
-    .await;
-    let csrf = extract_csrf(&get_body(resp).await);
-
-    let resp = test::call_service(
-        &app,
-        form_request("/apps", format!("csrf_token={csrf}&name=Bad_App"))
-            .cookie(cookie.clone())
-            .to_request(),
-    )
-    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&resp), "/apps/new");
-    let cookie = response_cookie(&resp).unwrap_or(cookie);
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/apps/new")
-            .cookie(cookie)
-            .to_request(),
-    )
-    .await;
-    let body = get_body(resp).await;
-    assert!(body.contains("Invalid app name"));
-    assert!(
-        client
-            .calls()
-            .iter()
-            .all(|c| !matches!(c, DokkuCommand::AppsCreate { .. })),
-        "no AppsCreate call for invalid name"
-    );
-}
-
-#[tokio::test]
-async fn create_app_error_flashes_and_returns_to_form() {
-    let (state, _dir) = test_state_with_client(MockClient::new().stub(
-        DokkuCommand::AppsCreate {
-            app: app_name("alpha"),
-        },
-        Err(exit_error(1, "already exists")),
-    ))
-    .await;
-    let app = test::init_service(build_app(state)).await;
-    let cookie = complete_setup(&app).await;
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/apps/new")
-            .cookie(cookie.clone())
-            .to_request(),
-    )
-    .await;
-    let csrf = extract_csrf(&get_body(resp).await);
-
-    let resp = test::call_service(
-        &app,
-        form_request("/apps", format!("csrf_token={csrf}&name=alpha"))
-            .cookie(cookie.clone())
-            .to_request(),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert_eq!(location(&resp), "/apps/new");
-    let cookie = response_cookie(&resp).unwrap_or(cookie);
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/apps/new")
-            .cookie(cookie)
-            .to_request(),
-    )
-    .await;
-    let body = get_body(resp).await;
-    assert!(body.contains("Failed to create app"));
-    assert!(body.contains("already exists"));
+    assert_eq!(location(&resp), "/apps/new/build");
 }
 
 #[tokio::test]
@@ -843,7 +761,7 @@ async fn app_posts_without_valid_csrf_are_rejected() {
     let cookie = complete_setup(&app).await;
 
     for (path, body) in [
-        ("/apps", "name=alpha"),
+        ("/apps/new", "name=alpha"),
         ("/apps/alpha/delete", "name=alpha"),
         ("/apps/alpha/start", ""),
         ("/apps/alpha/stop", ""),

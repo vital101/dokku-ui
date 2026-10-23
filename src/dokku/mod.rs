@@ -34,7 +34,7 @@ pub use processes::{
     format_uptime, formation_rows, parse_scale_form, scale_field_name,
 };
 pub use russh_client::RusshClient;
-pub use service_pages::{plugin_services, service_linked_apps, service_logs};
+pub use service_pages::{plugin_services, service_linked_apps, service_logs, service_names};
 pub use snapshot::{
     Snapshot, SnapshotError, SnapshotStore, build_snapshot, format_age, spawn_refresher,
 };

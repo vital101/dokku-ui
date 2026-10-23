@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}New app — Services — Dokku UI{% endblock %}
+{% block heading %}New app — Services{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl space-y-6">
+  {% include "apps/wizard/partials/progress.html" %}
+
+  {% if let Some(error) = error %}
+  <div class="rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  {% if let Some(services_error) = services_error %}
+  <div class="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
+    Could not read the host's installed service plugins: {{ services_error }}.
+    No services are listed, but you can still continue to volumes.
+  </div>
+  {% endif %}
+
+  {% for entry in list_errors %}
+  <div class="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
+    Could not read {{ entry.0 }} services: {{ entry.1 }}
+  </div>
+  {% endfor %}
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Selected services</h3>
+    {% if selected_rows.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">
+      No services selected yet. This step is optional — continue to volumes to create the app
+      without a datastore.
+    </p>
+    {% else %}
+    <table class="mt-4 w-full text-left text-sm">
+      <thead>
+        <tr class="border-b border-slate-800 text-slate-400">
+          <th class="py-2 pr-4 font-medium">Plugin</th>
+          <th class="py-2 pr-4 font-medium">Service</th>
+          <th class="py-2 pr-4 font-medium">Mode</th>
+          <th class="py-2 font-medium"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in selected_rows %}
+        <tr class="border-b border-slate-800/50">
+          <td class="py-2 pr-4 text-slate-300">{{ row.plugin_label }}</td>
+          <td class="py-2 pr-4 font-mono text-white">{{ row.service }}</td>
+          <td class="py-2 pr-4 text-slate-300">{{ row.mode_label }}</td>
+          <td class="py-2 text-right">
+            <form method="post" action="/apps/new/services/remove" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="plugin" value="{{ row.plugin }}">
+              <input type="hidden" name="service" value="{{ row.service }}">
+              <button type="submit"
+                      class="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700">
+                Remove
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Attach an existing service</h3>
+    {% if available_services.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No existing services were found on this host.</p>
+    {% else %}
+    <form method="post" action="/apps/new/services/attach" class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="flex-1">
+        <label for="service_key" class="mb-1 block text-sm text-slate-400">Service</label>
+        <select id="service_key" name="service_key" required
+                class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white">
+          {% for service in available_services %}
+          <option value="{{ service.plugin }}:{{ service.service }}">
+            {{ service.plugin.display_name() }} / {{ service.service }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit"
+              class="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500">
+        Attach
+      </button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6">
+    <h3 class="text-sm font-medium text-white">Create a new service</h3>
+    {% if plugins.is_empty() %}
+    <p class="mt-4 text-sm text-slate-400">No datastore service plugins are installed on this host.</p>
+    {% else %}
+    <form method="post" action="/apps/new/services/create" class="mt-4 flex items-end gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <label for="plugin" class="mb-1 block text-sm text-slate-400">Plugin</label>
+        <select id="plugin" name="plugin" required
+                class="rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white">
+          {% for plugin in plugins %}
+          <option value="{{ plugin }}">{{ plugin.display_name() }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="flex-1">
+        <label for="service" class="mb-1 block text-sm text-slate-400">Service name</label>
+        <input id="service" name="service" type="text" required maxlength="64" pattern="[A-Za-z0-9_-]+"
+               class="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500"
+               placeholder="my-db">
+      </div>
+      <button type="submit"
+              class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+        Create + link
+      </button>
+    </form>
+    <p class="mt-2 text-xs text-slate-500">
+      Created with the plugin's default options when the app is created; advanced options live on
+      the service's own page.
+    </p>
+    {% endif %}
+  </div>
+
+  <div class="flex items-center gap-3">
+    <a href="/apps/new/build" class="text-sm text-slate-400 hover:text-slate-200">Back</a>
+    <a href="/apps/new/volumes"
+       class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+      Next: volumes
+    </a>
+  </div>
+</div>
+{% endblock %}

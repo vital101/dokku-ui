@@ -1,4 +1,5 @@
 pub mod app_name;
+pub mod app_wizard;
 pub mod build;
 pub mod capabilities;
 pub mod command;
@@ -25,11 +26,16 @@ pub mod service_name;
 pub mod service_plugin;
 pub mod service_upgrade;
 pub mod ssh_key;
+pub mod storage_entry;
 pub mod tls;
 pub mod types;
 pub mod webhook;
 
 pub use app_name::{AppName, AppNameError};
+pub use app_wizard::{
+    AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, MAX_VOLUMES, PlanPreviewLine, VolumeMode,
+    WizardError, WizardService, WizardVolume, plan_preview,
+};
 pub use build::{
     BUILDERS, is_valid_builder_property, is_valid_builder_value, is_valid_buildpack,
     is_valid_buildpack_index,
@@ -68,3 +74,4 @@ pub use service_name::{ServiceName, ServiceNameError};
 pub use service_plugin::{SERVICE_PLUGINS, ServicePlugin, ServicePluginError};
 pub use service_upgrade::{ServiceUpgradeOptions, ServiceUpgradeOptionsError};
 pub use ssh_key::{is_valid_public_key, is_valid_ssh_key_name};
+pub use storage_entry::{StorageEntryName, StorageEntryNameError, is_valid_volume_container_path};

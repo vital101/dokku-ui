@@ -28,6 +28,7 @@ mod toasts;
 mod users;
 mod volumes;
 mod webhooks;
+mod wizard;
 
 use actix_session::SessionMiddleware;
 use actix_session::config::{PersistentSession, TtlExtensionPolicy};
@@ -159,8 +160,49 @@ pub fn build_app(
                 .route(web::get().to(users::password_form))
                 .route(web::post().to(users::password_submit)),
         )
-        .route("/apps/new", web::get().to(apps::new_form))
-        .route("/apps", web::post().to(apps::create))
+        .service(
+            web::resource("/apps/new")
+                .route(web::get().to(wizard::name_step))
+                .route(web::post().to(wizard::save_name)),
+        )
+        .route("/apps/new/reset", web::post().to(wizard::reset))
+        .service(
+            web::resource("/apps/new/build")
+                .route(web::get().to(wizard::build_step))
+                .route(web::post().to(wizard::save_build)),
+        )
+        .route("/apps/new/services", web::get().to(wizard::services_step))
+        .route(
+            "/apps/new/services/attach",
+            web::post().to(wizard::attach_service),
+        )
+        .route(
+            "/apps/new/services/create",
+            web::post().to(wizard::create_service),
+        )
+        .route(
+            "/apps/new/services/remove",
+            web::post().to(wizard::remove_service),
+        )
+        .route("/apps/new/volumes", web::get().to(wizard::volumes_step))
+        .route(
+            "/apps/new/volumes/create",
+            web::post().to(wizard::create_volume),
+        )
+        .route(
+            "/apps/new/volumes/attach-entry",
+            web::post().to(wizard::attach_volume_entry),
+        )
+        .route(
+            "/apps/new/volumes/attach-path",
+            web::post().to(wizard::attach_volume_path),
+        )
+        .route(
+            "/apps/new/volumes/remove",
+            web::post().to(wizard::remove_volume),
+        )
+        .route("/apps/new/review", web::get().to(wizard::review))
+        .route("/apps/new/execute", web::post().to(wizard::execute))
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))
         .route("/apps/{name}/scale", web::post().to(apps::scale))

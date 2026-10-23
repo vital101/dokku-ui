@@ -1,0 +1,41 @@
+<ol class="flex flex-wrap items-center gap-2 text-sm">
+  <li>
+    {% if active_step == "name" %}
+    <a href="/apps/new" class="rounded-md bg-slate-800 px-3 py-1.5 font-medium text-white">1. Name</a>
+    {% else %}
+    <span class="rounded-md px-3 py-1.5 text-slate-500">1. Name</span>
+    {% endif %}
+  </li>
+  <li aria-hidden="true" class="text-slate-600">/</li>
+  <li>
+    {% if active_step == "build" %}
+    <span class="rounded-md bg-slate-800 px-3 py-1.5 font-medium text-white">2. Build</span>
+    {% else %}
+    <span class="rounded-md px-3 py-1.5 text-slate-500">2. Build</span>
+    {% endif %}
+  </li>
+  <li aria-hidden="true" class="text-slate-600">/</li>
+  <li>
+    {% if active_step == "services" %}
+    <span class="rounded-md bg-slate-800 px-3 py-1.5 font-medium text-white">3. Services</span>
+    {% else %}
+    <span class="rounded-md px-3 py-1.5 text-slate-500">3. Services</span>
+    {% endif %}
+  </li>
+  <li aria-hidden="true" class="text-slate-600">/</li>
+  <li>
+    {% if active_step == "volumes" %}
+    <span class="rounded-md bg-slate-800 px-3 py-1.5 font-medium text-white">4. Volumes</span>
+    {% else %}
+    <span class="rounded-md px-3 py-1.5 text-slate-500">4. Volumes</span>
+    {% endif %}
+  </li>
+  <li aria-hidden="true" class="text-slate-600">/</li>
+  <li>
+    {% if active_step == "review" %}
+    <span class="rounded-md bg-slate-800 px-3 py-1.5 font-medium text-white">5. Review</span>
+    {% else %}
+    <span class="rounded-md px-3 py-1.5 text-slate-500">5. Review</span>
+    {% endif %}
+  </li>
+</ol>
