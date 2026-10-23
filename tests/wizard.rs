@@ -11,9 +11,13 @@ use common::{
     seed_user_with_role, test_state, test_state_with_shared_client,
 };
 use dokku_ui::auth::rbac::Role;
-use dokku_ui::dokku::{DokkuOutput, MockClient};
+use dokku_ui::dokku::{DokkuError, DokkuOutput, MockClient};
+use dokku_ui::domain::ServicePlugin;
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::web::build_app;
+
+const PLUGIN_LIST: &str = include_str!("fixtures/plugin_list.txt");
+const REDIS_LIST: &str = include_str!("fixtures/redis_list.txt");
 
 async fn get_ok<S, B, E>(app: &S, path: &str, cookie: &Cookie<'static>) -> String
 where
@@ -477,4 +481,435 @@ async fn dockerfile_builder_with_buildpack_renders_conflict_error() {
         "urls kept: {body}"
     );
     assert!(no_build_mutation_calls(&client), "{:?}", client.calls());
+}
+
+fn redis_plugin() -> ServicePlugin {
+    ServicePlugin::try_from("redis").expect("redis plugin")
+}
+
+fn postgres_plugin() -> ServicePlugin {
+    ServicePlugin::try_from("postgres").expect("postgres plugin")
+}
+
+/// MockClient covering the services step's reads: snapshot apps, the
+/// capability probe (version + plugin list), and `redis:list` only.
+fn services_client() -> MockClient {
+    MockClient::new()
+        .stub(
+            DokkuCommand::AppsList,
+            Ok(DokkuOutput::ok("=====> My Apps")),
+        )
+        .stub(
+            DokkuCommand::DokkuVersion,
+            Ok(DokkuOutput::ok("dokku version 0.38.4\n")),
+        )
+        .stub(DokkuCommand::PluginList, Ok(DokkuOutput::ok(PLUGIN_LIST)))
+        .stub(
+            DokkuCommand::ServiceList {
+                plugin: redis_plugin(),
+            },
+            Ok(DokkuOutput::ok(REDIS_LIST)),
+        )
+}
+
+fn no_service_mutation_calls(client: &MockClient) -> bool {
+    !client.calls().iter().any(|cmd| {
+        matches!(
+            cmd,
+            DokkuCommand::ServiceCreate { .. } | DokkuCommand::ServiceLink { .. }
+        )
+    })
+}
+
+#[tokio::test]
+async fn services_step_redirects_to_name_step_without_a_name() {
+    let (state, _dir) = test_state().await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/apps/new/services")
+            .cookie(cookie)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new");
+}
+
+#[tokio::test]
+async fn services_step_lists_installed_plugins_and_existing_services() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(body.contains(r#"value="redis:candid""#), "{body}");
+    assert!(body.contains("Next: volumes"), "{body}");
+    assert!(body.contains(r#"value="postgres""#), "{body}");
+    assert!(body.contains("PostgreSQL"), "{body}");
+    assert!(
+        !body.contains("MariaDB"),
+        "uninstalled plugin offered: {body}"
+    );
+    assert!(
+        body.contains("No services selected yet"),
+        "empty selection table: {body}"
+    );
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn attach_existing_service_appends_it_to_the_draft() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/attach",
+            format!("csrf_token={csrf}&service_key=redis%3Acandid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(body.contains(">candid</td>"), "row shown: {body}");
+    assert!(body.contains(">attach</td>"), "mode label: {body}");
+    assert!(body.contains("Redis</td>"), "plugin label: {body}");
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn create_new_service_appends_it_with_the_create_flag() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/create",
+            format!("csrf_token={csrf}&plugin=postgres&service=db-one"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&resp), "/apps/new/services");
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(body.contains(">db-one</td>"), "row shown: {body}");
+    assert!(body.contains("create + link</td>"), "mode label: {body}");
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn creating_a_service_that_already_exists_is_rejected() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/create",
+            format!("csrf_token={csrf}&plugin=redis&service=candid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("already exists; attach it instead"), "{body}");
+    assert!(
+        body.contains("No services selected yet"),
+        "draft untouched: {body}"
+    );
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn duplicate_attach_is_rejected() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/attach",
+            format!("csrf_token={csrf}&service_key=redis%3Acandid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/attach",
+            format!("csrf_token={csrf}&service_key=redis%3Acandid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(body.contains("is already selected"), "{body}");
+    assert!(
+        body.matches(">candid</td>").count() == 1,
+        "one row only: {body}"
+    );
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn attach_or_create_with_invalid_names_never_touches_the_draft() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    for (path, form, needle) in [
+        (
+            "/apps/new/services/attach",
+            "service_key=no-service".to_owned(),
+            "Choose a service to attach.",
+        ),
+        (
+            "/apps/new/services/attach",
+            "service_key=nope%3Acandid".to_owned(),
+            "Unknown service plugin",
+        ),
+        (
+            "/apps/new/services/attach",
+            "service_key=redis%3ABad Name".to_owned(),
+            "Invalid service name",
+        ),
+        (
+            "/apps/new/services/create",
+            "plugin=nope&service=ok-one".to_owned(),
+            "Unknown service plugin",
+        ),
+        (
+            "/apps/new/services/create",
+            "plugin=redis&service=Bad%20Name".to_owned(),
+            "Invalid service name",
+        ),
+    ] {
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token={csrf}&{form}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path} {form}");
+        let body = get_body(resp).await;
+        assert!(body.contains(needle), "{needle} missing from {body}");
+        assert!(
+            body.contains("No services selected yet"),
+            "draft untouched after {path}: {body}"
+        );
+    }
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn remove_drops_the_row_and_out_of_range_indexes_are_no_ops() {
+    let (state, client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/attach",
+            format!("csrf_token={csrf}&service_key=redis%3Acandid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/remove",
+            format!("csrf_token={csrf}&index=9"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(body.contains(">candid</td>"), "row kept: {body}");
+
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/remove",
+            format!("csrf_token={csrf}&index=0"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let cookie = response_cookie(&resp).unwrap_or(cookie);
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(
+        body.contains("No services selected yet"),
+        "row removed: {body}"
+    );
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn failed_capability_probe_shows_a_notice_but_keeps_next() {
+    let client = services_client().stub(
+        DokkuCommand::DokkuVersion,
+        Err(DokkuError::Connect("ssh refused".to_owned())),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(
+        body.contains("Could not read the host's installed service plugins"),
+        "notice: {body}"
+    );
+    assert!(body.contains("Next: volumes"), "next kept: {body}");
+    assert!(
+        body.contains("failed to connect to dokku host: ssh refused"),
+        "reason shown: {body}"
+    );
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn a_failing_plugin_list_shows_its_notice_and_still_offers_others() {
+    let client = services_client().stub(
+        DokkuCommand::ServiceList {
+            plugin: redis_plugin(),
+        },
+        Err(DokkuError::Exit {
+            code: 2,
+            stderr: "xargs: unmatched single quote".to_owned(),
+        }),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    assert!(
+        body.contains("Could not read redis services:"),
+        "notice shown: {body}"
+    );
+    assert!(body.contains("PostgreSQL"), "other plugin offered: {body}");
+    assert!(body.contains("Next: volumes"), "next kept: {body}");
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn failed_plugin_list_on_attach_prompts_a_retry() {
+    let client = services_client().stub(
+        DokkuCommand::ServiceList {
+            plugin: postgres_plugin(),
+        },
+        Err(DokkuError::Timeout { secs: 30 }),
+    );
+    let (state, client, _dir) = test_state_with_shared_client(client).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    let body = get_ok(&app, "/apps/new/services", &cookie).await;
+    let csrf = extract_csrf(&body);
+    let resp = test::call_service(
+        &app,
+        form_request(
+            "/apps/new/services/attach",
+            format!("csrf_token={csrf}&service_key=postgres%3Acandid"),
+        )
+        .cookie(cookie.clone())
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = get_body(resp).await;
+    assert!(
+        body.contains("Could not read PostgreSQL services; retry."),
+        "{body}"
+    );
+    assert!(no_service_mutation_calls(&client), "{:?}", client.calls());
+}
+
+#[tokio::test]
+async fn service_step_posts_require_csrf() {
+    let (state, _client, _dir) = test_state_with_shared_client(services_client()).await;
+    let app = test::init_service(build_app(state)).await;
+    let cookie = complete_setup(&app).await;
+    let cookie = save_app_name(&app, cookie).await;
+
+    for (path, form) in [
+        ("/apps/new/services/attach", "service_key=redis%3Acandid"),
+        (
+            "/apps/new/services/create",
+            "plugin=redis&service=fresh-one",
+        ),
+        ("/apps/new/services/remove", "index=0"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            form_request(path, format!("csrf_token=not-a-token&{form}"))
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
 }

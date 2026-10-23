@@ -28,6 +28,17 @@ pub async fn plugin_services(
     Ok(services)
 }
 
+/// `<plugin>:list` -> bare service names, no `<plugin>:info` fetch per service.
+/// Used by the app wizard's services step, which only needs names (the plan is
+/// executed later, so status/version columns would cost SSH for nothing).
+pub async fn service_names(
+    client: &dyn DokkuClient,
+    plugin: ServicePlugin,
+) -> Result<Vec<String>, DokkuError> {
+    let output = client.exec(&DokkuCommand::ServiceList { plugin }).await?;
+    Ok(parse_service_list(&output.stdout))
+}
+
 /// `<plugin>:links <service>` -> the apps the service is linked to.
 pub async fn service_linked_apps(
     client: &dyn DokkuClient,
@@ -157,6 +168,36 @@ mod tests {
         );
 
         assert!(plugin_services(&client, redis()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn service_names_lists_names_with_a_single_list_call() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ServiceList { plugin: redis() },
+            Ok(DokkuOutput::ok(REDIS_LIST)),
+        );
+
+        let names = service_names(&client, redis()).await.expect("names");
+
+        assert_eq!(names, vec!["candid"]);
+        assert_eq!(
+            client.calls(),
+            vec![DokkuCommand::ServiceList { plugin: redis() }],
+            "no per-service info calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_names_propagates_list_failure() {
+        let client = MockClient::new().stub(
+            DokkuCommand::ServiceList { plugin: redis() },
+            Err(DokkuError::Exit {
+                code: 1,
+                stderr: "plugin not installed".into(),
+            }),
+        );
+
+        assert!(service_names(&client, redis()).await.is_err());
     }
 
     #[tokio::test]

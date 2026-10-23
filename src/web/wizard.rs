@@ -4,9 +4,13 @@ use askama::Template;
 use futures_util::future::Either;
 use serde::Deserialize;
 
+use crate::dokku::service_names;
 use crate::domain::AppName;
-use crate::domain::app_wizard::{AppWizardDraft, MAX_BUILDPACKS};
+use crate::domain::app_wizard::{AppWizardDraft, MAX_BUILDPACKS, MAX_SERVICES, WizardService};
 use crate::domain::build::{BUILDERS, is_valid_buildpack};
+use crate::domain::capabilities::Support;
+use crate::domain::service_name::ServiceName;
+use crate::domain::service_plugin::ServicePlugin;
 use crate::error::AppError;
 use crate::storage::users::User;
 use crate::web::csrf_form::{CsrfForm, ensure_csrf};
@@ -273,6 +277,373 @@ pub async fn save_build(
     };
     draft.buildpacks = buildpacks;
     save_draft(&session, &draft)?;
+    Ok(see_other("/apps/new/services"))
+}
+
+/// One option of the attach select: a service that already exists on the host.
+struct AvailableService {
+    plugin: ServicePlugin,
+    service: String,
+}
+
+/// One row of the current-selections table.
+struct SelectedServiceRow {
+    plugin_label: String,
+    service: String,
+    mode_label: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "apps/wizard/services.html")]
+struct ServicesPage<'a> {
+    email: &'a str,
+    csrf_token: &'a str,
+    flash: Option<&'a FlashMessage>,
+    active_step: &'static str,
+    error: Option<String>,
+    services_error: Option<String>,
+    list_errors: Vec<(String, String)>,
+    available_services: Vec<AvailableService>,
+    plugins: Vec<ServicePlugin>,
+    selected_rows: Vec<SelectedServiceRow>,
+}
+
+/// What the services step learned from the host: the installed datastore
+/// plugins, their existing service names, and where the reads failed.
+struct ServiceCatalog {
+    plugins: Vec<ServicePlugin>,
+    available_services: Vec<AvailableService>,
+    list_errors: Vec<(String, String)>,
+    services_error: Option<String>,
+}
+
+/// Capability-gated plugin inventory plus one `<plugin>:list` per installed
+/// plugin — names only, never the per-service `<plugin>:info` fetches the
+/// service pages use. A failed probe blanks the plugin/service lists (the
+/// notice never blocks "Next"); a failing single plugin list only degrades
+/// that plugin.
+async fn load_service_catalog(state: &AppState) -> ServiceCatalog {
+    let plugins: Vec<ServicePlugin> = match state.capabilities.ensure_loaded().await {
+        Ok(capabilities) => ServicePlugin::all()
+            .filter(|plugin| {
+                !matches!(
+                    capabilities.supports_plugin(plugin.as_str()),
+                    Support::PluginMissing { .. }
+                )
+            })
+            .collect(),
+        Err(err) => {
+            tracing::warn!(error = %err, "wizard services step: capability probe failed");
+            return ServiceCatalog {
+                plugins: Vec::new(),
+                available_services: Vec::new(),
+                list_errors: Vec::new(),
+                services_error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let mut available_services = Vec::new();
+    let mut list_errors = Vec::new();
+    for plugin in &plugins {
+        match service_names(&*state.dokku, *plugin).await {
+            Ok(names) => {
+                available_services.extend(names.into_iter().map(|service| AvailableService {
+                    plugin: *plugin,
+                    service,
+                }))
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    plugin = plugin.as_str(),
+                    "wizard services step: plugin list failed"
+                );
+                list_errors.push((plugin.as_str().to_owned(), err.to_string()));
+            }
+        }
+    }
+
+    ServiceCatalog {
+        plugins,
+        available_services,
+        list_errors,
+        services_error: None,
+    }
+}
+
+/// Renders the draft's accumulated services. A hand-edited draft can carry a
+/// plugin name outside the catalog; its raw string is shown rather than
+/// dropped, and `to_plan` rejects it later.
+fn selected_rows(draft: &AppWizardDraft) -> Vec<SelectedServiceRow> {
+    draft
+        .services
+        .iter()
+        .map(|entry| SelectedServiceRow {
+            plugin_label: ServicePlugin::try_from(entry.plugin.as_str())
+                .map(|plugin| plugin.display_name().to_owned())
+                .unwrap_or_else(|_| entry.plugin.clone()),
+            service: entry.service.clone(),
+            mode_label: if entry.create {
+                "create + link"
+            } else {
+                "attach"
+            },
+        })
+        .collect()
+}
+
+async fn render_services(
+    state: &AppState,
+    session: &Session,
+    user: &User,
+    csrf_token: &str,
+    draft: &AppWizardDraft,
+    error: Option<String>,
+) -> Result<HttpResponse, AppError> {
+    let catalog = load_service_catalog(state).await;
+    let flash = take_flash(session);
+    let page = ServicesPage {
+        email: &user.email,
+        csrf_token,
+        flash: flash.as_ref(),
+        active_step: "services",
+        error,
+        services_error: catalog.services_error,
+        list_errors: catalog.list_errors,
+        available_services: catalog.available_services,
+        plugins: catalog.plugins,
+        selected_rows: selected_rows(draft),
+    };
+    render(&page)
+}
+
+/// Parses a `"<plugin>:<service>"` select value. Splitting once on the colon
+/// keeps a smuggled second colon inside the service name, where the
+/// `ServiceName` validator rejects it.
+fn parse_service_key(raw: &str) -> Result<(ServicePlugin, ServiceName), String> {
+    let Some((plugin, service)) = raw.split_once(':') else {
+        return Err("Choose a service to attach.".to_owned());
+    };
+    let plugin = ServicePlugin::try_from(plugin.trim())
+        .map_err(|_| format!("Unknown service plugin '{plugin}'."))?;
+    let service = ServiceName::try_from(service.trim())
+        .map_err(|err| format!("Invalid service name: {err}"))?;
+    Ok((plugin, service))
+}
+
+/// Duplicate and size checks shared by the attach and create POSTs. The draft
+/// is the accumulated state, so the same plugin/service pair can only be
+/// selected once and the step is capped at `MAX_SERVICES`.
+fn check_selection(
+    draft: &AppWizardDraft,
+    plugin: ServicePlugin,
+    service: &str,
+) -> Result<(), String> {
+    if draft
+        .services
+        .iter()
+        .any(|entry| entry.plugin == plugin.as_str() && entry.service == service)
+    {
+        return Err(format!(
+            "The {} service '{service}' is already selected.",
+            plugin.display_name()
+        ));
+    }
+    if draft.services.len() >= MAX_SERVICES {
+        return Err(format!(
+            "Too many services; at most {MAX_SERVICES} are allowed."
+        ));
+    }
+    Ok(())
+}
+
+/// Validates an attach selection against the host: the plugin's list must be
+/// readable and must contain the service. No command is executed — the link
+/// happens in the final combined run.
+async fn plan_attach(
+    state: &AppState,
+    draft: &AppWizardDraft,
+    service_key: &str,
+) -> Result<WizardService, String> {
+    let (plugin, service) = parse_service_key(service_key)?;
+    let names = service_names(&*state.dokku, plugin).await.map_err(|err| {
+        tracing::warn!(
+            error = %err,
+            plugin = plugin.as_str(),
+            "wizard attach: plugin list failed"
+        );
+        format!("Could not read {} services; retry.", plugin.display_name())
+    })?;
+    if !names.iter().any(|name| name == service.as_str()) {
+        return Err(format!(
+            "No {} service named '{service}' exists.",
+            plugin.display_name()
+        ));
+    }
+    check_selection(draft, plugin, service.as_str())?;
+    Ok(WizardService {
+        plugin: plugin.as_str().to_owned(),
+        service: service.as_str().to_owned(),
+        create: false,
+    })
+}
+
+/// Validates a create selection: known plugin, valid name, the plugin must be
+/// installed, its list must be readable, and the name must be free. Service
+/// creation itself is deferred to the final combined run.
+async fn plan_create(
+    state: &AppState,
+    draft: &AppWizardDraft,
+    plugin: &str,
+    service: &str,
+) -> Result<WizardService, String> {
+    let plugin = ServicePlugin::try_from(plugin.trim())
+        .map_err(|_| format!("Unknown service plugin '{plugin}'."))?;
+    let service = ServiceName::try_from(service.trim())
+        .map_err(|err| format!("Invalid service name: {err}"))?;
+    let capabilities = state.capabilities.ensure_loaded().await.map_err(|err| {
+        tracing::warn!(error = %err, "wizard create: capability probe failed");
+        "Could not read the host's installed plugins; retry.".to_owned()
+    })?;
+    if matches!(
+        capabilities.supports_plugin(plugin.as_str()),
+        Support::PluginMissing { .. }
+    ) {
+        return Err(format!(
+            "The {} plugin is not installed on this host.",
+            plugin.display_name()
+        ));
+    }
+    let names = service_names(&*state.dokku, plugin).await.map_err(|err| {
+        tracing::warn!(
+            error = %err,
+            plugin = plugin.as_str(),
+            "wizard create: plugin list failed"
+        );
+        format!("Could not read {} services; retry.", plugin.display_name())
+    })?;
+    if names.iter().any(|name| name == service.as_str()) {
+        return Err(format!(
+            "A {} service named '{service}' already exists; attach it instead.",
+            plugin.display_name()
+        ));
+    }
+    check_selection(draft, plugin, service.as_str())?;
+    Ok(WizardService {
+        plugin: plugin.as_str().to_owned(),
+        service: service.as_str().to_owned(),
+        create: true,
+    })
+}
+
+pub async fn services_step(
+    state: web::Data<AppState>,
+    session: Session,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+    render_services(&state, &session, &user, &csrf_token, &draft, None).await
+}
+
+#[derive(Deserialize)]
+pub struct AttachServiceForm {
+    /// `"<plugin>:<service>"`
+    service_key: String,
+}
+
+pub async fn attach_service(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<AttachServiceForm>,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    match plan_attach(&state, &draft, &form.0.service_key).await {
+        Err(error) => {
+            render_services(&state, &session, &user, &csrf_token, &draft, Some(error)).await
+        }
+        Ok(entry) => {
+            let mut draft = draft;
+            draft.services.push(entry);
+            save_draft(&session, &draft)?;
+            Ok(see_other("/apps/new/services"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateServiceForm {
+    plugin: String,
+    service: String,
+}
+
+pub async fn create_service(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<CreateServiceForm>,
+) -> Result<HttpResponse, AppError> {
+    let (user, draft, csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    let CsrfForm(CreateServiceForm { plugin, service }) = form;
+    match plan_create(&state, &draft, &plugin, &service).await {
+        Err(error) => {
+            render_services(&state, &session, &user, &csrf_token, &draft, Some(error)).await
+        }
+        Ok(entry) => {
+            let mut draft = draft;
+            draft.services.push(entry);
+            save_draft(&session, &draft)?;
+            Ok(see_other("/apps/new/services"))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RemoveServiceForm {
+    index: usize,
+}
+
+pub async fn remove_service(
+    state: web::Data<AppState>,
+    session: Session,
+    form: CsrfForm<RemoveServiceForm>,
+) -> Result<HttpResponse, AppError> {
+    let (_user, mut draft, _csrf_token) = match step_preamble(&state, &session).await {
+        Ok(preamble) => preamble,
+        Err(Either::Left(response)) => return Ok(response),
+        Err(Either::Right(err)) => return Err(err),
+    };
+    if draft.name.is_none() {
+        return Ok(see_other("/apps/new"));
+    }
+
+    // An out-of-range index is a no-op: the row was already gone (another tab,
+    // or a stale page), and a redirect shows the current state.
+    if form.0.index < draft.services.len() {
+        draft.services.remove(form.0.index);
+        save_draft(&session, &draft)?;
+    }
     Ok(see_other("/apps/new/services"))
 }
 

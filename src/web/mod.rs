@@ -171,6 +171,19 @@ pub fn build_app(
                 .route(web::get().to(wizard::build_step))
                 .route(web::post().to(wizard::save_build)),
         )
+        .route("/apps/new/services", web::get().to(wizard::services_step))
+        .route(
+            "/apps/new/services/attach",
+            web::post().to(wizard::attach_service),
+        )
+        .route(
+            "/apps/new/services/create",
+            web::post().to(wizard::create_service),
+        )
+        .route(
+            "/apps/new/services/remove",
+            web::post().to(wizard::remove_service),
+        )
         .route("/apps", web::post().to(apps::create))
         .route("/apps/{name}", web::get().to(apps::show))
         .route("/apps/{name}/processes", web::get().to(apps::processes))
