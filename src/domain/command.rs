@@ -1186,6 +1186,20 @@ impl DokkuCommand {
         }
     }
 
+    /// Whether this command is a viewer-driven live log tail (as opposed to a
+    /// one-shot snapshot or an action-run stream). `RusshClient` uses this to
+    /// bound the SSH channel's lifetime: a lost browser must never leave a
+    /// `docker logs --follow` process running forever.
+    pub fn is_live_log_tail(&self) -> bool {
+        matches!(
+            self,
+            DokkuCommand::Logs { follow: true, .. }
+                | DokkuCommand::NginxAccessLogs { follow: true, .. }
+                | DokkuCommand::NginxErrorLogs { follow: true, .. }
+                | DokkuCommand::ServiceLogs { follow: true, .. }
+        )
+    }
+
     /// Capability gate for this command, consulted by the capability framework
     /// so handlers render explanatory states instead of failing at command
     /// time. Exhaustive: adding a variant forces a requirement here.
@@ -1967,6 +1981,60 @@ mod tests {
                 CommandTimeout::Default,
                 "{command:?} stays bounded"
             );
+        }
+    }
+
+    #[test]
+    fn only_follow_log_commands_are_live_tails() {
+        for command in [
+            DokkuCommand::Logs {
+                app: app("myapp"),
+                num_lines: 200,
+                follow: true,
+                process: None,
+            },
+            DokkuCommand::NginxAccessLogs {
+                app: app("myapp"),
+                follow: true,
+            },
+            DokkuCommand::NginxErrorLogs {
+                app: app("myapp"),
+                follow: true,
+            },
+            DokkuCommand::ServiceLogs {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                num_lines: 200,
+                follow: true,
+            },
+        ] {
+            assert!(command.is_live_log_tail(), "{command:?} follows logs");
+        }
+
+        for command in [
+            DokkuCommand::Logs {
+                app: app("myapp"),
+                num_lines: 200,
+                follow: false,
+                process: None,
+            },
+            DokkuCommand::NginxAccessLogs {
+                app: app("myapp"),
+                follow: false,
+            },
+            DokkuCommand::NginxErrorLogs {
+                app: app("myapp"),
+                follow: false,
+            },
+            DokkuCommand::ServiceLogs {
+                plugin: plugin("redis"),
+                service: service("cache"),
+                num_lines: 200,
+                follow: false,
+            },
+            DokkuCommand::PsRestart { app: app("myapp") },
+        ] {
+            assert!(!command.is_live_log_tail(), "{command:?} is bounded");
         }
     }
 

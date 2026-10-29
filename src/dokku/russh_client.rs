@@ -27,6 +27,8 @@ pub struct RusshClient {
     key_path: PathBuf,
     known_hosts_path: Option<PathBuf>,
     timeout: Duration,
+    /// Hard cap for viewer-driven live-log tails; `None` disables it.
+    log_stream_max: Option<Duration>,
     session: tokio::sync::Mutex<Option<Session>>,
 }
 
@@ -45,6 +47,8 @@ impl RusshClient {
             key_path: settings.dokku_ssh_key_path.clone(),
             known_hosts_path: settings.dokku_ssh_known_hosts_path.clone(),
             timeout: Duration::from_secs(settings.command_timeout_secs),
+            log_stream_max: (settings.log_stream_max_secs > 0)
+                .then(|| Duration::from_secs(settings.log_stream_max_secs)),
             session: tokio::sync::Mutex::new(None),
         }
     }
@@ -105,6 +109,7 @@ impl RusshClient {
         command: &str,
         sink: Option<tokio::sync::mpsc::Sender<String>>,
         stdin: Option<&str>,
+        max_stream: Option<Duration>,
     ) -> Result<DokkuOutput, DokkuError> {
         let session = self.session_handle().await?;
         let channel = match session.channel_open_session().await {
@@ -119,12 +124,13 @@ impl RusshClient {
             }
         };
 
-        let output = match Self::exec_on_channel(channel, command, sink, stdin).await {
+        let output = match Self::exec_on_channel(channel, command, sink, stdin, max_stream).await {
             Ok(output) => output,
             Err(err) => {
-                // A viewer-disconnect abort is expected and specific to the
-                // channel; everything else suggests the session went stale.
-                if !matches!(err, DokkuError::StreamClosed) {
+                // A viewer disconnect or a stream-lifetime cap is expected and
+                // specific to the channel; everything else suggests the
+                // session went stale.
+                if !matches!(err, DokkuError::StreamClosed | DokkuError::StreamExpired) {
                     self.invalidate_if_current(&session).await;
                 }
                 return Err(err);
@@ -138,6 +144,7 @@ impl RusshClient {
         command: &str,
         sink: Option<tokio::sync::mpsc::Sender<String>>,
         stdin: Option<&str>,
+        max_stream: Option<Duration>,
     ) -> Result<DokkuOutput, DokkuError> {
         channel
             .exec(true, command)
@@ -165,7 +172,21 @@ impl RusshClient {
             // closure is noticed — when the streaming viewer drops the
             // receiver, `is_closed()` flips and we abort this channel. The
             // shared session stays up for other commands.
+            //
+            // A viewer-driven tail also has a hard lifetime cap. This timer
+            // lives in the SSH task, not the HTTP response, so it still fires
+            // when the browser vanished without the server noticing (a
+            // blackholed TCP connection that never lets the body be dropped).
+            let started = std::time::Instant::now();
             loop {
+                if let Some(max) = max_stream.filter(|max| started.elapsed() >= *max) {
+                    tracing::info!(
+                        max_secs = max.as_secs(),
+                        "live log tail reached its maximum lifetime; closing channel"
+                    );
+                    let _ = channel.close().await;
+                    return Err(DokkuError::StreamExpired);
+                }
                 match tokio::time::timeout(CHANNEL_POLL, channel.wait()).await {
                     Ok(Some(msg)) => {
                         // The viewer may have dropped while this message was
@@ -261,7 +282,12 @@ impl RusshClient {
     ) -> Result<DokkuOutput, DokkuError> {
         let remote_command = shell_command(&command.argv());
         let timeout = self.command_timeout(command);
-        let fut = self.run_command(&remote_command, sink, stdin);
+        let max_stream = if command.is_live_log_tail() {
+            self.log_stream_max
+        } else {
+            None
+        };
+        let fut = self.run_command(&remote_command, sink, stdin, max_stream);
         match timeout {
             Some(secs) => match tokio::time::timeout(secs, fut).await {
                 Ok(result) => result,

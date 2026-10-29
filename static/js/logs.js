@@ -44,11 +44,19 @@
       log.textContent += event.data + "\n";
       log.scrollTop = log.scrollHeight;
     });
-    source.addEventListener("error", function (event) {
-      // A server-sent error (e.g. an unsupported source) is terminal — stop
-      // instead of letting EventSource reconnect forever.
+    // The server caps a live tail's lifetime and sends this before closing;
+    // reopen immediately so the panel keeps tailing without a visible gap.
+    source.addEventListener("end", function () {
       stopStream();
-      log.textContent += "Error: " + (event.data || "stream is not available") + "\n";
+      openStream();
+    });
+    source.addEventListener("error", function (event) {
+      // Only a server-sent error (which carries data) is terminal. Transport
+      // errors may be a transient disconnect, so leave those to the
+      // EventSource automatic reconnect instead of stopping the panel.
+      if (!event.data) return;
+      stopStream();
+      log.textContent += "Error: " + event.data + "\n";
       log.scrollTop = log.scrollHeight;
     });
     source.onerror = function () {
@@ -99,6 +107,10 @@
       openStream();
     });
   }
+
+  // Closing the tab or navigating away must release the server-side tail.
+  window.addEventListener("pagehide", stopStream);
+  window.addEventListener("beforeunload", stopStream);
 
   panel.classList.remove("hidden");
   openStream();

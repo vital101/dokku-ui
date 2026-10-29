@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use actix_session::Session;
 use actix_web::web::Bytes;
 use actix_web::{HttpResponse, web};
@@ -11,6 +13,11 @@ use crate::domain::command::DokkuCommand;
 use crate::error::AppError;
 use crate::web::fragments::current_user;
 use crate::web::state::AppState;
+
+/// How often an idle live stream writes a keepalive frame. This is what makes
+/// a dead browser connection visible to actix (and keeps proxies from timing
+/// out the stream) when the app is quiet and produces no log output.
+const SSE_KEEPALIVE: Duration = Duration::from_secs(10);
 
 #[derive(serde::Deserialize)]
 pub struct StreamQuery {
@@ -84,7 +91,13 @@ pub async fn log_stream(
         .content_type("text/event-stream")
         .insert_header(("Cache-Control", "no-store"))
         .insert_header(("X-Accel-Buffering", "no"))
-        .streaming(live_stream(rx, task)))
+        .streaming(live_stream(rx, task, stream_max_lifetime(&state))))
+}
+
+/// The configured live-tail lifetime; `0` disables the cap.
+pub(super) fn stream_max_lifetime(state: &AppState) -> Option<Duration> {
+    (state.settings.log_stream_max_secs > 0)
+        .then(|| Duration::from_secs(state.settings.log_stream_max_secs))
 }
 
 fn log_command(
@@ -108,31 +121,85 @@ fn log_command(
 struct StreamState {
     rx: mpsc::Receiver<String>,
     task: Option<tokio::task::JoinHandle<()>>,
-    last_emit: std::time::Instant,
+    last_emit: Instant,
+    started: Instant,
+    keepalive: Duration,
+    max_lifetime: Option<Duration>,
+    ending: bool,
 }
 
 /// Forwards output chunks as SSE `line` events; the stream ends when the
 /// command finishes. Dropping the returned stream drops `rx`, which makes the
 /// client's next send fail and aborts the SSH channel.
+///
+/// Idle streams emit a keepalive comment so dead viewers are noticed, and a
+/// live tail is capped at `max_lifetime`: it emits `event: end` (the browser
+/// reconnects) and then drops `rx` so the remote `docker logs --follow` is
+/// closed even when the tab was lost rather than closed.
 pub(super) fn live_stream(
     rx: mpsc::Receiver<String>,
     task: tokio::task::JoinHandle<()>,
+    max_lifetime: Option<Duration>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
+    live_stream_with(rx, task, SSE_KEEPALIVE, max_lifetime)
+}
+
+fn live_stream_with(
+    rx: mpsc::Receiver<String>,
+    task: tokio::task::JoinHandle<()>,
+    keepalive: Duration,
+    max_lifetime: Option<Duration>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> {
     unfold(
         StreamState {
             rx,
             task: Some(task),
-            last_emit: std::time::Instant::now(),
+            last_emit: Instant::now(),
+            started: Instant::now(),
+            keepalive,
+            max_lifetime,
+            ending: false,
         },
         |mut state| async move {
-            match state.rx.recv().await {
-                Some(chunk) => {
-                    state.last_emit = std::time::Instant::now();
-                    Some((Ok(line_events(&chunk)), state))
-                }
-                None => {
+            loop {
+                if state.ending {
                     state.task.take();
-                    None
+                    return None;
+                }
+                if state
+                    .max_lifetime
+                    .is_some_and(|max| state.started.elapsed() >= max)
+                {
+                    state.ending = true;
+                    return Some((
+                        Ok(Bytes::from_static(b"event: end\ndata: reconnect\n\n")),
+                        state,
+                    ));
+                }
+                let keepalive_wait = state.keepalive.saturating_sub(state.last_emit.elapsed());
+                let until_max = state
+                    .max_lifetime
+                    .map(|max| max.saturating_sub(state.started.elapsed()))
+                    .unwrap_or(Duration::MAX);
+                match tokio::time::timeout(keepalive_wait.min(until_max), state.rx.recv()).await {
+                    Ok(Some(chunk)) => {
+                        state.last_emit = Instant::now();
+                        return Some((Ok(line_events(&chunk)), state));
+                    }
+                    Ok(None) => {
+                        state.task.take();
+                        return None;
+                    }
+                    Err(_) => {
+                        state.last_emit = Instant::now();
+                        if state
+                            .max_lifetime
+                            .is_some_and(|max| state.started.elapsed() >= max)
+                        {
+                            continue;
+                        }
+                        return Some((Ok(Bytes::from_static(b": keepalive\n\n")), state));
+                    }
                 }
             }
         },
@@ -158,7 +225,68 @@ pub(super) fn line_events(chunk: &str) -> Bytes {
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
+
     use super::*;
+
+    #[tokio::test]
+    async fn idle_stream_emits_keepalives_then_ends_at_its_lifetime() {
+        let (tx, rx) = mpsc::channel::<String>(4);
+        let task = tokio::spawn(async move {
+            let _tx = tx;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let mut stream = Box::pin(live_stream_with(
+            rx,
+            task,
+            Duration::from_millis(10),
+            Some(Duration::from_millis(50)),
+        ));
+
+        let mut saw_keepalive = false;
+        let end = loop {
+            let item = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("stream makes progress")
+                .expect("stream yields")
+                .expect("no io error");
+            if item == Bytes::from_static(b": keepalive\n\n") {
+                saw_keepalive = true;
+                continue;
+            }
+            break item;
+        };
+        assert!(saw_keepalive, "idle streams heartbeat");
+        assert_eq!(end, Bytes::from_static(b"event: end\ndata: reconnect\n\n"));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("stream ends")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_closes_the_sink() {
+        let (tx, rx) = mpsc::channel::<String>(4);
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            tx.closed().await;
+            let _ = closed_tx.send(());
+        });
+        let stream = live_stream_with(
+            rx,
+            task,
+            Duration::from_secs(60),
+            Some(Duration::from_secs(60)),
+        );
+
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(1), closed_rx)
+            .await
+            .expect("the channel observes the drop")
+            .expect("sender task finished");
+    }
 
     #[test]
     fn line_events_frame_each_line() {

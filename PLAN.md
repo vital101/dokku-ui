@@ -272,6 +272,7 @@ All POSTs are `CsrfForm<T>` + auth-gated. Actions stay no-JS-safe: without JS th
 | `ACTIVITY_TTL_SECS` | 7776000 (90d) | — | audit run retention |
 | `RUN_LOG_TTL_SECS` | 604800 (7d) | — | run-line retention (metadata outlives it) |
 | `REAUTH_TTL_SECS` | 300 | — | reveal/edit re-auth window |
+| `LOG_STREAM_MAX_SECS` | 3600 (1h) | — | hard lifetime cap for a live-log tail (SSE + SSH channel); `0` disables the cap, heartbeats still run |
 | `IMAGE_TAGS_TTL_SECS` | 21600 (6h) | — | Docker Hub tag-cache TTL; `0` disables fetching |
 | `RUST_LOG` | `dokku_ui=debug,tower? n/a` | `info` | tracing filter |
 
@@ -524,6 +525,14 @@ Redis, MongoDB) plus app bind mounts.
   panel. `logs:failed <app>` feeds a lazy Deploy-tab card; the parser drops the
   dokku header/banners and keeps `remote:` error lines. An empty deploy renders
   "No failed deploy logs." — 0.38.4 prints no warning line for that case.
+- **Live-tail lifetime.** Live streams emit an SSE keepalive comment every 10s
+  (so a dead viewer is noticed even when the app is quiet and proxies do not
+  idle it out) and a hard cap (`LOG_STREAM_MAX_SECS`, default 1h): the SSE
+  generator sends `event: end` and the browser immediately reconnects, while
+  the SSH task independently closes the channel at the same deadline. The SSH
+  timer is the guarantee — it fires even if the HTTP response body is stuck
+  behind a blackholed TCP connection, so `docker logs --follow` can never be
+  left running by a lost viewer.
 - **Fixtures.** Captured from the live host on 2026-10-06
   (`git_report*`, `git_public_key_missing`, `git_sync`, `letsencrypt_*`,
   `certs_report*`, `logs_failed`); `logs_failed_populated.txt` is synthetic,

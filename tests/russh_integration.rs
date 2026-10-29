@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use dokku_ui::dokku::{DokkuClient, RusshClient};
+use dokku_ui::dokku::{DokkuClient, DokkuError, RusshClient};
 use dokku_ui::domain::command::DokkuCommand;
 use dokku_ui::domain::parse::{parse_apps_list, parse_ps_report};
 use dokku_ui::settings::Settings;
@@ -105,6 +105,13 @@ impl server::Handler for FakeDokku {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 session.exit_status_request(channel, 0)?;
             }
+            // A tail that outlives the test's 1s stream-lifetime cap. After the
+            // sleep, don't touch the channel: the client has already closed it.
+            "logs slowapp --tail --num 200" => {
+                session.data(channel, "line one\n")?;
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                return Ok(());
+            }
             "ps:restart myapp" => {
                 session.data(channel, "-----> restarting\n")?;
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -142,6 +149,15 @@ async fn client_with_timeout(
     key_path: &std::path::Path,
     timeout_secs: u64,
 ) -> RusshClient {
+    client_with_limits(addr, key_path, timeout_secs, 3_600).await
+}
+
+async fn client_with_limits(
+    addr: std::net::SocketAddr,
+    key_path: &std::path::Path,
+    timeout_secs: u64,
+    log_stream_max_secs: u64,
+) -> RusshClient {
     let mut vars = HashMap::new();
     vars.insert("DOKKU_HOST".to_owned(), addr.ip().to_string());
     vars.insert("DOKKU_SSH_PORT".to_owned(), addr.port().to_string());
@@ -151,6 +167,10 @@ async fn client_with_timeout(
         key_path.display().to_string(),
     );
     vars.insert("COMMAND_TIMEOUT_SECS".to_owned(), timeout_secs.to_string());
+    vars.insert(
+        "LOG_STREAM_MAX_SECS".to_owned(),
+        log_stream_max_secs.to_string(),
+    );
     let settings = Settings::from_map(&vars).expect("settings");
     RusshClient::new(&settings)
 }
@@ -388,6 +408,52 @@ async fn exec_streaming_forwards_output_as_it_arrives() {
         chunks.len() >= 2,
         "output forwarded in separate chunks: {chunks:?}"
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn live_log_tails_stop_at_the_lifetime_cap_and_keep_the_session() {
+    let (addr, server, connections) = spawn_fake_dokku().await;
+
+    let dir = TempDir::new().expect("temp dir");
+    let key_path = dir.path().join("id_ed25519");
+    std::fs::write(&key_path, CLIENT_KEY).expect("write key");
+
+    // A 1s lifetime cap on an open tail: the SSH-side timer must close the
+    // channel even though the sink is still listening.
+    let client = client_with_limits(addr, &key_path, 30, 1).await;
+    let app = dokku_ui::domain::AppName::try_from("slowapp").expect("app name");
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+    let started = std::time::Instant::now();
+    let err = client
+        .exec_streaming(
+            &DokkuCommand::Logs {
+                app,
+                num_lines: 200,
+                follow: true,
+                process: None,
+            },
+            tx,
+        )
+        .await
+        .expect_err("the tail is capped");
+    assert!(matches!(err, DokkuError::StreamExpired), "{err:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the cap fires promptly"
+    );
+
+    drop(rx);
+
+    // The channel close is channel-local: the shared session still works.
+    let output = client
+        .exec(&DokkuCommand::AppsList)
+        .await
+        .expect("session survives the capped tail");
+    assert_eq!(output.stdout, "=====> My Apps\nmyapp\napi.internal\n");
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
 
     server.abort();
 }

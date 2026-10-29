@@ -39,6 +39,10 @@ pub enum DokkuError {
     /// command's channel is aborted but the shared session is unharmed.
     #[error("stream closed by the viewer")]
     StreamClosed,
+    /// A live-log tail hit its maximum lifetime and the channel was closed.
+    /// The shared session is unharmed; the browser reconnects on a fresh tail.
+    #[error("stream exceeded its maximum lifetime")]
+    StreamExpired,
 }
 
 impl DokkuError {

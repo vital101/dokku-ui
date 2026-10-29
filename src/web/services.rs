@@ -1076,12 +1076,13 @@ pub async fn log_stream(
     let task = tokio::spawn(async move {
         let _ = client.exec_streaming(&command, tx).await;
     });
+    let max_lifetime = crate::web::logs::stream_max_lifetime(&state);
 
     Ok(HttpResponse::Ok()
         .content_type("text/event-stream")
         .insert_header(("Cache-Control", "no-store"))
         .insert_header(("X-Accel-Buffering", "no"))
-        .streaming(crate::web::logs::live_stream(rx, task)))
+        .streaming(crate::web::logs::live_stream(rx, task, max_lifetime)))
 }
 
 /// Live resource usage, fetched on demand by the Overview tab's Resources

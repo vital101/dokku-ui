@@ -39,6 +39,9 @@ pub struct Settings {
     /// How long a cached Docker Hub tag list stays fresh; `0` disables remote
     /// image-tag fetching.
     pub image_tags_ttl_secs: u64,
+    /// Maximum lifetime of a viewer-driven live-log tail; `0` disables the
+    /// cap (the SSE heartbeat still runs).
+    pub log_stream_max_secs: u64,
 }
 
 impl Settings {
@@ -172,6 +175,12 @@ impl Settings {
                 .map_err(|_| SettingsError::InvalidMetricsTtl(raw.clone()))?,
             None => 7_776_000,
         };
+        let log_stream_max_secs = match vars.get("LOG_STREAM_MAX_SECS") {
+            Some(raw) => raw
+                .parse::<u64>()
+                .map_err(|_| SettingsError::InvalidLogStreamMax(raw.clone()))?,
+            None => 3_600,
+        };
         Ok(Self {
             port,
             database_url,
@@ -195,6 +204,7 @@ impl Settings {
             proxy_auth_header,
             proxy_auth_default_role,
             image_tags_ttl_secs,
+            log_stream_max_secs,
         })
     }
 }
@@ -231,6 +241,8 @@ pub enum SettingsError {
     InvalidMetricsDuTtl(String),
     #[error("METRICS_TTL_SECS must be a valid u64, got `{0}`")]
     InvalidMetricsTtl(String),
+    #[error("LOG_STREAM_MAX_SECS must be a valid u64, got `{0}`")]
+    InvalidLogStreamMax(String),
 }
 
 #[cfg(test)]
@@ -281,6 +293,7 @@ mod tests {
         assert_eq!(settings.proxy_auth_default_role, Role::Viewer);
         assert!(!settings.proxy_auth_enabled());
         assert_eq!(settings.image_tags_ttl_secs, 21_600);
+        assert_eq!(settings.log_stream_max_secs, 3_600);
     }
 
     #[test]
@@ -317,6 +330,7 @@ mod tests {
             ("METRICS_REFRESH_SECS", "30"),
             ("METRICS_DU_EVERY_SECS", "1800"),
             ("METRICS_TTL_SECS", "86400"),
+            ("LOG_STREAM_MAX_SECS", "120"),
         ]))
         .expect("settings");
         assert_eq!(settings.dokku_host, "dokku.example.com");
@@ -349,6 +363,7 @@ mod tests {
         assert_eq!(settings.metrics_refresh_secs, 30);
         assert_eq!(settings.metrics_du_every_secs, 1_800);
         assert_eq!(settings.metrics_ttl_secs, 86_400);
+        assert_eq!(settings.log_stream_max_secs, 120);
     }
 
     #[test]
@@ -417,6 +432,20 @@ mod tests {
         let err =
             Settings::from_map(&map(&[("SNAPSHOT_REFRESH_SECS", "0")])).expect_err("zero refresh");
         assert!(matches!(err, SettingsError::InvalidSnapshotRefresh(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_log_stream_max() {
+        let err = Settings::from_map(&map(&[("LOG_STREAM_MAX_SECS", "forever")]))
+            .expect_err("invalid max");
+        assert!(matches!(err, SettingsError::InvalidLogStreamMax(_)));
+    }
+
+    #[test]
+    fn accepts_zero_log_stream_max_to_disable_the_cap() {
+        let settings =
+            Settings::from_map(&map(&[("LOG_STREAM_MAX_SECS", "0")])).expect("disabled cap");
+        assert_eq!(settings.log_stream_max_secs, 0);
     }
 
     #[test]

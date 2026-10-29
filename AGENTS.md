@@ -106,10 +106,16 @@ Why not bare `cargo test`: `static/css/app.css` is a generated, gitignored artif
   responses carry `Cache-Control: no-store`.
 - **Live logs** (`web::logs::log_stream`, `static/js/logs.js`): one SSE stream
   per viewer (`/apps/{name}/logs/stream?source=logs|nginx:access-logs|nginx:error-logs&tail=1`);
-  sources are capability-gated. When the browser disconnects, the stream drops
-  the mpsc receiver and `RusshClient`'s `is_closed()` poll aborts the SSH
-  channel with `DokkuError::StreamClosed` — **never** tear down the shared
-  session for a viewer disconnect (guarded in `run_command`).
+  sources are capability-gated. Idle streams emit an SSE keepalive every 10s,
+  and tails are hard-capped at `LOG_STREAM_MAX_SECS` (default 1h, `0` disables):
+  the SSE generator sends `event: end` (the browser reconnects) while the SSH
+  task independently closes the channel (`DokkuError::StreamExpired`) at the
+  same deadline — this timer must stay independent of HTTP-body polling so a
+  blackholed viewer can never leave `docker logs --follow` running. When the
+  browser disconnects, the stream drops the mpsc receiver and `RusshClient`'s
+  `is_closed()` poll aborts the SSH channel (`DokkuError::StreamClosed`) —
+  **never** tear down the shared session for a viewer disconnect (guarded in
+  `run_command`).
 
 ## P4 increments (landed — invariants to keep)
 
