@@ -497,6 +497,10 @@ async fn failed_logs_partial_renders_empty_and_populated_states() {
     let body = get_body(resp).await;
     assert!(body.contains("pre-receive hook declined"), "{body}");
     assert!(
+        body.contains("whitespace-pre-wrap break-all"),
+        "long log lines wrap inside the viewer: {body}"
+    );
+    assert!(
         !body.contains("failed deploy logs"),
         "the dokku banner is not rendered: {body}"
     );

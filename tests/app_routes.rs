@@ -1173,6 +1173,10 @@ async fn logs_shell_renders_lines_selector_and_panel() {
     let body = get_body(resp).await;
 
     assert!(body.contains("Lines"));
+    assert!(
+        body.contains(r#"class="flex-1 min-w-0""#),
+        "the content column can shrink so long log lines never widen the page: {body}"
+    );
     assert!(body.contains(r#"value="50""#), "shell carries line count");
     assert!(body.contains(r#"hx-get="/apps/alpha/partials/logs""#));
     assert!(body.contains(r#"hx-get="/apps/alpha/partials/logs?lines=50""#));
@@ -1277,6 +1281,10 @@ async fn logs_partial_defaults_to_200_lines_and_strips_ansi() {
     assert!(body.contains("listening on 0.0.0.0:8080"));
     assert!(body.contains("GET /healthz 200"));
     assert!(body.contains("ERROR something failed"));
+    assert!(
+        body.contains("whitespace-pre-wrap break-all"),
+        "long log lines wrap inside the viewer: {body}"
+    );
     assert!(!body.contains('\x1b'), "ANSI escapes stripped");
     assert!(client.calls().contains(&DokkuCommand::Logs {
         app: app_name("alpha"),

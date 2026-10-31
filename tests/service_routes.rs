@@ -465,6 +465,10 @@ async fn service_logs_partial_renders_lines() {
 
     assert!(body.contains("Ready to accept connections"));
     assert!(
+        body.contains("whitespace-pre-wrap break-all"),
+        "long log lines wrap inside the viewer: {body}"
+    );
+    assert!(
         !body.contains("<!doctype html>"),
         "fragment, not a full page"
     );
